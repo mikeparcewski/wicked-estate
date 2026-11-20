@@ -972,6 +972,8 @@ fn secret_exclusion_note(deleted: &[String]) -> Option<String> {
 #[cfg(test)]
 thread_local! {
     static SEMANTICS_DROPS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SEMANTICS_UNSUPPORTED: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     static SECRET_NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     // #422: (source-byte budget, file cap), overridden only by this thread's index tests.
     static TEST_EXTRACT_CHUNK_LIMITS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
@@ -1452,6 +1454,9 @@ fn restore_pending_semantics(
     store: &mut dyn GraphStoreMutExt,
     saved: Vec<(String, SymbolId, NodeSemantics)>,
 ) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+    if !store.can_restore_node_semantics() {
+        return Ok(saved);
+    }
     let mut pending = Vec::new();
     for (file, symbol, semantics) in saved {
         if store.get_node(&symbol)?.is_some() {
@@ -1475,6 +1480,14 @@ fn index_path_inner(
     }
     // Path prefix carried by every row this run writes. Also the delete-sweep's scope.
     let scope = repo.map(repo_scope::prefix);
+
+    if !store.can_restore_node_semantics() {
+        let note = "SEMANTICS-UNSUPPORTED: this store cannot restore semantic fields; symbols in \
+                    re-extracted files lose their description, requirement and validation";
+        eprintln!("{note}");
+        #[cfg(test)]
+        SEMANTICS_UNSUPPORTED.with(|notes| notes.borrow_mut().push(note.to_string()));
+    }
 
     // #515: re-apply fields a killed or failed earlier run left durably pending, before anything
     // else. Entries whose symbol exists are restored and cleared; the rest stay pending (and, for
@@ -4149,8 +4162,350 @@ pub fn open_async_store_readonly(path: &str) -> crate::Result<wicked_estate_stor
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wicked_estate_core::{GraphWrite, Language, Location, Node, NodeKind, Span, SymbolId};
+    use wicked_estate_core::{
+        Annotation, Change, Direction, EdgeSupport, GraphWrite, HistoricalEdge, Language, Location,
+        Node, NodeKind, Span, StoreCapabilities, Subgraph, SupportFact, SupportOwner,
+        SupportOwnerState, SupportReplacement, SymbolId, UnresolvedRef, ValidationClaim,
+    };
     use wicked_estate_store::{GraphStoreMutExt, MemStore};
+
+    // A downstream store compiled against the pre-#438 write surface.
+    struct UnsupportedSemanticsStore(MemStore);
+
+    impl GraphRead for UnsupportedSemanticsStore {
+        fn capabilities(&self) -> StoreCapabilities {
+            GraphRead::capabilities(&self.0)
+        }
+
+        fn get_node(&self, id: &SymbolId) -> Result<Option<Node>> {
+            GraphRead::get_node(&self.0, id)
+        }
+
+        fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
+            GraphRead::find_symbols(&self.0, query)
+        }
+
+        fn count_symbols(&self, query: &SymbolQuery) -> Result<usize> {
+            GraphRead::count_symbols(&self.0, query)
+        }
+
+        fn find_structural_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
+            GraphRead::find_structural_symbols(&self.0, query)
+        }
+
+        fn neighbors(&self, id: &SymbolId, dir: Direction) -> Result<Vec<Edge>> {
+            GraphRead::neighbors(&self.0, id, dir)
+        }
+
+        fn find_symbols_by_name_prefix(
+            &self,
+            prefix: &str,
+            limit: Option<usize>,
+        ) -> Result<Vec<Node>> {
+            GraphRead::find_symbols_by_name_prefix(&self.0, prefix, limit)
+        }
+
+        fn traverse(&self, start: &SymbolId, spec: &TraversalSpec) -> Result<Subgraph> {
+            GraphRead::traverse(&self.0, start, spec)
+        }
+
+        fn traverse_multi(&self, starts: &[SymbolId], spec: &TraversalSpec) -> Result<Subgraph> {
+            GraphRead::traverse_multi(&self.0, starts, spec)
+        }
+
+        fn all_nodes(&self) -> Result<Vec<Node>> {
+            GraphRead::all_nodes(&self.0)
+        }
+
+        fn all_edges(&self) -> Result<Vec<Edge>> {
+            GraphRead::all_edges(&self.0)
+        }
+
+        fn unresolved_refs_for_name(&self, name: &str) -> Result<Vec<UnresolvedRef>> {
+            GraphRead::unresolved_refs_for_name(&self.0, name)
+        }
+
+        fn file_digest(&self, file: &str) -> Result<Option<String>> {
+            GraphRead::file_digest(&self.0, file)
+        }
+
+        fn indexed_files(&self) -> Result<Vec<String>> {
+            GraphRead::indexed_files(&self.0)
+        }
+
+        fn file_git_sha(&self, file: &str) -> Result<Option<String>> {
+            GraphRead::file_git_sha(&self.0, file)
+        }
+
+        fn repo_info(&self) -> Result<Option<RepoInfo>> {
+            GraphRead::repo_info(&self.0)
+        }
+
+        fn edge_history(&self, file: &str) -> Result<Vec<HistoricalEdge>> {
+            GraphRead::edge_history(&self.0, file)
+        }
+
+        fn file_content(&self, file: &str) -> Result<Option<String>> {
+            GraphRead::file_content(&self.0, file)
+        }
+
+        fn file_call_refs(&self, file: &str) -> Result<Option<String>> {
+            GraphRead::file_call_refs(&self.0, file)
+        }
+
+        fn symbol_source(&self, node: &Node) -> Result<Option<String>> {
+            GraphRead::symbol_source(&self.0, node)
+        }
+
+        fn changes_since(&self, cursor: u64) -> Result<Vec<Change>> {
+            GraphRead::changes_since(&self.0, cursor)
+        }
+
+        fn node_semantics(&self, symbol: &SymbolId) -> Result<Option<NodeSemantics>> {
+            GraphRead::node_semantics(&self.0, symbol)
+        }
+
+        fn semantics_in_files(
+            &self,
+            files: &[&str],
+        ) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+            GraphRead::semantics_in_files(&self.0, files)
+        }
+
+        fn find_by_requirement(&self, requirement: &str) -> Result<Vec<Node>> {
+            GraphRead::find_by_requirement(&self.0, requirement)
+        }
+
+        fn annotations(&self, symbol: &SymbolId) -> Result<Vec<Annotation>> {
+            GraphRead::annotations(&self.0, symbol)
+        }
+
+        fn annotations_by_type(&self, ty: &str) -> Result<Vec<(SymbolId, Annotation)>> {
+            GraphRead::annotations_by_type(&self.0, ty)
+        }
+
+        fn annotations_stale_since(&self, cutoff: i64) -> Result<Vec<(SymbolId, Annotation)>> {
+            GraphRead::annotations_stale_since(&self.0, cutoff)
+        }
+
+        fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>> {
+            GraphRead::symbol_epoch(&self.0, id)
+        }
+
+        fn edge_supports(
+            &self,
+            source: &SymbolId,
+            target: &SymbolId,
+            kind: &EdgeKind,
+        ) -> Result<Vec<EdgeSupport>> {
+            GraphRead::edge_supports(&self.0, source, target, kind)
+        }
+
+        fn support_generation(&self, owner: &SupportOwner) -> Result<Option<u64>> {
+            GraphRead::support_generation(&self.0, owner)
+        }
+
+        fn support_owners(&self) -> Result<Vec<SupportOwnerState>> {
+            GraphRead::support_owners(&self.0)
+        }
+
+        fn stats(&self) -> Result<GraphStats> {
+            GraphRead::stats(&self.0)
+        }
+    }
+
+    impl GraphWrite for UnsupportedSemanticsStore {
+        fn begin_batch(&mut self) -> Result<()> {
+            GraphWrite::begin_batch(&mut self.0)
+        }
+
+        fn commit_batch(&mut self) -> Result<()> {
+            GraphWrite::commit_batch(&mut self.0)
+        }
+
+        fn upsert_nodes(&mut self, nodes: &[Node]) -> Result<()> {
+            GraphWrite::upsert_nodes(&mut self.0, nodes)
+        }
+
+        fn upsert_edges(&mut self, edges: &[Edge]) -> Result<()> {
+            GraphWrite::upsert_edges(&mut self.0, edges)
+        }
+
+        fn upsert_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<()> {
+            GraphWrite::upsert_unresolved_refs(&mut self.0, refs)
+        }
+
+        fn record_search_miss(
+            &mut self,
+            query: &str,
+            searched_at: i64,
+            session_id: Option<&str>,
+        ) -> Result<()> {
+            GraphWrite::record_search_miss(&mut self.0, query, searched_at, session_id)
+        }
+
+        fn remove_file(&mut self, file: &str) -> Result<()> {
+            GraphWrite::remove_file(&mut self.0, file)
+        }
+
+        fn set_file_digest(&mut self, file: &str, digest: &str) -> Result<()> {
+            GraphWrite::set_file_digest(&mut self.0, file, digest)
+        }
+
+        fn set_repo_info(&mut self, info: &RepoInfo) -> Result<()> {
+            GraphWrite::set_repo_info(&mut self.0, info)
+        }
+
+        fn set_file_content(&mut self, file: &str, text: &str) -> Result<()> {
+            GraphWrite::set_file_content(&mut self.0, file, text)
+        }
+
+        fn set_file_call_refs(&mut self, file: &str, refs_json: &str) -> Result<()> {
+            GraphWrite::set_file_call_refs(&mut self.0, file, refs_json)
+        }
+
+        fn prune_dangling_edges(&mut self) -> Result<usize> {
+            GraphWrite::prune_dangling_edges(&mut self.0)
+        }
+
+        fn log_change(&mut self, op: ChangeOp, target: &str) -> Result<()> {
+            GraphWrite::log_change(&mut self.0, op, target)
+        }
+
+        fn set_node_semantics(
+            &mut self,
+            symbol: &SymbolId,
+            description: Option<&str>,
+            requirement: Option<&str>,
+            validation: Option<&ValidationClaim>,
+        ) -> Result<()> {
+            GraphWrite::set_node_semantics(
+                &mut self.0,
+                symbol,
+                description,
+                requirement,
+                validation,
+            )
+        }
+
+        fn annotate(&mut self, symbol: &SymbolId, annotation: Annotation) -> Result<()> {
+            GraphWrite::annotate(&mut self.0, symbol, annotation)
+        }
+
+        fn delete_annotations(
+            &mut self,
+            symbol: &SymbolId,
+            ty: Option<&str>,
+            key: &str,
+        ) -> Result<usize> {
+            GraphWrite::delete_annotations(&mut self.0, symbol, ty, key)
+        }
+
+        fn replace_edge_supports(
+            &mut self,
+            owner: &SupportOwner,
+            generation: u64,
+            facts: &[SupportFact],
+        ) -> Result<SupportReplacement> {
+            GraphWrite::replace_edge_supports(&mut self.0, owner, generation, facts)
+        }
+    }
+
+    impl GraphStoreMutExt for UnsupportedSemanticsStore {
+        fn version_bump(&mut self) {
+            GraphStoreMutExt::version_bump(&mut self.0)
+        }
+
+        fn meta_set_key(&mut self, key: &str, value: &str) {
+            GraphStoreMutExt::meta_set_key(&mut self.0, key, value)
+        }
+
+        fn meta_get_key(&self, key: &str) -> Option<String> {
+            GraphStoreMutExt::meta_get_key(&self.0, key)
+        }
+
+        fn cache_put_key(&mut self, key: &str, value: &str) {
+            GraphStoreMutExt::cache_put_key(&mut self.0, key, value)
+        }
+
+        fn cache_get_key(&self, key: &str) -> Option<String> {
+            GraphStoreMutExt::cache_get_key(&self.0, key)
+        }
+
+        fn upsert_nodes_skip_fts(&mut self, nodes: &[Node]) -> Result<()> {
+            GraphStoreMutExt::upsert_nodes_skip_fts(&mut self.0, nodes)
+        }
+
+        fn bulk_rebuild_fts_for_files(&mut self, files: &[&str]) -> Result<()> {
+            GraphStoreMutExt::bulk_rebuild_fts_for_files(&mut self.0, files)
+        }
+
+        fn parked_relative_import_refs(&self) -> Result<Vec<UnresolvedRef>> {
+            GraphStoreMutExt::parked_relative_import_refs(&self.0)
+        }
+
+        fn parked_import_refs(&self, file_prefix: &str) -> Result<Vec<(String, String)>> {
+            GraphStoreMutExt::parked_import_refs(&self.0, file_prefix)
+        }
+
+        fn delete_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<usize> {
+            GraphStoreMutExt::delete_unresolved_refs(&mut self.0, refs)
+        }
+    }
+
+    /// #460: unsupported stores report one warning and each lost symbol without failing re-index.
+    #[test]
+    fn unsupported_semantics_store_reindex_reports_and_clears_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.rs");
+        std::fs::write(&file, "pub fn pay() {}\n").unwrap();
+        let mut store = UnsupportedSemanticsStore(MemStore::new());
+        index_path(&mut store, tmp.path()).unwrap();
+        let pay = store
+            .find_symbols(&SymbolQuery {
+                exact_name: Some("pay".into()),
+                ..Default::default()
+            })
+            .unwrap()[0]
+            .symbol
+            .clone();
+        store
+            .set_node_semantics(
+                &pay,
+                Some("pays"),
+                Some("REQ-460"),
+                Some(&ValidationClaim::new(true, "alice").unwrap()),
+            )
+            .unwrap();
+        assert!(store.node_semantics(&pay).unwrap().is_some());
+
+        SEMANTICS_UNSUPPORTED.with(|notes| notes.borrow_mut().clear());
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
+        std::fs::write(&file, "pub fn pay() { let _amount = 1; }\n").unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+
+        assert!(store.get_node(&pay).unwrap().is_some());
+        assert!(store.node_semantics(&pay).unwrap().is_none());
+        SEMANTICS_UNSUPPORTED.with(|notes| {
+            assert_eq!(
+                &*notes.borrow(),
+                &[
+                    "SEMANTICS-UNSUPPORTED: this store cannot restore semantic fields; symbols in \
+                   re-extracted files lose their description, requirement and validation"
+                ]
+            );
+        });
+        SEMANTICS_DROPS.with(|notes| {
+            assert_eq!(
+                &*notes.borrow(),
+                &["SEMANTICS-DROPPED: 1 symbol(s) in a.rs"]
+            );
+        });
+        assert_eq!(
+            store.meta_get_key(PENDING_SEMANTICS_KEY).as_deref(),
+            Some("")
+        );
+    }
 
     #[test]
     fn vb6_source_requires_a_version_header_on_the_first_nonblank_line() {
