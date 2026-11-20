@@ -3523,7 +3523,9 @@ mod tests {
             .iter()
             .find(|s| s["name"] == "memory.reflect")
             .expect("memory.reflect is advertised");
-        let desc = reflect["description"].as_str().expect("description is text");
+        let desc = reflect["description"]
+            .as_str()
+            .expect("description is text");
         assert!(
             !desc.contains("nothing is deleted"),
             "reflect deletes expired working memories: {desc}"
