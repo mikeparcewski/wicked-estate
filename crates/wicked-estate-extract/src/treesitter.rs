@@ -2620,16 +2620,18 @@ enum JsScopeRead {
 type JsDeclsByName = HashMap<String, std::rc::Rc<[usize]>>;
 
 #[derive(Default)]
-struct JsScopeMemo {
+struct JsScopeMemo<'t> {
     /// Shared, not copied, by every call that binds to them (wicked-estate#501).
     decls: HashMap<(usize, JsScopeRead), JsDeclsByName>,
     /// A function body's or static block's writes ([`js_var_writes`]), by scope node id.
     writes: HashMap<usize, HashMap<String, JsWrites>>,
+    /// A block-found binding's mutable scope, including `None`, read once per name (#505).
+    mutable_scopes: HashMap<(usize, String), Option<tree_sitter::Node<'t>>>,
 }
 
 /// The declaring starts for `name` that scope `n` contributes, read once per file.
 fn js_scope_starts(
-    memo: &mut JsScopeMemo,
+    memo: &mut JsScopeMemo<'_>,
     n: tree_sitter::Node,
     read: JsScopeRead,
     name: &str,
@@ -2658,7 +2660,7 @@ fn js_scope_starts(
 /// The write the call at `pos` sees in scope `n` ([`js_assignment_seen`]), the scope read once
 /// per file.
 fn js_scope_write_seen(
-    memo: &mut JsScopeMemo,
+    memo: &mut JsScopeMemo<'_>,
     n: tree_sitter::Node,
     name: &str,
     src: &[u8],
@@ -2741,12 +2743,12 @@ fn js_mutable_scope<'t>(
 /// (a nested `function Card() {}`, a local `const Card = () => …`); empty = a value binding (a
 /// parameter, a prop). `None` = a module-level binding (an import, a top-level declaration) or an
 /// unbound name: the call keeps ordinary name resolution.
-fn js_local_binding(
-    node: tree_sitter::Node,
+fn js_local_binding<'t>(
+    node: tree_sitter::Node<'t>,
     name: &str,
     src: &[u8],
     var_names: &HashSet<String>,
-    memo: &mut JsScopeMemo,
+    memo: &mut JsScopeMemo<'t>,
 ) -> Option<std::rc::Rc<[usize]>> {
     use std::rc::Rc;
     let pos = node.start_byte();
@@ -2835,7 +2837,10 @@ fn js_local_binding(
                 let scope = if crossed {
                     None
                 } else {
-                    js_mutable_scope(n, &starts)
+                    *memo
+                        .mutable_scopes
+                        .entry((n.id(), name.to_owned()))
+                        .or_insert_with(|| js_mutable_scope(n, &starts))
                 };
                 if let Some(scope) = scope {
                     return Some(js_scope_write_seen(memo, scope, name, src, node, false));
