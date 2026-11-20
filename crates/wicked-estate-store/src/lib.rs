@@ -688,10 +688,14 @@ impl GraphWrite for MemStore {
         self.file_call_refs.remove(file);
         // NOTE: do NOT remove from self.content — content is content-addressed and may be
         // retained for history; orphans are pruned in compact().
-        // Remove embeddings for all removed symbols (kept Import nodes keep theirs — D5).
+        // Remove embeddings for all removed symbols (kept Import nodes keep theirs — D5), and the
+        // semantics of every symbol left with no node, so a re-added id starts clean (#461).
         for sym in &file_symbols {
             if !kept_syms.contains(sym) {
                 self.embeddings.remove(sym);
+            }
+            if !self.nodes.contains_key(sym) {
+                self.semantics.remove(sym);
             }
         }
         Ok(())
@@ -826,7 +830,11 @@ impl GraphWrite for MemStore {
                 .map(|c| c.into_owned());
             sem.requirement = wicked_estate_core::redact::scrub_opt(sem.requirement.as_deref())
                 .map(|c| c.into_owned());
-            self.semantics.insert(symbol.clone(), sem);
+            if sem == NodeSemantics::default() {
+                self.semantics.remove(symbol);
+            } else {
+                self.semantics.insert(symbol.clone(), sem);
+            }
         }
         Ok(())
     }
@@ -1174,13 +1182,7 @@ impl GraphRead for MemStore {
     }
 
     fn node_semantics(&self, symbol: &SymbolId) -> Result<Option<NodeSemantics>> {
-        // Semantics belong to a live node: SqliteStore reads them through a join on `nodes`, so a
-        // symbol whose node was removed reads None. MemStore mirrors that by gating on node
-        // presence — the stored entry is left in place (the orphan-on-re-add case is a tracked
-        // follow-up, #438), it is simply not visible while no node homes the symbol.
-        if !self.nodes.contains_key(symbol) {
-            return Ok(None);
-        }
+        // Entries are removed with their nodes.
         Ok(self.semantics.get(symbol).cloned())
     }
 
