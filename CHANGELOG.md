@@ -9,9 +9,6 @@
 
 ### Fixed
 
-- **`memory.reflect` description no longer says nothing is deleted (wicked-estate#395).** Reflect first deletes
-  working memories older than 24 h (a summary built over one is removed, then rebuilt from its surviving durable
-  sources), then distils, promotes and archives. The tool description now says so.
 - **Full indexing bounds extraction memory (wicked-estate#422).** Changed files are extracted and
   written in chunks of at most 16 MiB of source bytes or 512 files (an oversized file runs alone),
   releasing each chunk's extractions and redacted text before parsing the next. Removal, extraction,
