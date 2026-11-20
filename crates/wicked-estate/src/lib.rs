@@ -1304,6 +1304,48 @@ fn restore_semantics(
     Ok(dropped)
 }
 
+/// Meta key holding the durable #438 snapshot of semantic fields whose symbol is not (yet)
+/// re-created (#515). A JSON array of `(file, symbol, semantics)`; written in the same batch that
+/// removes the file's rows and cleared in the batch that restores or drops the entries, so a
+/// killed or failed run never loses the fields. Empty/absent when nothing is pending.
+const PENDING_SEMANTICS_KEY: &str = "index.pending_semantics";
+
+type PendingSemantics = Vec<(String, SymbolId, NodeSemantics)>;
+
+fn pending_semantics_load(store: &dyn GraphStoreMutExt) -> PendingSemantics {
+    let Some(raw) = store
+        .meta_get_key(PENDING_SEMANTICS_KEY)
+        .filter(|v| !v.is_empty())
+    else {
+        return Vec::new();
+    };
+    serde_json::from_str(&raw).unwrap_or_else(|e| {
+        eprintln!("PENDING-SEMANTICS-UNREADABLE: {e}; leftover fields from an interrupted index cannot be restored");
+        Vec::new()
+    })
+}
+
+/// Persist `pending` (this run's entries) plus `others` (entries of other repo labels, untouched).
+fn pending_semantics_save(
+    store: &mut dyn GraphStoreMutExt,
+    others: &PendingSemantics,
+    pending: &PendingSemantics,
+) -> Result<()> {
+    let all: Vec<&(String, SymbolId, NodeSemantics)> =
+        others.iter().chain(pending.iter()).collect();
+    let json = if all.is_empty() {
+        String::new()
+    } else {
+        serde_json::to_string(&all)
+            .map_err(|e| wicked_estate_core::Error::Invalid(e.to_string()))?
+    };
+    // Nothing pending and nothing stored: leave the meta table untouched.
+    if json.is_empty() && store.meta_get_key(PENDING_SEMANTICS_KEY).is_none() {
+        return Ok(());
+    }
+    store.meta_put(PENDING_SEMANTICS_KEY, &json)
+}
+
 /// Restore available symbols inside a chunk's write batch, keeping missing ids pending until a
 /// later chunk or resolution re-creates them (#515). Callers enqueue a file's saved fields only
 /// once its old contributions have been removed, so a future chunk cannot erase an early restore.
@@ -1334,6 +1376,28 @@ fn index_path_inner(
     }
     // Path prefix carried by every row this run writes. Also the delete-sweep's scope.
     let scope = repo.map(repo_scope::prefix);
+
+    // #515: re-apply fields a killed or failed earlier run left durably pending, before anything
+    // else. Entries whose symbol exists are restored and cleared; the rest stay pending (and, for
+    // this repo's label, are counted dropped when this run's final batch commits).
+    let (mut pending_semantics, other_pending_semantics): (PendingSemantics, PendingSemantics) = {
+        let leftover = pending_semantics_load(store);
+        if leftover.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            store.begin_batch()?;
+            let leftover = restore_pending_semantics(store, leftover)?;
+            let (mine, others): (PendingSemantics, PendingSemantics) =
+                leftover.into_iter().partition(|(file, _, _)| {
+                    scope
+                        .as_deref()
+                        .is_none_or(|prefix| file.starts_with(prefix))
+                });
+            pending_semantics_save(store, &others, &mine)?;
+            store.commit_batch()?;
+            (mine, others)
+        }
+    };
 
     // W7: capture git provenance once per index run. Non-fatal: git absent / not a repo →
     // all-None RepoInfo, which is a valid default. Collected BEFORE the guard runs — the remote
@@ -2069,7 +2133,6 @@ fn index_path_inner(
             .or_default()
             .push(entry);
     }
-    let mut pending_semantics = Vec::new();
     // Deleted files get their own short batch, committed before extraction begins.
     if !deleted.is_empty() {
         store.begin_batch()?;
@@ -2079,6 +2142,7 @@ fn index_path_inner(
             // W7.1: log the removal so subscribers see the deletion delta.
             let _ = store.log_change(ChangeOp::Remove, path);
         }
+        pending_semantics_save(store, &other_pending_semantics, &pending_semantics)?;
         store.commit_batch()?;
     }
     let mut total_symbols = 0usize;
@@ -2305,7 +2369,10 @@ fn index_path_inner(
         store.bulk_rebuild_fts_for_files(
             &chunk.iter().map(|fw| fw.rel.as_str()).collect::<Vec<_>>(),
         )?;
+        // The snapshot is made durable in the batch that removed the rows, then shrinks in the
+        // batch that restores entries (#515).
         pending_semantics = restore_pending_semantics(store, pending_semantics)?;
+        pending_semantics_save(store, &other_pending_semantics, &pending_semantics)?;
         store.commit_batch()?;
         // The chunk's extractions and source text are dropped before extracting the next one.
         chunk_start = chunk_end;
@@ -2442,6 +2509,7 @@ fn index_path_inner(
     store.upsert_edges(&estate)?;
     store.upsert_unresolved_refs(&resolution.unresolved)?;
     let dropped = restore_semantics(store, pending_semantics)?;
+    pending_semantics_save(store, &other_pending_semantics, &Vec::new())?;
     store.commit_batch()?;
     // Report the drops only after the batch durably committed, so the line never describes a loss
     // a rollback undid.
@@ -6334,6 +6402,95 @@ mod semantics_survive_reindex_tests {
                 Some(source_digest(&bytes, None))
             );
         }
+    }
+
+    /// #515: a symbol whose old rows a committed chunk removed, and that is not re-created
+    /// until a later run, keeps its fields durably. The run dies in chunk two; a fresh run that
+    /// re-creates the symbol restores them. Fails if the pending snapshot lives only in memory.
+    #[test]
+    fn sqlite_pending_fields_survive_a_killed_run() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_INDEX_WRITE_HOOK.with(|hook| *hook.borrow_mut() = None);
+                TEST_EXTRACT_CHUNK_LIMITS.with(|limits| limits.set(None));
+            }
+        }
+        let src = tempfile::tempdir().unwrap();
+        // `changed` has no stable order, so every file carries an annotated symbol that the
+        // edit removes: whichever file chunk one takes loses one.
+        let full = |i: usize| format!("pub fn pay{i}() {{}}\npub fn extra{i}() {{}}\n");
+        for i in 0..4 {
+            std::fs::write(src.path().join(format!("file{i}.rs")), full(i)).unwrap();
+        }
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("graph.db");
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        let symbol = sym_of(&store, "kept_elsewhere");
+        let fields = annotate_with_claim(&mut store, &symbol);
+        // The symbol vanishes from file0 and every file changes, so file0's chunk commits the
+        // removal and nothing re-creates the symbol in this run.
+        std::fs::write(
+            src.path().join("file0.rs"),
+            "pub fn pay0() { let _x = 0; }\n",
+        )
+        .unwrap();
+        for i in 1..4 {
+            std::fs::write(
+                src.path().join(format!("file{i}.rs")),
+                format!("pub fn pay{i}() {{ let _x = {i}; }}\n"),
+            )
+            .unwrap();
+        }
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
+        let reset = Reset;
+        TEST_EXTRACT_CHUNK_LIMITS.with(|limits| limits.set(Some((usize::MAX, 1))));
+        let hook_db = dbpath.clone();
+        let mut calls = 0;
+        TEST_INDEX_WRITE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                calls += 1;
+                if calls == 2 {
+                    let side = rusqlite::Connection::open(&hook_db).unwrap();
+                    side.busy_timeout(std::time::Duration::from_millis(200))
+                        .unwrap();
+                    side.execute_batch(
+                        "CREATE TRIGGER we515_poison2 BEFORE INSERT ON nodes \
+                         BEGIN SELECT RAISE(ABORT, 'we515 injected write failure'); END;",
+                    )
+                    .unwrap();
+                }
+            }));
+        });
+        index_path(&mut store, src.path()).expect_err("chunk two must fail");
+        drop(reset);
+        assert!(
+            store.get_node(&symbol).unwrap().is_none(),
+            "chunk one removed it"
+        );
+
+        let side = rusqlite::Connection::open(&dbpath).unwrap();
+        side.execute_batch("DROP TRIGGER we515_poison2;").unwrap();
+        drop(side);
+        // A fresh store handle stands for the restarted process.
+        drop(store);
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+        std::fs::write(src.path().join("file0.rs"), both).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        assert_eq!(
+            store.node_semantics(&symbol).unwrap().as_ref(),
+            Some(&fields)
+        );
+        SEMANTICS_DROPS.with(|notes| assert!(notes.borrow().is_empty()));
+        assert_eq!(
+            store
+                .meta_get(PENDING_SEMANTICS_KEY)
+                .unwrap()
+                .unwrap_or_default(),
+            "",
+            "the durable snapshot is cleared once restored"
+        );
     }
 
     /// #438 item 2: remove + upsert + restore share one chunk batch, and a write failure mid-re-index
