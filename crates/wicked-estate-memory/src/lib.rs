@@ -98,6 +98,11 @@ pub struct MemoryEngine {
 /// Current memory-store schema version (NFR-8 — forward migration tracked via the `meta` table).
 pub const MEM_SCHEMA_VERSION: i64 = 1;
 
+/// Minimum cosine similarity for vector recall candidates, before RRF fusion. Tuned for
+/// bge-small-en-v1.5, where unrelated text scores about 0.4–0.5. Lexical and graph-seed matches
+/// are admitted independently of this semantic floor.
+pub const SEMANTIC_MIN_SIMILARITY: f32 = 0.55;
+
 /// The embedder a fresh engine uses, selected at compile time by feature:
 /// `semantic-bge` → estate `FastEmbedder` (ONNX/BGE-384, highest quality), else
 /// `semantic` → estate `Model2VecEmbedder` (static, no ONNX), else the dependency-free `HashEmbedder`.
@@ -551,20 +556,20 @@ impl MemoryEngine {
     }
 
     /// **Un-budget-capped ranked recall (T-Y-RANKED).** Return the top-`k` recall candidates in
-    /// final-rerank-score order **WITHOUT** the [`budget_pack`] token-budget assembly — no token
+    /// recall order **WITHOUT** the [`budget_pack`] token-budget assembly — no token
     /// budget, no ≥1-Working-tier eviction. This is the fair `recall@k` comparand for the
     /// memory-≥-brain head-to-head (`design-track-baseline-v2.md` §3.4 Y-BLOCK-1, §7.1 "`recall_ranked`
     /// (no budget, no Working-eviction) frozen"): the production [`recall`]/[`recall_mode`] path runs
     /// `budget_pack`, which returns only 0–2 units at a small token budget and so caps `recall@10`
     /// near `recall@1` (the rigged-gate trap, `BUILD-SPEC.md` §7). `recall_ranked` shares the
     /// **identical** candidate-generation + rerank seam ([`Self::ranked_candidates`]) the production
-    /// recall uses — it differs ONLY in the final assembly (top-`k` by `final_score` vs token-budgeted
+    /// recall uses — it differs ONLY in the final assembly (top-`k` by recall order vs token-budgeted
     /// pack), so it cannot drift from production recall quality.
     ///
     /// `k` is the number of ranked units to return (e.g. 10 for `recall_any@10`). Candidates are
-    /// sorted by `final_score(alpha)` descending; the tie-break beyond that is the harness scorer's
-    /// (`recall_scorer.py` re-sorts `(score desc, unit_id asc)`), so this returns scored
-    /// `(id, content, score)` triples and the harness owns the deterministic cut.
+    /// sorted by [`Candidate::rank_cmp`]: Working follows every non-Working candidate, then
+    /// `final_score(alpha)` descends within those groups. Returned scores retain their numeric
+    /// meaning; consumers must preserve this order to retain the Working-tier priority.
     pub fn recall_ranked(
         &self,
         query: &str,
@@ -576,12 +581,8 @@ impl MemoryEngine {
     ) -> wicked_estate_core::Result<Vec<Recalled>> {
         let mut cands =
             self.ranked_candidates(query, scope, seeds, now, mode, &Facets::default())?;
-        // Final-rerank-score order, descending — NO budget_pack (no token cap, no Working eviction).
-        cands.sort_by(|a, b| {
-            b.final_score(self.alpha)
-                .partial_cmp(&a.final_score(self.alpha))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Shared recall order, with no token cap or Working eviction.
+        cands.sort_by(|a, b| a.rank_cmp(b, self.alpha));
         Ok(cands
             .into_iter()
             .take(k)
@@ -642,14 +643,15 @@ impl MemoryEngine {
         //    Gated on the embedder carrying real semantic signal: the HashEmbedder fallback is a
         //    lexical hash, and fusing its neighbours as a peer retriever injects rank noise that
         //    degrades every query class (S3 parity bench, keyword-only vs hash-fused). An EXPLICIT
-        //    `VectorOnly` request is an ablation and stays honored verbatim.
+        //    `VectorOnly` request enables this leg even for a hash embedder; the cosine floor
+        //    still applies, before RRF discards the raw similarity.
         let sem_ids: Vec<SymbolId> = if mode.uses_vector()
             && (self.embedder.is_semantic() || matches!(mode, RecallMode::VectorOnly))
         {
             let qvec = self.embedder.embed(query);
             let mut v = Vec::new();
-            for (id, _) in self.store.nearest(&qvec, self.k)? {
-                if self.store.get_node(&id)?.is_some() {
+            for (id, cosine) in self.store.nearest(&qvec, self.k)? {
+                if cosine >= SEMANTIC_MIN_SIMILARITY && self.store.get_node(&id)?.is_some() {
                     v.push(id);
                 }
             }
@@ -970,6 +972,125 @@ mod tests {
         assert!(
             !run(false, RecallMode::VectorOnly).is_empty(),
             "explicit VectorOnly ablation must stay honored even for a non-semantic embedder"
+        );
+    }
+
+    #[test]
+    fn recall_semantic_embedder_no_match_returns_empty() {
+        struct OrthogonalEmbedder;
+        impl Embedder for OrthogonalEmbedder {
+            fn id(&self) -> &str {
+                "orthogonal:test"
+            }
+            fn embed(&self, text: &str) -> Vec<f32> {
+                if text == "unrelated query" {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            }
+            fn dim(&self) -> usize {
+                2
+            }
+            fn is_semantic(&self) -> bool {
+                true
+            }
+        }
+
+        let mut eng = MemoryEngine::in_memory()
+            .unwrap()
+            .with_embedder(Box::new(OrthogonalEmbedder));
+        let scope = Scope::root();
+        let now = 1_000;
+        eng.capture(&Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            scope.clone(),
+            "zebra quagga",
+            now,
+        ))
+        .unwrap();
+
+        let out = eng
+            .recall(
+                "unrelated query",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                500,
+                now,
+            )
+            .unwrap();
+        assert!(out.is_empty(), "a cosine-zero hit is not a semantic match");
+        let ranked = eng
+            .recall_ranked(
+                "unrelated query",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                10,
+                now,
+                RecallMode::Hybrid,
+            )
+            .unwrap();
+        assert!(
+            ranked.is_empty(),
+            "ranked recall must use the same relevance floor"
+        );
+    }
+
+    #[test]
+    fn recall_working_row_never_outranks_semantic_match() {
+        let mut eng = MemoryEngine::in_memory()
+            .unwrap()
+            .with_embedder(Box::new(HashEmbedder::new(256)));
+        let scope = Scope::root();
+        let now = 1_000;
+        let working = Memory::new(
+            MemKind::Working,
+            Tier::Working,
+            scope.clone(),
+            "Session goal (turn 3): investigate billing and database",
+            now,
+        );
+        let semantic = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            scope.clone(),
+            "billing uses Stripe",
+            now - 60,
+        );
+        eng.capture(&working).unwrap();
+        eng.capture(&semantic).unwrap();
+
+        let out = eng
+            .recall(
+                "billing database",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                500,
+                now,
+            )
+            .unwrap();
+        let ranked = eng
+            .recall_ranked(
+                "billing database",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                10,
+                now,
+                RecallMode::Hybrid,
+            )
+            .unwrap();
+        for hits in [&out, &ranked] {
+            let ids: Vec<_> = hits.iter().map(|hit| hit.id.clone()).collect();
+            assert_eq!(
+                ids,
+                [semantic.symbol(), working.symbol()],
+                "both recall paths must put the semantic match first and retain matching Working rows"
+            );
+        }
+        assert!(
+            out[1].score > out[0].score,
+            "tier ordering must override the stronger Working score"
         );
     }
 

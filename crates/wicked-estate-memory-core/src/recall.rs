@@ -51,22 +51,31 @@ impl Candidate {
             * (1.0 + alpha * self.salience)
             * (1.0 + FACET_SPECIFICITY_BETA * self.facet_specificity as f64)
     }
+
+    /// Recall order: Working follows every non-Working candidate, then higher final scores
+    /// come first within those groups. Returns `Less` when `self` should be recalled first.
+    pub fn rank_cmp(&self, other: &Self, alpha: f64) -> std::cmp::Ordering {
+        (self.tier == Tier::Working)
+            .cmp(&(other.tier == Tier::Working))
+            .then_with(|| {
+                other
+                    .final_score(alpha)
+                    .partial_cmp(&self.final_score(alpha))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
     /// Rough token cost (≈ chars/4) for budgeting.
     pub fn token_cost(&self) -> usize {
         (self.content.len() / 4).max(1)
     }
 }
 
-/// Greedy token-budgeted assembly (DESIGN §9 step 5). Adds by descending `final_score` until
-/// `token_budget` is exhausted; over-budget prune order = lowest-first (a natural consequence of
-/// greedy-by-score). No tier gets a reserved slot: a Working item is packed only on its score.
-/// Returns the selected candidates in final-score order.
+/// Greedy token-budgeted assembly (DESIGN §9 step 5). Adds in [`Candidate::rank_cmp`] order
+/// while budget remains, skipping candidates that do not fit. Working items follow all
+/// non-Working items and receive no reserved slot. Returns the selected candidates in recall order.
 pub fn budget_pack(mut cands: Vec<Candidate>, token_budget: usize, alpha: f64) -> Vec<Candidate> {
-    cands.sort_by(|a, b| {
-        b.final_score(alpha)
-            .partial_cmp(&a.final_score(alpha))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    cands.sort_by(|a, b| a.rank_cmp(b, alpha));
 
     let mut out: Vec<Candidate> = Vec::new();
     let mut used = 0usize;
@@ -94,6 +103,45 @@ mod tests {
             salience: 0.5,
             facet_specificity: 0,
         }
+    }
+
+    #[test]
+    fn rank_cmp_places_working_after_every_non_working_tier() {
+        use std::cmp::Ordering;
+
+        let working = cand("working", Tier::Working, 1.0, 40);
+        for tier in [
+            Tier::Episodic,
+            Tier::Semantic,
+            Tier::Procedural,
+            Tier::Archival,
+        ] {
+            let other = cand("other", tier, 0.01, 40);
+            assert!(working.final_score(0.5) > other.final_score(0.5));
+            assert_eq!(other.rank_cmp(&working, 0.5), Ordering::Less);
+            assert_eq!(working.rank_cmp(&other, 0.5), Ordering::Greater);
+        }
+
+        let weak_working = cand("weak", Tier::Working, 0.1, 40);
+        assert_eq!(working.rank_cmp(&weak_working, 0.5), Ordering::Less);
+        let semantic = cand("semantic", Tier::Semantic, 0.8, 40);
+        let episodic = cand("episodic", Tier::Episodic, 0.9, 40);
+        assert_eq!(episodic.rank_cmp(&semantic, 0.5), Ordering::Less);
+        assert_eq!(semantic.rank_cmp(&semantic, 0.5), Ordering::Equal);
+    }
+
+    #[test]
+    fn budget_pack_prioritizes_non_working_before_stronger_working() {
+        let cands = vec![
+            cand("working", Tier::Working, 1.0, 40),
+            cand("semantic", Tier::Semantic, 0.01, 40),
+        ];
+        let all = budget_pack(cands.clone(), 20, 0.5);
+        let ids: Vec<_> = all.iter().map(|c| c.id.0.as_str()).collect();
+        assert_eq!(ids, ["semantic", "working"]);
+        let tight = budget_pack(cands, 10, 0.5);
+        assert_eq!(tight.len(), 1);
+        assert_eq!(tight[0].id.0, "semantic");
     }
 
     #[test]
