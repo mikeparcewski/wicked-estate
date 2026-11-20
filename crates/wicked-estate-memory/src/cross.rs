@@ -148,6 +148,9 @@ impl GraphRead for OverlayMemStore {
     fn node_semantics(&self, symbol: &SymbolId) -> Result<Option<NodeSemantics>> {
         self.overlay().node_semantics(symbol)
     }
+    fn semantics_in_files(&self, files: &[&str]) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+        self.home.semantics_in_files(files)
+    }
     fn find_by_requirement(&self, requirement: &str) -> Result<Vec<Node>> {
         self.overlay().find_by_requirement(requirement)
     }
@@ -229,6 +232,9 @@ impl GraphWrite for OverlayMemStore {
     ) -> Result<()> {
         self.home
             .set_node_semantics(symbol, description, requirement, validation)
+    }
+    fn can_restore_node_semantics(&self) -> bool {
+        self.home.can_restore_node_semantics()
     }
     fn restore_node_semantics(
         &mut self,

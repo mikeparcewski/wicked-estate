@@ -537,6 +537,9 @@ pub fn symbol_query_name_prefix<S: GraphStore>(store: &mut S) {
 
 /// Run the full contract against a fresh, empty store. Panics on the first violation.
 pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
+    // #460: every in-repo backend explicitly supports restoring all five semantic fields.
+    assert!(store.can_restore_node_semantics());
+
     // Fixture: a → b → c  (a calls b, b calls c).
     let nodes = [func_node("a"), func_node("b"), func_node("c")];
     let edges = [calls("a", "b"), calls("b", "c")];
@@ -1303,6 +1306,15 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     assert_eq!(snapshot.len(), 1, "one annotated node in src/sem_keep.rs");
     assert_eq!(snapshot[0].0, "src/sem_keep.rs");
     assert_eq!(snapshot[0].1, sym("sem_keep"));
+    // #472: repeating a file must not duplicate its semantic snapshot rows.
+    assert_eq!(
+        store
+            .semantics_in_files(&["src/sem_keep.rs", "src/sem_keep.rs"])
+            .expect("semantics_in_files with duplicate paths")
+            .len(),
+        1,
+        "duplicate paths must return each semantic record only once"
+    );
     let mut saved = snapshot[0].2.clone();
     saved.requirement_validated_at = Some(1_000_000_000); // a time the clock cannot reproduce
     store
