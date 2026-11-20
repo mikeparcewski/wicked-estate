@@ -57,9 +57,12 @@ pub const COBOL_DYNAMIC_VAR_PREFIX: &str = "cobol-dynamic-var:";
 
 static RE_SOURCE_FREE: LazyLock<Regex> = LazyLock::new(|| {
     // The directive starts its line (after an optional sequence area); one inside a comment or a
-    // literal does not switch the format.
-    Regex::new(r"(?im)^[0-9 ]*>>\s*SOURCE\s+(?:FORMAT\s+)?(?:IS\s+)?FREE\b")
-        .expect("RE_SOURCE_FREE")
+    // literal does not switch the format. Micro Focus spells it `$SET [...] SOURCEFORMAT"FREE"`.
+    Regex::new(concat!(
+        r"(?im)^[0-9 ]*(?:>>\s*SOURCE\s+(?:FORMAT\s+)?(?:IS\s+)?FREE\b|",
+        r#"\$\s*SET\b[^\n]*?\bSOURCEFORMAT\s*(?:"\s*FREE\s*"|'\s*FREE\s*'|\(\s*FREE\s*\)))"#,
+    ))
+    .expect("RE_SOURCE_FREE")
 });
 static RE_EXEC_CICS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\bEXEC\s+CICS\s+(.*?)\bEND-EXEC").expect("RE_EXEC_CICS"));
@@ -245,9 +248,14 @@ const SQL_STOP: &[&str] = &[
     "DESCRIPTOR",
 ];
 
+/// Whether a line-start directive selects free format, outside comments and literals.
+pub(crate) fn source_is_free_format(text: &str) -> bool {
+    RE_SOURCE_FREE.is_match(text)
+}
+
 /// Add the COBOL text links to `ex`, the tree-sitter extraction of `file`. See the module docs.
 pub fn supplement(file: &SourceFile, ex: &mut Extraction) {
-    let free = RE_SOURCE_FREE.is_match(&file.text);
+    let free = source_is_free_format(&file.text);
     let (clean, code) = lexical_views(&file.text, free);
     // COPY … REPLACING / REPLACE pseudo-text is replacement text, never source, for every pass.
     let code = RE_PSEUDO_TEXT
@@ -328,7 +336,7 @@ fn lexical_views(text: &str, free: bool) -> (String, String) {
             }
             // Columns 73-80 (identification area): only on a card of at most 80 columns whose
             // column 72 is blank, so code that runs past column 72 is never cut.
-            if body_end - start > 72 && body_end - start <= 80 && b[71] == b' ' {
+            if has_identification_area(&b[..body_end - start]) {
                 blank_bytes(&mut clean, start + 72, body_end);
                 blank_bytes(&mut code, start + 72, body_end);
                 stop = start + 72;
@@ -371,6 +379,11 @@ fn lexical_views(text: &str, free: bool) -> (String, String) {
         Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
     };
     (to_string(clean), to_string(code))
+}
+
+/// Columns 73-80 are identification only on a card of at most 80 columns with column 72 blank.
+pub(crate) fn has_identification_area(body: &[u8]) -> bool {
+    body.len() > 72 && body.len() <= 80 && body[71] == b' '
 }
 
 /// Byte offset → line/column (0-based, like the tree-sitter spans).
