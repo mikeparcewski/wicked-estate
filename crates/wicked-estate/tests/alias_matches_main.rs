@@ -1,8 +1,6 @@
-//! estate#486 descope guard: an aliased import (`import { Actual as Card }`) resolves EXACTLY as on
-//! main, for calls and JSX. This file passes unchanged on main; it pins main's edges on the same
-//! inputs, including the two reviewer repros of the withdrawn alias renaming (an external-package
-//! alias plus a back-filled homonym; an export-side alias). The third case pins main's known false
-//! edge, #486's alias half, which stays open; fixing it will change that expectation deliberately.
+//! estate#486: import aliases bind only within their imported module, for calls and JSX.
+//! Keep the two reviewer repros of the withdrawn rename-to-original fix: an external-package
+//! alias must stay parked even after back-fill, and an export-side alias must keep its real target.
 
 use std::collections::HashMap;
 use std::fs;
@@ -82,7 +80,11 @@ fn an_external_alias_gains_no_edge_when_a_homonym_of_its_export_appears() {
             ),
         ],
     );
-    let _ = index(&db, &repo);
+    let store = index(&db, &repo);
+    for caller in CALLERS {
+        assert_eq!(calls_from(&store, caller), Vec::<String>::new(), "{caller}");
+    }
+    drop(store);
     write(
         &repo,
         &[(
@@ -96,9 +98,12 @@ fn an_external_alias_gains_no_edge_when_a_homonym_of_its_export_appears() {
         assert_eq!(calls_from(&store, caller), Vec::<String>::new(), "{caller}");
     }
     assert_eq!(
-        store.unresolved_refs_for_name("Card").unwrap().len(),
+        store
+            .unresolved_refs_for_name("import-alias:Card:Actual")
+            .unwrap()
+            .len(),
         2,
-        "both calls stay parked under the local name"
+        "both calls stay parked under the encoded alias name"
     );
 }
 
@@ -134,10 +139,9 @@ fn an_import_alias_of_an_export_alias_keeps_the_real_definition() {
     }
 }
 
-/// Main's behaviour for a plain alias with an unrelated homonym of the LOCAL name: it binds that
-/// homonym (#486's alias half, open, W10). Pinned so the descope provably leaves it unchanged.
+/// The alias must bind the imported original, never a global homonym of its local name.
 #[test]
-fn a_plain_alias_resolves_by_its_local_name_as_on_main() {
+fn a_plain_alias_resolves_to_its_imported_original() {
     let dir = fresh_dir("plain_alias");
     let (db, repo) = (dir.join("g.db"), dir.join("repo"));
     write(
@@ -158,8 +162,67 @@ fn a_plain_alias_resolves_by_its_local_name_as_on_main() {
     for caller in CALLERS {
         assert_eq!(
             calls_from(&store, caller),
-            vec!["src/other.tsx::Card".to_string()],
+            vec!["src/a.tsx::Actual".to_string()],
             "{caller}"
         );
     }
+}
+
+#[test]
+fn a_python_from_import_alias_resolves_to_its_imported_original() {
+    let dir = fresh_dir("python_alias");
+    let (db, repo) = (dir.join("g.db"), dir.join("repo"));
+    write(
+        &repo,
+        &[
+            ("src/a.py", "def actual():\n    return None\n"),
+            ("src/other.py", "def card():\n    return None\n"),
+            (
+                "src/caller.py",
+                "from a import actual as card\ndef via_call():\n    return card()\n",
+            ),
+        ],
+    );
+    let store = index(&db, &repo);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        calls_from(&store, "via_call"),
+        vec!["src/a.py::actual".to_string()]
+    );
+}
+
+#[test]
+fn a_parameter_shadowing_an_import_alias_stays_local() {
+    let dir = fresh_dir("shadow_alias");
+    let (db, repo) = (dir.join("g.db"), dir.join("repo"));
+    write(
+        &repo,
+        &[
+            ("src/a.tsx", "export function Actual() { return null; }\n"),
+            ("src/other.tsx", "export function Card() { return null; }\n"),
+            (
+                "src/caller.tsx",
+                "import { Actual as Card } from './a';\n\
+                 export function ViaCall(Card) { return Card(); }\n\
+                 export function ViaJsx({ Card }) { return <Card />; }\n\
+                 export function Unshadowed() { return Card(); }\n",
+            ),
+        ],
+    );
+    let store = index(&db, &repo);
+    let _ = fs::remove_dir_all(&dir);
+    for caller in CALLERS {
+        assert_eq!(calls_from(&store, caller), Vec::<String>::new(), "{caller}");
+    }
+    assert_eq!(
+        calls_from(&store, "Unshadowed"),
+        vec!["src/a.tsx::Actual".to_string()]
+    );
+    assert_eq!(
+        store
+            .unresolved_refs_for_name("local-binding:Card")
+            .unwrap()
+            .len(),
+        2
+    );
 }

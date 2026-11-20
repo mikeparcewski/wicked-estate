@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
-use wicked_estate_core::refs::LOCAL_BINDING_PREFIX;
+use wicked_estate_core::refs::{IMPORT_ALIAS_PREFIX, LOCAL_BINDING_PREFIX};
 use wicked_estate_core::{
     Descriptor, Edge, EdgeKind, Error, Extraction, Extractor, FlowEvidence, FlowFact,
     FlowSemantics, Language, Location, Node, NodeKind, ResolutionTier, Result, SourceFile, Span,
@@ -2853,8 +2853,10 @@ fn js_local_binding<'t>(
     None
 }
 
-/// Extract a name→module map from a single import match given the full statement text and the
-/// already-stripped module source string. Best-effort; returns an empty map on parse failure.
+/// Extract local-name→module and alias→original-name maps from a single import match given the
+/// full statement text and already-stripped module source. Best-effort; empty on parse failure.
+/// Only named JS/TS imports and Python from-imports contribute aliases; default and namespace
+/// imports contribute module associations only.
 ///
 /// Handles the common surface forms:
 /// - JS/TS named:   `import { A, B as C } from './mod'`  → {A: mod, C: mod}
@@ -2866,8 +2868,12 @@ fn js_local_binding<'t>(
 ///
 /// `stmt_text`   — raw text of the whole import statement node.
 /// `module_src`  — already stripped (un-quoted) module/package name.
-fn extract_name_module_pairs(stmt_text: &str, module_src: &str) -> HashMap<String, String> {
+fn extract_name_module_pairs(
+    stmt_text: &str,
+    module_src: &str,
+) -> (HashMap<String, String>, HashMap<String, String>) {
     let mut map = HashMap::new();
+    let mut aliases = HashMap::new();
     let stmt = stmt_text.trim();
 
     // ── Python `from X import A, B [as C]` ───────────────────────────────────
@@ -2892,18 +2898,25 @@ fn extract_name_module_pairs(stmt_text: &str, module_src: &str) -> HashMap<Strin
                             .is_some_and(|c| c.is_alphabetic() || c == '_')
                     {
                         map.insert(local.to_string(), module_src.to_string());
+                        aliases.remove(local);
+                        if let Some((original, _)) = token.split_once(" as ") {
+                            let original = original.trim();
+                            if !original.is_empty() && original != local {
+                                aliases.insert(local.to_string(), original.to_string());
+                            }
+                        }
                     }
                 }
             }
         }
-        return map;
+        return (map, aliases);
     }
 
     // ── JS/TS import statement ────────────────────────────────────────────────
     // Strip leading `import` keyword.
     let rest = match stmt.strip_prefix("import ") {
         Some(r) => r.trim(),
-        None => return map,
+        None => return (map, aliases),
     };
 
     // Drop trailing semicolon.
@@ -2917,7 +2930,7 @@ fn extract_name_module_pairs(stmt_text: &str, module_src: &str) -> HashMap<Strin
         rest[..from_pos].trim()
     } else {
         // No `from` — side-effect-only import `import 'mod'`; no names.
-        return map;
+        return (map, aliases);
     };
 
     // `* as NS` → NS
@@ -2926,7 +2939,7 @@ fn extract_name_module_pairs(stmt_text: &str, module_src: &str) -> HashMap<Strin
         if !ns.is_empty() {
             map.insert(ns.to_string(), module_src.to_string());
         }
-        return map;
+        return (map, aliases);
     }
 
     // `{ A, B as C, D }` named imports, possibly with a leading default `Default, { … }`.
@@ -2972,10 +2985,17 @@ fn extract_name_module_pairs(stmt_text: &str, module_src: &str) -> HashMap<Strin
                 .is_some_and(|c| c.is_alphabetic() || c == '_')
         {
             map.insert(local.to_string(), module_src.to_string());
+            aliases.remove(local);
+            if let Some((original, _)) = token.split_once(" as ") {
+                let original = original.trim();
+                if !original.is_empty() && original != local {
+                    aliases.insert(local.to_string(), original.to_string());
+                }
+            }
         }
     }
 
-    map
+    (map, aliases)
 }
 
 /// The smallest definition whose byte range contains `pos` — the enclosing scope of a reference.
@@ -4018,6 +4038,7 @@ impl Extractor for TreeSitterExtractor {
         // File-level import map: local name → module source (for hint injection).
         // Built from @import/@import.source pairs during the match loop.
         let mut file_import_map: HashMap<String, String> = HashMap::new();
+        let mut file_import_aliases: HashMap<String, String> = HashMap::new();
         // Module sources that could not be parsed into name→source pairs (best-effort fallback).
         let mut file_import_sources: Vec<String> = Vec::new();
         // Call sites whose callee is a local binding (param, destructured prop, local declaration),
@@ -4386,10 +4407,10 @@ impl Extractor for TreeSitterExtractor {
                     // ── Build the file-level import map ─────────────────────
                     // When we have the full statement text, parse name→module pairs.
                     // stmt_for_map contains the @import node text; canonical is the module source.
-                    let pairs = if let Some(ref stmt) = stmt_for_map {
+                    let (pairs, aliases) = if let Some(ref stmt) = stmt_for_map {
                         extract_name_module_pairs(stmt, &canonical)
                     } else {
-                        HashMap::new()
+                        (HashMap::new(), HashMap::new())
                     };
                     if pairs.is_empty() {
                         // No name associations parsed — record the module source for fallback.
@@ -4397,7 +4418,13 @@ impl Extractor for TreeSitterExtractor {
                             file_import_sources.push(canonical.clone());
                         }
                     } else {
+                        // Keep aliases aligned with the current module association when a later
+                        // import reuses the local name without renaming it (legal in Python).
+                        for local in pairs.keys() {
+                            file_import_aliases.remove(local);
+                        }
                         file_import_map.extend(pairs);
+                        file_import_aliases.extend(aliases);
                     }
                 }
             }
@@ -4932,6 +4959,13 @@ impl Extractor for TreeSitterExtractor {
                     Some(d) => format!("{LOCAL_BINDING_PREFIX}{name}:{}", d.symbol.as_str()),
                     None => format!("{LOCAL_BINDING_PREFIX}{name}"),
                 }
+            } else if let Some(original) = file_import_aliases
+                .get(&name)
+                .filter(|_| ek == EdgeKind::Calls)
+            {
+                // Preserve both names without letting name-only tiers (including back-fill,
+                // which loses the module hint) bind either to a global homonym (#486).
+                format!("{IMPORT_ALIAS_PREFIX}{name}:{original}")
             } else {
                 name
             };
@@ -7192,22 +7226,123 @@ class Panel extends React.Component {
 
     // ── Import-map hint tests ─────────────────────────────────────────────────
 
-    /// TypeScript: named imports produce hints["imports"] mapping each local name to its module.
-    /// estate#486 descope: an aliased import keeps today's naming (the local name), JS/TS and
-    /// Python alike; only local bindings are renamed.
     #[test]
-    fn an_aliased_call_keeps_its_local_name() {
-        let code = "import { Actual as Card } from './a';\nfunction main() { Card(); }\n";
-        let ex = TreeSitterExtractor::for_language("typescript")
+    fn only_renamed_named_imports_contribute_aliases() {
+        for stmt in [
+            "import Default, { Actual as Card, Same as Same, Plain } from 'a';",
+            "from a import Actual as Card, Same as Same, Plain",
+        ] {
+            let (modules, aliases) = extract_name_module_pairs(stmt, "a");
+            assert_eq!(modules.get("Card").map(String::as_str), Some("a"));
+            assert_eq!(modules.get("Same").map(String::as_str), Some("a"));
+            assert_eq!(modules.get("Plain").map(String::as_str), Some("a"));
+            assert_eq!(
+                aliases,
+                HashMap::from([("Card".to_string(), "Actual".to_string())])
+            );
+        }
+        for stmt in ["import Default from 'a';", "import * as NS from 'a';"] {
+            let (modules, aliases) = extract_name_module_pairs(stmt, "a");
+            assert_eq!(modules.len(), 1);
+            assert!(aliases.is_empty(), "{stmt}");
+        }
+    }
+
+    /// Aliases carry both names without exposing either to the name-only resolvers (#486).
+    #[test]
+    fn aliased_calls_and_jsx_encode_local_and_original_names() {
+        for (lang, path, code, local, original) in [
+            (
+                "typescript",
+                "src/main.ts",
+                "import { Actual as Card } from './a';\nfunction main() { Card(); }\n",
+                "Card",
+                "Actual",
+            ),
+            (
+                "javascript",
+                "src/main.jsx",
+                "import { Actual as Card } from './a';\nfunction main() { return <Card />; }\n",
+                "Card",
+                "Actual",
+            ),
+            (
+                "tsx",
+                "src/main.tsx",
+                "import { Actual as Card } from './a';\nfunction main() { return <Card />; }\n",
+                "Card",
+                "Actual",
+            ),
+            (
+                "python",
+                "src/main.py",
+                "from a import actual as card\ndef main():\n    return card()\n",
+                "card",
+                "actual",
+            ),
+        ] {
+            let ex = TreeSitterExtractor::for_language(lang)
+                .unwrap()
+                .extract(&sf(path, lang, code))
+                .unwrap();
+            let calls: Vec<_> = ex
+                .refs
+                .iter()
+                .filter(|r| r.kind == EdgeKind::Calls)
+                .collect();
+            assert_eq!(calls.len(), 1, "{lang}: {calls:?}");
+            assert_eq!(
+                calls[0].raw_name,
+                format!("import-alias:{local}:{original}")
+            );
+            assert!(calls[0].hints["imports"].get(local).is_some());
+        }
+    }
+
+    #[test]
+    fn local_binding_takes_precedence_over_import_alias_for_calls_and_jsx() {
+        let code = "import { Actual as Card } from './a';\n\
+                    function Call(Card) { return Card(); }\n\
+                    function Jsx({ Card }) { return <Card />; }\n\
+                    function Unshadowed() { return Card(); }\n";
+        let ex = TreeSitterExtractor::for_language("tsx")
             .unwrap()
-            .extract(&sf("src/main.ts", "typescript", code))
+            .extract(&sf("src/main.tsx", "tsx", code))
             .unwrap();
-        let card = ex
+        let names: Vec<_> = ex
             .refs
             .iter()
-            .find(|r| r.kind == EdgeKind::Calls && r.raw_name == "Card")
-            .expect("Card() keeps its local name");
-        assert!(!card.hints.contains_key("import_local"));
+            .filter(|r| r.kind == EdgeKind::Calls)
+            .map(|r| r.raw_name.as_str())
+            .collect();
+        assert_eq!(
+            names.iter().filter(|&&n| n == "local-binding:Card").count(),
+            2
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|&&n| n == "import-alias:Card:Actual")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_later_unaliased_import_clears_the_previous_alias() {
+        let code = "from a import actual as card\nfrom b import card\n\
+                    def main():\n    return card()\n";
+        let ex = TreeSitterExtractor::python()
+            .extract(&sf("src/main.py", "python", code))
+            .unwrap();
+        let calls: Vec<_> = ex
+            .refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Calls)
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].raw_name, "card");
+        assert_eq!(calls[0].hints["imports"]["card"].as_str(), Some("b"));
     }
 
     /// estate#486: a callee bound by a parameter, destructured prop or local declaration is named
