@@ -27,6 +27,13 @@ pub const COBOL_DYNAMIC_CALL_PREFIX: &str = "cobol-dynamic-call:";
 /// back-fill never re-binds a local by its bare name.
 pub const LOCAL_BINDING_PREFIX: &str = "local-binding:";
 
+/// `raw_name` prefix of a call through a named import alias (wicked-estate#486):
+/// `import-alias:<local>:<original>`. Name-only resolvers must skip it. The import-map resolver
+/// uses the local name's module hint and searches that module for the original name, falling
+/// back to the local name for an export-side alias. Parked refs keep this encoding but lose
+/// their hints, so back-fill cannot bind either name to an unrelated global.
+pub const IMPORT_ALIAS_PREFIX: &str = "import-alias:";
+
 /// The persisted form of an APEXlang `@reference` (estate#313).
 ///
 /// `SqliteStore` keeps a parked ref's `raw_name`, `kind` and site, never its hints, so everything

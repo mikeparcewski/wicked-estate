@@ -116,12 +116,14 @@ impl Resolver for NameResolver {
 ///
 /// A `local-binding:` ref (wicked-estate#486) is skipped too: a local's name is not a global
 /// name. `ScopedNameResolver` binds its `<symbol>` form through [`bind_local`] before this check.
+/// An `import-alias:` ref likewise belongs only to `ImportMapResolver`, within its hinted module.
 fn routed_elsewhere(r: &UnresolvedRef) -> bool {
-    use wicked_estate_core::refs::LOCAL_BINDING_PREFIX;
     use wicked_estate_core::refs::apexlang_ref::{CONTAINER_PREFIX, PREFIX};
+    use wicked_estate_core::refs::{IMPORT_ALIAS_PREFIX, LOCAL_BINDING_PREFIX};
     r.raw_name.starts_with(PREFIX)
         || r.raw_name.starts_with(CONTAINER_PREFIX)
         || r.raw_name.starts_with(LOCAL_BINDING_PREFIX)
+        || r.raw_name.starts_with(IMPORT_ALIAS_PREFIX)
 }
 
 /// The target of a `local-binding:<name>:<symbol>` ref: exactly that symbol, the definition the
@@ -521,6 +523,11 @@ fn normalise_relative_path(path: &str) -> String {
 ///    `metadata["via"] = "import-map"`.
 /// 6. If zero or >1 candidates match → skip (leave for precise tiers).
 ///
+/// For `import-alias:<local>:<original>`, look up the module by `<local>` and search for
+/// `<original>` only within that module. If there are no matches, try `<local>` in the same
+/// module (an export-side alias). Ambiguous original-name matches never trigger fallback.
+/// Neither bare name is exposed to the name-only tiers.
+///
 /// If `hints["imports"]` is absent, the ref is skipped (nothing to contribute).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ImportMapResolver;
@@ -553,8 +560,22 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
                 None => continue,
             };
 
-            // Look up the module source for this specific name.
-            let module_src = match imports_obj.get(&r.raw_name).and_then(|v| v.as_str()) {
+            let (local, original) = if let Some(alias) = r
+                .raw_name
+                .strip_prefix(wicked_estate_core::refs::IMPORT_ALIAS_PREFIX)
+            {
+                match alias.split_once(':') {
+                    Some((local, original)) if !local.is_empty() && !original.is_empty() => {
+                        (local, original)
+                    }
+                    _ => continue,
+                }
+            } else {
+                (r.raw_name.as_str(), r.raw_name.as_str())
+            };
+
+            // Look up the module by the local name, including when the ref encodes an alias.
+            let module_src = match imports_obj.get(local).and_then(|v| v.as_str()) {
                 Some(m) => m,
                 None => continue, // this name isn't in the import map — skip
             };
@@ -562,35 +583,29 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
             // Collect callable candidates for this name (D1 admissibility + D5 family guard
             // run pre-ranking, alongside the callable filter — same placement as
             // ScopedNameResolver).
-            let mut candidates = index.by_name(&r.raw_name);
-            candidates.retain(|n| admissible_target(&r.kind, n));
-            candidates.retain(|n| is_callable(&n.kind));
-            candidates.retain(|n| n.symbol != r.from); // no self-edges
-
-            if candidates.is_empty() {
-                continue;
-            }
-
             let from_fam = from_family(index, &r.from);
-            candidates.retain(|n| family_compatible(index, from_fam.as_deref(), n));
-
-            if candidates.is_empty() {
-                continue;
-            }
-
-            // Narrow to candidates whose file matches the import module source.
             let ref_dir = dir_of(r.location.file.as_str());
-            let matched: Vec<&wicked_estate_core::Node> = candidates
-                .iter()
-                .filter(|n| file_matches_module(n.location.file.as_str(), ref_dir, module_src))
-                .collect();
+            let module_candidates = |name: &str| {
+                let mut candidates = index.by_name(name);
+                candidates.retain(|n| admissible_target(&r.kind, n));
+                candidates.retain(|n| is_callable(&n.kind));
+                candidates.retain(|n| n.symbol != r.from); // no self-edges
+                candidates.retain(|n| family_compatible(index, from_fam.as_deref(), n));
+                candidates
+                    .retain(|n| file_matches_module(n.location.file.as_str(), ref_dir, module_src));
+                candidates
+            };
+            let mut matched = module_candidates(original);
+            if matched.is_empty() && original != local {
+                matched = module_candidates(local);
+            }
 
             // Emit only when unambiguous after import-scoping.
             if matched.len() != 1 {
                 continue;
             }
 
-            let winner = matched[0];
+            let winner = &matched[0];
             let mut edge = wicked_estate_core::Edge::new(
                 r.from.clone(),
                 winner.symbol.clone(),
@@ -702,6 +717,9 @@ impl Resolver for InfraResolver {
         let mut out = Vec::new();
 
         for r in refs {
+            if routed_elsewhere(r) {
+                continue;
+            }
             // Look up all nodes that have this name.
             let candidates = index.by_name(&r.raw_name);
 
@@ -1564,6 +1582,124 @@ mod tests {
             Language::new("typescript"),
             Location::new(file, Span::ZERO),
         )
+    }
+
+    #[test]
+    fn import_alias_binds_only_inside_its_module_with_export_alias_fallback() {
+        let original = fn_node_at("Actual", "src/a.tsx");
+        let local = fn_node_at("Card", "src/a.tsx");
+        let global_original = fn_node_at("Actual", "src/caller.tsx");
+        let global_local = fn_node_at("Card", "src/other.tsx");
+        let mut r = import_ref("Page", "src/caller.tsx", "Card", "./a");
+        r.raw_name = "import-alias:Card:Actual".to_string();
+
+        for (module_nodes, expected) in [
+            (
+                vec![original.clone(), local.clone()],
+                Some(original.symbol.clone()),
+            ),
+            (vec![local.clone()], Some(local.symbol.clone())),
+            (vec![], None),
+        ] {
+            let mut nodes = vec![global_original.clone(), global_local.clone()];
+            nodes.extend(module_nodes);
+            let index = VecIndex(nodes);
+            // Name-only tiers must not produce a second, unrelated edge.
+            let edges = resolve_all_with_coverage(
+                &[
+                    &NameResolver,
+                    &ScopedNameResolver,
+                    &ImportMapResolver,
+                    &InfraResolver,
+                ],
+                std::slice::from_ref(&r),
+                &index,
+            )
+            .unwrap()
+            .edges;
+            assert_eq!(edges.len(), usize::from(expected.is_some()));
+            if let Some(target) = expected {
+                assert_eq!(edges[0].target, target);
+                assert_eq!(edges[0].resolved_by, "import-map-resolver");
+            }
+        }
+
+        // Persisted refs retain the encoding but lose the hints. Neither homonym may bind.
+        r.hints.clear();
+        let index = VecIndex(vec![original, local, global_original, global_local]);
+        let edges = resolve_all_with_coverage(
+            &[
+                &NameResolver,
+                &ScopedNameResolver,
+                &ImportMapResolver,
+                &InfraResolver,
+            ],
+            &[r],
+            &index,
+        )
+        .unwrap()
+        .edges;
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn import_alias_ambiguity_does_not_fall_back_to_local_name() {
+        let first = fn_node_at("Actual", "src/a.tsx");
+        let second = fn_node_at("Actual", "src/a/index.tsx");
+        let local = fn_node_at("Card", "src/a.tsx");
+        let index = VecIndex(vec![first, second, local]);
+        let mut r = import_ref("Page", "src/caller.tsx", "Card", "./a");
+        r.raw_name = "import-alias:Card:Actual".to_string();
+        assert!(ImportMapResolver.resolve(&[r], &index).unwrap().is_empty());
+    }
+
+    #[test]
+    fn import_alias_preserves_candidate_filters_for_both_names() {
+        let caller = fn_node_at("Page", "src/caller.tsx");
+        for name in ["Actual", "Card"] {
+            let target = fn_node_at(name, "src/a.tsx");
+            let mut non_callable = target.clone();
+            non_callable.kind = NodeKind::Class;
+            let mut inadmissible = target.clone();
+            inadmissible.kind = NodeKind::Import;
+            let mut other_family = target.clone();
+            other_family.language = Language::new("python");
+            let mut self_target = target;
+            self_target.symbol = caller.symbol.clone();
+            for rejected in [non_callable, inadmissible, other_family, self_target] {
+                let mut r = import_ref("Page", "src/caller.tsx", "Card", "./a");
+                r.raw_name = "import-alias:Card:Actual".to_string();
+                r.from = caller.symbol.clone();
+                let index = VecIndex::with_families(
+                    vec![caller.clone(), rejected],
+                    &[("typescript", "javascript"), ("python", "python")],
+                );
+                assert!(ImportMapResolver.resolve(&[r], &index).unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_import_alias_cannot_bind_an_arbitrarily_named_node() {
+        let r = import_ref("Page", "src/caller.tsx", "import-alias:Card:Actual", "./a");
+        for target in [
+            fn_node_at(&r.raw_name, "src/a.tsx"),
+            resource_node(&r.raw_name),
+        ] {
+            let index = VecIndex(vec![target]);
+            for resolver in [
+                &NameResolver as &dyn Resolver,
+                &ScopedNameResolver,
+                &InfraResolver,
+            ] {
+                assert!(
+                    resolver
+                        .resolve(std::slice::from_ref(&r), &index)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
     }
 
     /// Core scenario: `a.ts` imports `helper` from `./b`, calls `helper()`.
