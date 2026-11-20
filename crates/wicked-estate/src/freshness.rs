@@ -154,6 +154,30 @@ fn roots(store: &dyn GraphStoreMutExt, db: &str) -> Vec<Root> {
     }]
 }
 
+/// Existing run markers remain non-empty while indexing or after an interrupted run.
+fn indexing_roots(store: &dyn GraphStoreMutExt) -> Vec<String> {
+    let repos = repo_scope::registry(store);
+    if repos.is_empty() {
+        return if store
+            .meta_get_key("indexing")
+            .is_some_and(|value| !value.is_empty())
+        {
+            vec!["graph".to_string()]
+        } else {
+            Vec::new()
+        };
+    }
+    repos
+        .into_iter()
+        .filter(|repo| {
+            store
+                .meta_get_key(&repo_scope::meta_key(Some(&repo.label), "indexing"))
+                .is_some_and(|value| !value.is_empty())
+        })
+        .map(|repo| repo.label)
+        .collect()
+}
+
 /// `git -C <root> <args>` → stdout, `None` on any failure. `GIT_OPTIONAL_LOCKS=0`: a probe
 /// must never take `index.lock` (an opportunistic `git status` index refresh would race the
 /// user's own git commands).
@@ -778,6 +802,17 @@ impl FreshnessProbe {
         let statuses = self.root_statuses();
         let (report, root_rows) = self.commit_report(&statuses);
         diags.extend(report.statements(&self.db));
+        let indexing = self
+            .store
+            .as_deref()
+            .map(indexing_roots)
+            .unwrap_or_default();
+        for label in &indexing {
+            diags.push(format!(
+                "INDEXING: {label} is being indexed (or an index was interrupted) - \
+                 results may mix old and new files and miss cross-file edges; re-run index if no run is active"
+            ));
+        }
 
         let mut files: BTreeSet<String> = BTreeSet::new();
         collect_files(content, &mut files);
@@ -836,6 +871,7 @@ impl FreshnessProbe {
         };
         let block = json!({
             "commits_behind": worst,
+            "indexing": indexing,
             "roots": root_rows,
             "stale_files": stale
                 .iter()
@@ -947,6 +983,55 @@ fn mark_rows(v: &mut Value, marks: &HashMap<&str, &str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotate_reports_unlabelled_indexing_until_marker_is_cleared() {
+        let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        store.meta_set_key("indexing", "2");
+        let mut probe = FreshnessProbe::with_store(":memory:", Some(Box::new(store)));
+        let mut content = json!({});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        assert_eq!(content["freshness"]["indexing"], json!(["graph"]));
+        assert!(diags.iter().any(|d| d.starts_with("INDEXING: graph ")));
+
+        probe.store.as_mut().unwrap().meta_set_key("indexing", "");
+        let mut content = json!({});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        assert_eq!(content["freshness"]["indexing"], json!([]));
+        assert!(!diags.iter().any(|d| d.starts_with("INDEXING:")));
+    }
+
+    #[test]
+    fn annotate_reports_only_labels_with_nonempty_indexing_markers() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        store.meta_set_key("repo_labels", r#"["a","b"]"#);
+        for label in ["a", "b"] {
+            store.meta_set_key(
+                &repo_scope::meta_key(Some(label), "root"),
+                &root.path().to_string_lossy(),
+            );
+        }
+        let key = repo_scope::meta_key(Some("a"), "indexing");
+        store.meta_set_key(&key, "2");
+        store.meta_set_key(&repo_scope::meta_key(Some("b"), "indexing"), "");
+        let mut probe = FreshnessProbe::with_store(":memory:", Some(Box::new(store)));
+        let mut content = json!({});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        assert_eq!(content["freshness"]["indexing"], json!(["a"]));
+        assert!(diags.iter().any(|d| d.starts_with("INDEXING: a ")));
+        assert!(!diags.iter().any(|d| d.starts_with("INDEXING: b ")));
+
+        probe.store.as_mut().unwrap().meta_set_key(&key, "");
+        let mut content = json!({});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        assert_eq!(content["freshness"]["indexing"], json!([]));
+        assert!(!diags.iter().any(|d| d.starts_with("INDEXING:")));
+    }
 
     #[test]
     fn collect_files_walks_every_file_key_but_the_freshness_block() {
