@@ -1956,6 +1956,15 @@ fn strip_literal_quotes(raw: &str) -> String {
     s.to_string()
 }
 
+/// COBOL's compiler folds names to uppercase; fold before minting ids or storing refs so the
+/// store's exact-name lookup sees the same spelling at definitions and use sites.
+fn fold_cobol_name(language: &str, mut name: String) -> String {
+    if language == "cobol" {
+        name.make_ascii_uppercase();
+    }
+    name
+}
+
 /// Strip a single leading `:` from a captured DEFINITION name so symbol-literal
 /// def sites store the real method name (Ruby `alias_method :new_name, :old` —
 /// the captured `simple_symbol` text is `:new_name`; a stored `:new_name` is
@@ -4137,7 +4146,7 @@ impl Extractor for TreeSitterExtractor {
                         } else {
                             name
                         };
-                        def_name = Some((kind, name));
+                        def_name = Some((kind, fold_cobol_name(&self.lang_name, name)));
                     }
                     CaptureRole::CallFunction => {
                         call_fn = Some((text, pos, span));
@@ -4374,13 +4383,28 @@ impl Extractor for TreeSitterExtractor {
                         local_bound_calls.insert(site_span, binding);
                     }
                 }
-                raw_refs.push((strip_literal_quotes(&name), EdgeKind::Calls, pos, site_span));
+                raw_refs.push((
+                    fold_cobol_name(&self.lang_name, strip_literal_quotes(&name)),
+                    EdgeKind::Calls,
+                    pos,
+                    site_span,
+                ));
             } else if let Some((name, pos, span)) = call_method {
                 let site_span = call_value_span.unwrap_or(span);
-                raw_refs.push((strip_literal_quotes(&name), EdgeKind::Calls, pos, site_span));
+                raw_refs.push((
+                    fold_cobol_name(&self.lang_name, strip_literal_quotes(&name)),
+                    EdgeKind::Calls,
+                    pos,
+                    site_span,
+                ));
             }
             if let Some((name, pos, span)) = reference_name {
-                raw_refs.push((name, EdgeKind::References, pos, span));
+                raw_refs.push((
+                    fold_cobol_name(&self.lang_name, name),
+                    EdgeKind::References,
+                    pos,
+                    span,
+                ));
             }
 
             // ── Process imports ─────────────────────────────────────────────
@@ -7965,6 +7989,104 @@ See the [docs](docs/).
             .filter(|n| !matches!(n.kind, NodeKind::File))
             .count();
         assert!(defs >= 1, "expected >=1 heading definition, got {defs}");
+    }
+
+    #[test]
+    fn cobol_definition_names_fold_before_symbol_ids() {
+        let code = concat!(
+            "       identification division.\n",
+            "       program-id. pricepgm.\n",
+            "       data division.\n",
+            "       working-storage section.\n",
+            "       01 ws-price pic 9.\n",
+            "       procedure division.\n",
+            "       main-section section.\n",
+            "       main-para.\n",
+            "           goback.\n",
+        );
+        let extractor = TreeSitterExtractor::for_language("cobol").unwrap();
+        let lower = extractor.extract(&sf("price.cbl", "cobol", code)).unwrap();
+        let upper = extractor
+            .extract(&sf("price.cbl", "cobol", &code.to_ascii_uppercase()))
+            .unwrap();
+        for (name, kind) in [
+            ("PRICEPGM", NodeKind::Module),
+            ("MAIN-SECTION", NodeKind::Function),
+            ("MAIN-PARA", NodeKind::Function),
+            ("WS-PRICE", NodeKind::Field),
+        ] {
+            let folded = lower
+                .nodes
+                .iter()
+                .find(|n| n.name == name && n.kind == kind)
+                .unwrap_or_else(|| panic!("missing folded definition {name}"));
+            let uppercase = upper
+                .nodes
+                .iter()
+                .find(|n| n.name == name && n.kind == kind)
+                .unwrap_or_else(|| panic!("missing uppercase source definition {name}"));
+            assert_eq!(folded.symbol, uppercase.symbol, "identity of {name}");
+        }
+    }
+
+    #[test]
+    fn cobol_literal_call_names_fold_after_quote_stripping() {
+        let code = concat!(
+            "       identification division.\n",
+            "       program-id. caller.\n",
+            "       procedure division.\n",
+            "       main-para.\n",
+            "           call \"pricepgm\".\n",
+            "           call 'PricePgm'.\n",
+            "           goback.\n",
+        );
+        let ex = TreeSitterExtractor::for_language("cobol")
+            .unwrap()
+            .extract(&sf("caller.cbl", "cobol", code))
+            .unwrap();
+        let calls: Vec<_> = ex
+            .refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Calls)
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|r| r.raw_name == "PRICEPGM"));
+    }
+
+    #[test]
+    fn cobol_perform_and_data_reference_names_fold() {
+        let code = concat!(
+            "       identification division.\n",
+            "       program-id. pricepgm.\n",
+            "       data division.\n",
+            "       working-storage section.\n",
+            "       01 ws-price pic 9.\n",
+            "       procedure division.\n",
+            "       entry-para.\n",
+            "           perform main-para.\n",
+            "           goback.\n",
+            "       main-para.\n",
+            "           move 1 to ws-price.\n",
+        );
+        let ex = TreeSitterExtractor::for_language("cobol")
+            .unwrap()
+            .extract(&sf("price.cbl", "cobol", code))
+            .unwrap();
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Function && n.name == "MAIN-PARA")
+        );
+        assert!(
+            ex.refs
+                .iter()
+                .any(|r| r.kind == EdgeKind::Calls && r.raw_name == "MAIN-PARA")
+        );
+        assert!(
+            ex.refs
+                .iter()
+                .any(|r| r.kind == EdgeKind::References && r.raw_name == "WS-PRICE")
+        );
     }
 
     #[test]
