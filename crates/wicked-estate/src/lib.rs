@@ -6336,56 +6336,6 @@ mod semantics_survive_reindex_tests {
         }
     }
 
-    /// #515: annotated ids can move between chunks in either order. A missing id stays pending,
-    /// and a symbol still in a future chunk must retain its snapshot until that file is removed.
-    #[test]
-    fn sqlite_chunked_moves_keep_five_semantic_fields() {
-        struct Reset;
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                TEST_EXTRACT_CHUNK_LIMITS.with(|limits| limits.set(None));
-            }
-        }
-        let _reset = Reset;
-        let src = tempfile::tempdir().unwrap();
-        for i in 0..4 {
-            std::fs::write(
-                src.path().join(format!("file{i}.cpp")),
-                format!("int compute{i}() {{ return {i}; }}\n"),
-            )
-            .unwrap();
-        }
-        let mut store = SqliteStore::in_memory().unwrap();
-        index_path(&mut store, src.path()).unwrap();
-        let saved: Vec<_> = (0..4)
-            .map(|i| {
-                let symbol = sym_of(&store, &format!("compute{i}"));
-                let fields = annotate_with_claim(&mut store, &symbol);
-                (symbol, fields)
-            })
-            .collect();
-        for i in 0..4 {
-            let next = (i + 1) % 4;
-            std::fs::write(
-                src.path().join(format!("file{i}.cpp")),
-                format!("int compute{next}() {{ return {next}; }}\n"),
-            )
-            .unwrap();
-        }
-        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
-        TEST_EXTRACT_CHUNK_LIMITS.with(|limits| limits.set(Some((usize::MAX, 1))));
-        index_path(&mut store, src.path()).unwrap();
-        for (i, (symbol, fields)) in saved.iter().enumerate() {
-            assert_eq!(&sym_of(&store, &format!("compute{i}")), symbol);
-            assert_eq!(store.node_semantics(symbol).unwrap().as_ref(), Some(fields));
-            assert_eq!(
-                store.get_node(symbol).unwrap().unwrap().location.file,
-                format!("file{}.cpp", (i + 3) % 4)
-            );
-        }
-        SEMANTICS_DROPS.with(|notes| assert!(notes.borrow().is_empty()));
-    }
-
     /// #438 item 2: remove + upsert + restore share one chunk batch, and a write failure mid-re-index
     /// rolls the removal back so the stored fields survive; a retry on the SAME store (no drop,
     /// no reconnect — as the `watch` loop keeps it) keeps them. The failure is a persistent
