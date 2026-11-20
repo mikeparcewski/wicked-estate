@@ -674,10 +674,10 @@ impl KnowledgeEngine {
     /// `attempt` the caller inspected: `false` when there is no journal or a newer attempt has
     /// overwritten it (an approved node is never undone; a fresh retry is never undone).
     ///
-    /// The check and the knowledge-store deletes run in one transaction: if another process commits
-    /// a new attempt after the check, this transaction's first write fails (a stale WAL snapshot)
-    /// and nothing is rolled back. The node goes first (hidden), the journal last, so a rollback
-    /// that fails part way leaves the journal and the next sweep finishes it.
+    /// The check and the knowledge-store deletes run in one write transaction: its write lock
+    /// serializes new attempts from other processes with the check and deletes. The node goes
+    /// first (hidden), the journal last, so a rollback that fails part way leaves the journal and
+    /// the next sweep finishes it.
     pub fn rollback_proposal(&mut self, proposal_id: &str, attempt: &str) -> anyhow::Result<bool> {
         self.store.begin_batch()?;
         match self.rollback_in_batch(proposal_id, attempt) {

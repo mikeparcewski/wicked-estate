@@ -3491,9 +3491,10 @@ impl GraphWrite for SqliteStore {
         Ok(())
     }
 
+    /// IMMEDIATE takes the write lock before any read to prevent stale WAL snapshots (#532).
     fn begin_batch(&mut self) -> Result<()> {
         if !self.in_batch {
-            self.conn.execute_batch("BEGIN").map_err(st)?;
+            self.conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
             self.in_batch = true;
         }
         Ok(())
@@ -4300,26 +4301,37 @@ impl GraphWrite for SqliteStore {
     ) -> Result<SupportReplacement> {
         let facts = wicked_estate_core::support::scrub_facts(facts)?;
         let incoming = normalize_facts(&facts)?;
-        // A SAVEPOINT nests inside an open batch (BEGIN) and stands alone outside one, so the
-        // replacement is all-or-nothing in both modes without committing the caller's batch.
-        self.conn
-            .execute_batch("SAVEPOINT ts_s2a_replace")
-            .map_err(st)?;
-        match self.replace_edge_supports_inner(owner, generation, incoming) {
-            Ok(report) => {
-                self.conn
-                    .execute_batch("RELEASE ts_s2a_replace")
-                    .map_err(st)?;
-                Ok(report)
+        // A standalone SAVEPOINT is deferred: take the write lock before its reads (#532).
+        // Inside a batch, keep the savepoint without committing the caller's transaction.
+        let own_transaction = self.conn.is_autocommit();
+        if own_transaction {
+            self.conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
+        }
+        let result = (|| {
+            self.conn
+                .execute_batch("SAVEPOINT ts_s2a_replace")
+                .map_err(st)?;
+            let report = self.replace_edge_supports_inner(owner, generation, incoming)?;
+            self.conn
+                .execute_batch("RELEASE ts_s2a_replace")
+                .map_err(st)?;
+            if own_transaction {
+                self.conn.execute_batch("COMMIT").map_err(st)?;
             }
+            Ok(report)
+        })();
+        match result {
+            Ok(report) => Ok(report),
             Err(e) => {
                 // SQLite can abort the whole transaction on its own (SQLITE_FULL, IOERR, NOMEM):
                 // the savepoint is then gone, so its rollback fails. Report the ORIGINAL error
                 // either way, and stop claiming an open batch over a transaction that is dead.
-                if let Err(rollback) = self
-                    .conn
-                    .execute_batch("ROLLBACK TO ts_s2a_replace; RELEASE ts_s2a_replace")
-                {
+                let rollback = if own_transaction {
+                    "ROLLBACK"
+                } else {
+                    "ROLLBACK TO ts_s2a_replace; RELEASE ts_s2a_replace"
+                };
+                if let Err(rollback) = self.conn.execute_batch(rollback) {
                     if self.conn.is_autocommit() {
                         self.in_batch = false;
                     }
