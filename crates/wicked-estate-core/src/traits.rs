@@ -274,9 +274,10 @@ pub trait GraphRead: Send {
     /// Powers requirement↔functionality linking alongside the structural graph. (Semantic linking)
     fn node_semantics(&self, symbol: &SymbolId) -> Result<Option<NodeSemantics>>;
     /// The semantics of every node homed in one of `files`, as `(file, symbol, semantics)` — only
-    /// nodes that carry some. The indexer reads this BEFORE `remove_file` so a re-extraction can
-    /// write the fields back (wicked-estate#438). The default scans `all_nodes`; stores whose node
-    /// rows hold the semantic columns override it with one query.
+    /// nodes that carry some. The indexer reads this inside the batch that removes the files and
+    /// restores their fields (wicked-estate#438). Stores with concurrent writers serialize this
+    /// read with `set_node_semantics` until the batch ends (wicked-estate#463). The default scans
+    /// `all_nodes`; stores whose node rows hold the semantic columns override it with one query.
     fn semantics_in_files(&self, files: &[&str]) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
         let wanted: std::collections::HashSet<&str> = files.iter().copied().collect();
         let mut out = Vec::new();
@@ -438,6 +439,9 @@ pub trait GraphWrite {
     /// satisfied requires naming who asserts it. The store stamps the time. A caller that cannot
     /// name an actor has no business marking a requirement validated — see the type's docs and
     /// wicked-core#131.
+    ///
+    /// Stores with concurrent writers wait for any batch holding a `semantics_in_files` snapshot
+    /// to end before applying this update, so it lands after the restore (wicked-estate#463).
     fn set_node_semantics(
         &mut self,
         symbol: &SymbolId,
