@@ -4076,8 +4076,10 @@ mod tests {
             &repo_scope::meta_key(Some("export"), "indexed_version"),
             "0.0.0-older",
         );
-        let _old = ReadFailGuard::new(tmp.path().join("old.rs"));
-        let _new = ReadFailGuard::new(tmp.path().join("new.rs"));
+        let _old =
+            crate::semantics_survive_reindex_tests::ReadFailGuard::new(tmp.path().join("old.rs"));
+        let _new =
+            crate::semantics_survive_reindex_tests::ReadFailGuard::new(tmp.path().join("new.rs"));
         NOT_INDEXED.with(|notes| notes.borrow_mut().clear());
         UNREADABLE_FILES.with(|notes| notes.borrow_mut().clear());
         index_path_as(&mut store, tmp.path(), Some("export")).unwrap();
@@ -4121,7 +4123,7 @@ mod tests {
             .unwrap();
         index_path(&mut store, tmp.path()).unwrap();
         assert!(GraphRead::indexed_files(&store).unwrap().is_empty());
-        assert!(store.all_nodes().unwrap().is_empty());
+        assert!(GraphRead::all_nodes(&store).unwrap().is_empty());
     }
 
     // #422: keep chunk overrides on the indexing thread, isolated from concurrent tests.
@@ -6951,9 +6953,9 @@ mod semantics_survive_reindex_tests {
 
     /// Forces the work-list read of `abs` to fail until dropped (#471): a deterministic read
     /// failure on every platform and as any user, unlike file permissions (root reads mode 000).
-    struct ReadFailGuard(PathBuf);
+    pub(super) struct ReadFailGuard(PathBuf);
     impl ReadFailGuard {
-        fn new(abs: PathBuf) -> Self {
+        pub(super) fn new(abs: PathBuf) -> Self {
             TEST_READ_FAILS.lock().unwrap().push(abs.clone());
             ReadFailGuard(abs)
         }
