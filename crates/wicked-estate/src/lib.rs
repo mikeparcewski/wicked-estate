@@ -6344,6 +6344,63 @@ mod semantics_survive_reindex_tests {
         version_change_keeps_five_fields(&mut MemStore::new());
     }
 
+    /// #463: a claim committed by another connection during extraction must reach the snapshot.
+    #[test]
+    fn sqlite_claim_written_during_extraction_survives_reindex() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_INDEX_WRITE_HOOK.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("a.rs");
+        std::fs::write(&file, "pub fn pay() {}\n").unwrap();
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("graph.db");
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        let symbol = sym_of(&store, "pay");
+        store
+            .set_node_semantics(
+                &symbol,
+                None,
+                None,
+                Some(&ValidationClaim::new(true, "alice").unwrap()),
+            )
+            .unwrap();
+        std::fs::write(&file, "pub fn pay() { let _changed = 1; }\n").unwrap();
+
+        let reset = Reset;
+        let hook_symbol = symbol.clone();
+        let mut called = false;
+        TEST_INDEX_WRITE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                if called {
+                    return;
+                }
+                called = true;
+                let mut side = SqliteStore::open(&dbpath).unwrap();
+                side.set_node_semantics(
+                    &hook_symbol,
+                    None,
+                    None,
+                    Some(&ValidationClaim::new(false, "bob").unwrap()),
+                )
+                .unwrap();
+            }));
+        });
+        index_path(&mut store, src.path()).unwrap();
+        drop(reset);
+
+        let claim = store.node_semantics(&symbol).unwrap().unwrap();
+        assert!(
+            !claim.requirement_validated,
+            "Bob's retraction must survive"
+        );
+        assert_eq!(claim.requirement_validated_by.as_deref(), Some("bob"));
+    }
+
     /// #515: a failure in chunk two rolls back only that chunk. Chunk one's annotation is
     /// already restored, and its missing digest forces a plain retry to re-extract it too.
     #[test]

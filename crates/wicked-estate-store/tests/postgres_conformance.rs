@@ -520,6 +520,107 @@ fn postgres_replacement_rolls_back_a_failure_inside_the_transaction() {
     }
 }
 
+/// #463: a semantic writer waits until a re-index batch has restored its snapshot.
+#[test]
+fn postgres_semantic_write_waits_for_reindex_restore() {
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Duration;
+    use wicked_estate_core::ValidationClaim;
+
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+            return;
+        }
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+    drop_all_tables(&url);
+
+    // Open both stores before A's transaction so schema setup cannot block the writer thread.
+    let mut a = wicked_estate_store::PostgresStore::open(&url).expect("open store A");
+    let mut b = wicked_estate_store::PostgresStore::open(&url).expect("open store B");
+    let node = Node::new(
+        SymbolId("pg:semantic_claim".into()),
+        NodeKind::Function,
+        "pay",
+        Language::new("rust"),
+        Location::new("a.rs", Span::ZERO),
+    );
+    a.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+    a.set_node_semantics(
+        &node.symbol,
+        None,
+        None,
+        Some(&ValidationClaim::new(true, "alice").unwrap()),
+    )
+    .unwrap();
+    a.begin_batch().unwrap();
+    let snapshot = a.semantics_in_files(&["a.rs"]).unwrap();
+    assert_eq!(snapshot.len(), 1);
+    let symbol = node.symbol.clone();
+    let writer = std::thread::spawn(move || {
+        b.set_node_semantics(
+            &symbol,
+            None,
+            None,
+            Some(&ValidationClaim::new(false, "bob").unwrap()),
+        )
+    });
+
+    // Poll on an independent connection: A's connection holds the shared semantics lock.
+    // The test lease's advisory lock is always granted, so it cannot satisfy this query.
+    let rt = tokio::runtime::Runtime::new().expect("tokio for lock poll");
+    let pool = rt
+        .block_on(PgPoolOptions::new().max_connections(1).connect(&url))
+        .expect("connect for lock poll");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if writer.is_finished() {
+            break;
+        }
+        let waiting: bool = rt
+            .block_on(
+                sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND NOT granted)",
+                )
+                .fetch_one(&pool),
+            )
+            .expect("poll waiting advisory lock");
+        if waiting || writer.is_finished() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "store B neither finished nor waited on an advisory lock within 10 seconds"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    rt.block_on(pool.close());
+
+    a.remove_file("a.rs").unwrap();
+    a.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+    for (_, symbol, semantics) in snapshot {
+        a.restore_node_semantics(&symbol, &semantics).unwrap();
+    }
+    a.commit_batch().unwrap();
+    writer
+        .join()
+        .expect("semantic writer thread")
+        .expect("Bob's semantic write");
+
+    let claim = a.node_semantics(&node.symbol).unwrap().unwrap();
+    assert!(
+        !claim.requirement_validated,
+        "Bob's retraction must survive"
+    );
+    assert_eq!(claim.requirement_validated_by.as_deref(), Some("bob"));
+}
+
 /// #405: the secret backstop on a live Postgres — the same shared suite every backend runs.
 #[test]
 fn postgres_store_satisfies_secret_backstop_contract() {
