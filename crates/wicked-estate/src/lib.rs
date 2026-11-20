@@ -942,8 +942,19 @@ thread_local! {
     // #422: (source-byte budget, file cap), overridden only by this thread's index tests.
     static TEST_EXTRACT_CHUNK_LIMITS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
     static TEST_MAX_EXTRACTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // #515: probe another writer before each extraction chunk and the final write batch.
+    static TEST_INDEX_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
     // The documents the converter skipped on this thread's index runs: (path, reason).
     static DOC_SKIPS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn test_index_write_hook() {
+    TEST_INDEX_WRITE_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
 }
 
 // Absolute source paths whose read a test forces to fail in the work list (#471): a deterministic
@@ -1253,9 +1264,10 @@ pub fn index_path_as(
             // while a batch is already open (SqliteStore / PostgresStore), so a long-lived caller
             // that keeps the store after a failed re-index (the `watch` loop) would reuse the
             // half-written transaction on its next tick and commit the removals WITHOUT their
-            // restored semantic fields. Roll the open batch back so the next run starts clean and
-            // the stored fields survive. No-op when no batch is open; MemStore has no batch to
-            // discard (its default returns an error, deliberately ignored here).
+            // restored semantic fields. Roll the open short batch back so the next run starts
+            // clean; previously committed chunks keep their restored fields (#515). No-op when
+            // no batch is open; MemStore has no batch to discard (its default returns an error,
+            // deliberately ignored here).
             let _ = store.rollback_batch();
             return Err(e);
         }
@@ -1278,22 +1290,36 @@ pub fn index_path_as(
 /// emitted again — the original validator and time kept as they were, description/requirement
 /// re-masked by the store's redaction backstop (wicked-estate#438). A symbol that is gone loses
 /// its fields, as a removed node always did; the per-file count of those is returned for the
-/// caller to print as `SEMANTICS-DROPPED`, so the loss is never silent. Called inside the write
-/// batch, after the re-extraction's upserts, so a renamed symbol (same `SymbolId`, new file) is
-/// present and restored while a truly-deleted one is absent and counted.
+/// caller to print as `SEMANTICS-DROPPED`, so the loss is never silent. Called inside the final
+/// write batch, after the re-extraction's and resolution's upserts, so a renamed symbol (same
+/// `SymbolId`, new file) is present and restored while a truly-deleted one is absent and counted.
 fn restore_semantics(
     store: &mut dyn GraphStoreMutExt,
     saved: Vec<(String, SymbolId, NodeSemantics)>,
 ) -> Result<std::collections::BTreeMap<String, usize>> {
     let mut dropped: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (file, _, _) in restore_pending_semantics(store, saved)? {
+        *dropped.entry(file).or_default() += 1;
+    }
+    Ok(dropped)
+}
+
+/// Restore available symbols inside a chunk's write batch, keeping missing ids pending until a
+/// later chunk or resolution re-creates them (#515). Callers enqueue a file's saved fields only
+/// once its old contributions have been removed, so a future chunk cannot erase an early restore.
+fn restore_pending_semantics(
+    store: &mut dyn GraphStoreMutExt,
+    saved: Vec<(String, SymbolId, NodeSemantics)>,
+) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+    let mut pending = Vec::new();
     for (file, symbol, semantics) in saved {
         if store.get_node(&symbol)?.is_some() {
             store.restore_node_semantics(&symbol, &semantics)?;
         } else {
-            *dropped.entry(file).or_default() += 1;
+            pending.push((file, symbol, semantics));
         }
     }
-    Ok(dropped)
+    Ok(pending)
 }
 
 fn index_path_inner(
@@ -1709,12 +1735,8 @@ fn index_path_inner(
     for d in &deleted {
         forced_importers.remove(d); // a deleted importer is gone, not re-extracted
     }
-    // #438: the DELETED files are NOT removed here. Their node rows (and the semantic fields on
-    // them) must survive until the single write batch below, where they are snapshotted, then
-    // removed, then written back onto any symbol a rename re-homes — all in ONE batch that commits
-    // or rolls back atomically with the CHANGED-file re-extraction. The forced-importer discovery
-    // above already read the Imports edges it needs before anything is removed. The deleted set is
-    // left intact so `semantics_in_files` can still read it inside that batch.
+    // Keep DELETED files until their semantic fields have been snapshotted below (#438). The
+    // forced-importer discovery above already read the Imports edges it needs before removal.
 
     // ── Split CHANGED/NEW from UNCHANGED ────────────────────────────────────────────────────
     let work_by_rel: HashMap<String, FileWork> =
@@ -2020,42 +2042,47 @@ fn index_path_inner(
     let skipped_minified: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     // ── EXTRACT + WRITE ────────────────────────────────────────────────────────────────────
-    // write-nodes: upsert nodes rows (hot path — prepare_cached, single transaction).
+    // write-nodes: upsert nodes rows (hot path — prepare_cached, one transaction per chunk).
     // write-content: zstd-compress + upsert content/files rows.
-    // write-FTS: bulk populate nodes_fts after all nodes are written (ONE INSERT SELECT).
+    // write-FTS: bulk populate nodes_fts after the chunk's nodes are written.
     //
-    // All writes run inside ONE outer transaction so SQLite flushes once, not per row.
-    // FTS5 is populated in a single bulk pass AFTER all node rows exist — this replaces the
-    // previous per-node DELETE+INSERT pair which caused ~2× extra write traffic on the FTS
-    // shadow tables and forced the FTS trie to be rebuilt incrementally rather than in one shot.
+    // #515: extract outside a batch; hold the write lock only for each chunk's remove + write +
+    // semantic restore. This trades whole-run atomicity for progress by other SQLite writers.
+    // Digests are written only with the final resolution batch, so a failed run re-extracts the
+    // committed chunks on retry. Missing symbols' fields stay pending for cross-chunk moves and
+    // call-derived ids (#470), and are counted as dropped only after the final batch commits.
     let mut all_refs = Vec::new();
 
-    store.begin_batch()?;
     // #438: snapshot the semantic fields of every symbol homed in a file about to be removed —
-    // CHANGED and DELETED alike — INSIDE this batch, BEFORE either remove_file. remove_file deletes
-    // the node rows and with them those fields; a version change marks EVERY file changed. The
-    // snapshot is written back below onto whatever symbol the re-extraction (or a rename to a new
-    // file, same SymbolId) emits again. remove + upsert + restore share ONE batch, so a failure
-    // rolls the removal back and the stored fields survive (#438 item 2).
+    // CHANGED and DELETED alike — before any remove_file. Keep future chunks' entries separate
+    // until their old contributions have been removed; otherwise an early restore onto a symbol
+    // still in its old file would be lost when that file's chunk runs.
     let saved_semantics = {
         let mut rels: Vec<&str> = changed.iter().map(|fw| fw.rel.as_str()).collect();
         rels.extend(deleted.iter().map(String::as_str));
         store.semantics_in_files(&rels)?
     };
-    // Remove the DELETED files' contributions (nodes/edges + file row) now, inside the batch.
-    for path in &deleted {
-        store.remove_file(path)?;
-        // W7.1: log the removal so subscribers see the deletion delta.
-        let _ = store.log_change(ChangeOp::Remove, path);
+    let mut saved_semantics_by_file: HashMap<String, Vec<_>> = HashMap::new();
+    for entry in saved_semantics {
+        saved_semantics_by_file
+            .entry(entry.0.clone())
+            .or_default()
+            .push(entry);
     }
-    // Purge each CHANGED file's stale contributions before writing the new extraction. remove_file
-    // is idempotent when a file has no rows (never indexed before).
-    for fw in &changed {
-        store.remove_file(&fw.rel)?;
+    let mut pending_semantics = Vec::new();
+    // Deleted files get their own short batch, committed before extraction begins.
+    if !deleted.is_empty() {
+        store.begin_batch()?;
+        for path in &deleted {
+            store.remove_file(path)?;
+            pending_semantics.extend(saved_semantics_by_file.remove(path).unwrap_or_default());
+            // W7.1: log the removal so subscribers see the deletion delta.
+            let _ = store.log_change(ChangeOp::Remove, path);
+        }
+        store.commit_batch()?;
     }
     let mut total_symbols = 0usize;
     let mut files_extracted = 0usize;
-    let mut extracted_files = Vec::new();
     let mut extracted_symbols = HashSet::new();
     let mut backfill_probes = Vec::new();
     let mut seen_probes = HashSet::new();
@@ -2071,6 +2098,8 @@ fn index_path_inner(
             chunk_end += 1;
         }
         let chunk = &changed[chunk_start..chunk_end];
+        #[cfg(test)]
+        test_index_write_hook();
         let extractions: Vec<(String, wicked_estate_core::Extraction, String)> = chunk
             .par_iter()
             .filter_map(|fw| {
@@ -2223,6 +2252,12 @@ fn index_path_inner(
         #[cfg(test)]
         TEST_MAX_EXTRACTIONS.with(|v| v.set(v.get().max(extractions.len())));
 
+        store.begin_batch()?;
+        // Remove only this chunk's old contributions, after extraction has finished.
+        for fw in chunk {
+            store.remove_file(&fw.rel)?;
+            pending_semantics.extend(saved_semantics_by_file.remove(&fw.rel).unwrap_or_default());
+        }
         for (rel_path, extraction, text) in extractions {
             store.upsert_nodes_skip_fts(&extraction.nodes)?;
             store.upsert_edges(&extraction.local_edges)?;
@@ -2243,7 +2278,6 @@ fn index_path_inner(
             store.set_file_call_refs(&rel_path, &call_refs_json)?;
             total_symbols += extraction.nodes.len();
             files_extracted += 1;
-            extracted_files.push(rel_path);
             for n in &extraction.nodes {
                 extracted_symbols.insert(n.symbol.clone());
                 if n.name.is_empty() {
@@ -2268,6 +2302,11 @@ fn index_path_inner(
             }
             all_refs.extend(extraction.refs);
         }
+        store.bulk_rebuild_fts_for_files(
+            &chunk.iter().map(|fw| fw.rel.as_str()).collect::<Vec<_>>(),
+        )?;
+        pending_semantics = restore_pending_semantics(store, pending_semantics)?;
+        store.commit_batch()?;
         // The chunk's extractions and source text are dropped before extracting the next one.
         chunk_start = chunk_end;
     }
@@ -2344,22 +2383,6 @@ fn index_path_inner(
         }
     }
 
-    // Bulk-rebuild FTS for every node that belongs to a changed file in one SQL pass.
-    // This is O(1) SQL statements instead of O(2 × nodes) DELETE+INSERT pairs.
-    store.bulk_rebuild_fts_for_files(
-        &extracted_files
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-    )?;
-
-    // Record the new digest for each changed/new file so subsequent runs can skip it.
-    // W7.1: emit an Upsert change-log entry here — after the new state is durably committed —
-    // so the store is in a consistent state before the subscriber sees the delta.
-    for fw in &changed {
-        store.set_file_digest(&fw.rel, &fw.digest)?;
-        let _ = store.log_change(ChangeOp::Upsert, &fw.rel);
-    }
     // ── RESOLVE (changed files only) ─────────────────────────────────────────────────────────
     // Build the in-memory index from ALL nodes (unchanged + newly written). Resolve only the refs
     // that came from the changed files. The resolved edges are written to the store.
@@ -2404,14 +2427,21 @@ fn index_path_inner(
     // Unresolved refs come from the same attribution as the edges — the one definition in
     // docs/ENGINE-CONTRACT.md §2.1 (a ref is unresolved iff no resolver emitted an edge
     // attributed to it, per site).
-    // Continue the extraction batch through resolution: call-derived ids must exist before
-    // restoring their saved fields (#470). Errors still roll back at index_path_as.
+    // Resolution above reads the committed chunks without a batch. Write its results and the
+    // digests together now; call-derived ids must exist before the remaining restore (#470).
+    #[cfg(test)]
+    test_index_write_hook();
+    store.begin_batch()?;
+    for fw in &changed {
+        store.set_file_digest(&fw.rel, &fw.digest)?;
+        let _ = store.log_change(ChangeOp::Upsert, &fw.rel);
+    }
     store.upsert_nodes(&call_flow_nodes)?;
     store.upsert_edges(&resolution.edges)?;
     store.upsert_edges(&call_flow_edges)?;
     store.upsert_edges(&estate)?;
     store.upsert_unresolved_refs(&resolution.unresolved)?;
-    let dropped = restore_semantics(store, saved_semantics)?;
+    let dropped = restore_semantics(store, pending_semantics)?;
     store.commit_batch()?;
     // Report the drops only after the batch durably committed, so the line never describes a loss
     // a rollback undid.
@@ -3725,6 +3755,75 @@ mod tests {
         TEST_MAX_EXTRACTIONS.with(|v| v.set(0));
         index_path(store, root).unwrap();
         TEST_MAX_EXTRACTIONS.with(|v| v.get())
+    }
+
+    /// #515: a separate writer must make progress during extraction and before final writes.
+    /// With the old outer batch, remove_file takes the write lock before the first probe.
+    #[test]
+    fn chunked_index_releases_write_lock_during_extraction_and_resolution() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_INDEX_WRITE_HOOK.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let src = tempfile::tempdir().unwrap();
+        let total = 5;
+        for i in 0..total {
+            std::fs::write(
+                src.path().join(format!("file{i}.rs")),
+                format!("pub fn function{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("graph.db");
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let hook_calls = calls.clone();
+        TEST_INDEX_WRITE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                // SqliteStore's public constructor fixes its timeout at 30 s. Use its SQLite
+                // meta write directly so a held lock fails this probe after only 200 ms.
+                let side = rusqlite::Connection::open(&dbpath).unwrap();
+                side.busy_timeout(std::time::Duration::from_millis(200))
+                    .unwrap();
+                side.execute(
+                    "INSERT OR REPLACE INTO meta(k, v) VALUES('test.write_probe', 'ok')",
+                    [],
+                )
+                .expect("another writer must succeed outside the short write batches");
+                hook_calls.set(hook_calls.get() + 1);
+            }));
+        });
+
+        index_with_chunk_limits(&mut store, src.path(), Some((usize::MAX, 1)));
+        assert_eq!(
+            calls.get(),
+            total + 1,
+            "one probe per chunk plus final write"
+        );
+        assert_eq!(store.indexed_files().unwrap().len(), total);
+
+        // Exercise replacement plus deletion: the deletion batch must commit before extraction.
+        let remaining = total - 1;
+        std::fs::remove_file(src.path().join(format!("file{remaining}.rs"))).unwrap();
+        for i in 0..remaining {
+            std::fs::write(
+                src.path().join(format!("file{i}.rs")),
+                format!("pub fn function{i}() {{ let changed = {i}; }}\n"),
+            )
+            .unwrap();
+        }
+        calls.set(0);
+        index_with_chunk_limits(&mut store, src.path(), Some((usize::MAX, 1)));
+        assert_eq!(
+            calls.get(),
+            remaining + 1,
+            "every replacement chunk must probe"
+        );
+        assert_eq!(store.indexed_files().unwrap().len(), remaining);
     }
 
     fn chunk_graph_snapshot(
@@ -6132,7 +6231,162 @@ mod semantics_survive_reindex_tests {
         version_change_keeps_five_fields(&mut MemStore::new());
     }
 
-    /// #438 item 2: remove + upsert + restore share ONE batch, and a write failure mid-re-index
+    /// #515: a failure in chunk two rolls back only that chunk. Chunk one's annotation is
+    /// already restored, and its missing digest forces a plain retry to re-extract it too.
+    #[test]
+    fn sqlite_chunk_write_failure_keeps_fields_and_retry_reextracts() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_INDEX_WRITE_HOOK.with(|hook| *hook.borrow_mut() = None);
+                TEST_EXTRACT_CHUNK_LIMITS.with(|limits| limits.set(None));
+            }
+        }
+        let src = tempfile::tempdir().unwrap();
+        for i in 0..4 {
+            std::fs::write(
+                src.path().join(format!("file{i}.rs")),
+                format!("pub fn pay{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("graph.db");
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        let saved: Vec<_> = (0..4)
+            .map(|i| {
+                let symbol = sym_of(&store, &format!("pay{i}"));
+                let fields = annotate_with_claim(&mut store, &symbol);
+                (symbol, fields)
+            })
+            .collect();
+        for i in 0..4 {
+            std::fs::write(
+                src.path().join(format!("file{i}.rs")),
+                format!("pub fn pay{i}() {{ let _changed = {i}; }}\n"),
+            )
+            .unwrap();
+        }
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
+        let reset = Reset;
+        TEST_EXTRACT_CHUNK_LIMITS.with(|limits| limits.set(Some((usize::MAX, 1))));
+        let hook_db = dbpath.clone();
+        let mut calls = 0;
+        TEST_INDEX_WRITE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                calls += 1;
+                if calls == 2 {
+                    let side = rusqlite::Connection::open(&hook_db).unwrap();
+                    side.busy_timeout(std::time::Duration::from_millis(200))
+                        .unwrap();
+                    let incomplete: usize = side
+                        .query_row("SELECT count(*) FROM files WHERE digest = ''", [], |r| {
+                            r.get(0)
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        incomplete, 1,
+                        "the first chunk committed without its digest"
+                    );
+                    side.execute_batch(
+                        "CREATE TRIGGER we515_poison BEFORE INSERT ON nodes \
+                         BEGIN SELECT RAISE(ABORT, 'we515 injected write failure'); END;",
+                    )
+                    .unwrap();
+                }
+            }));
+        });
+        let err = index_path(&mut store, src.path()).expect_err("chunk two must fail");
+        assert!(err.to_string().contains("we515 injected write failure"));
+        drop(reset);
+        for (symbol, fields) in &saved {
+            assert_eq!(store.node_semantics(symbol).unwrap().as_ref(), Some(fields));
+        }
+        SEMANTICS_DROPS.with(|notes| assert!(notes.borrow().is_empty()));
+
+        let side = rusqlite::Connection::open(&dbpath).unwrap();
+        side.busy_timeout(std::time::Duration::from_millis(200))
+            .unwrap();
+        side.execute_batch("DROP TRIGGER we515_poison;").unwrap();
+        let incomplete: String = side
+            .query_row("SELECT path FROM files WHERE digest = ''", [], |r| r.get(0))
+            .unwrap();
+        // Corrupt the committed chunk's display name: retry must replace it despite unchanged
+        // source bytes since the failed run, rather than trusting that chunk as fully indexed.
+        assert_eq!(
+            side.execute(
+                "UPDATE nodes SET name = 'old_pay' WHERE file = ?1 AND name LIKE 'pay%'",
+                [&incomplete],
+            )
+            .unwrap(),
+            1
+        );
+        drop(side);
+        index_path(&mut store, src.path()).unwrap();
+        for (i, (symbol, fields)) in saved.iter().enumerate() {
+            assert_eq!(&sym_of(&store, &format!("pay{i}")), symbol);
+            assert_eq!(store.node_semantics(symbol).unwrap().as_ref(), Some(fields));
+            let file = format!("file{i}.rs");
+            let bytes = std::fs::read(src.path().join(&file)).unwrap();
+            assert_eq!(
+                store.file_digest(&file).unwrap(),
+                Some(source_digest(&bytes, None))
+            );
+        }
+    }
+
+    /// #515: annotated ids can move between chunks in either order. A missing id stays pending,
+    /// and a symbol still in a future chunk must retain its snapshot until that file is removed.
+    #[test]
+    fn sqlite_chunked_moves_keep_five_semantic_fields() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_EXTRACT_CHUNK_LIMITS.with(|limits| limits.set(None));
+            }
+        }
+        let _reset = Reset;
+        let src = tempfile::tempdir().unwrap();
+        for i in 0..4 {
+            std::fs::write(
+                src.path().join(format!("file{i}.cpp")),
+                format!("int compute{i}() {{ return {i}; }}\n"),
+            )
+            .unwrap();
+        }
+        let mut store = SqliteStore::in_memory().unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        let saved: Vec<_> = (0..4)
+            .map(|i| {
+                let symbol = sym_of(&store, &format!("compute{i}"));
+                let fields = annotate_with_claim(&mut store, &symbol);
+                (symbol, fields)
+            })
+            .collect();
+        for i in 0..4 {
+            let next = (i + 1) % 4;
+            std::fs::write(
+                src.path().join(format!("file{i}.cpp")),
+                format!("int compute{next}() {{ return {next}; }}\n"),
+            )
+            .unwrap();
+        }
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
+        TEST_EXTRACT_CHUNK_LIMITS.with(|limits| limits.set(Some((usize::MAX, 1))));
+        index_path(&mut store, src.path()).unwrap();
+        for (i, (symbol, fields)) in saved.iter().enumerate() {
+            assert_eq!(&sym_of(&store, &format!("compute{i}")), symbol);
+            assert_eq!(store.node_semantics(symbol).unwrap().as_ref(), Some(fields));
+            assert_eq!(
+                store.get_node(symbol).unwrap().unwrap().location.file,
+                format!("file{}.cpp", (i + 3) % 4)
+            );
+        }
+        SEMANTICS_DROPS.with(|notes| assert!(notes.borrow().is_empty()));
+    }
+
+    /// #438 item 2: remove + upsert + restore share one chunk batch, and a write failure mid-re-index
     /// rolls the removal back so the stored fields survive; a retry on the SAME store (no drop,
     /// no reconnect — as the `watch` loop keeps it) keeps them. The failure is a persistent
     /// `BEFORE INSERT` trigger installed over a side connection — it fires on the indexer's own
