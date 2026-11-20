@@ -1358,7 +1358,7 @@ fn memory_tool_schemas() -> Vec<Value> {
     vec![
         json!({"name":"memory.capture","description":"Capture a new memory node (episodic/semantic/procedural/archival).","inputSchema":{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"kind":{"type":"string","enum":["working","episode","entity","fact","skill","archive"]},"tier":{"type":"string","enum":["working","episodic","semantic","procedural","archival"]},"scope":{"type":"string","description":"Hierarchical scope path: slash-separated kind:id segments (e.g. \"org:acme/agent:claude\"). Empty, omitted, or null = root. Segments that are not kind:id pairs are rejected (invalid params), never silently dropped."},"about":{"type":"array","items":{"type":"string"}},"facets":{"type":"object","additionalProperties":{"type":"string"},"description":"Orthogonal intent-matching facets tagged to this memory's natural axis (e.g. {\"cli\":\"codex\"} or {\"repo\":\"wicked-estate\"}). Axis must match ^[a-z][a-z0-9_-]*$, value non-empty; invalid ⇒ invalid params."}}}}),
         json!({"name":"memory.recall","description":"Conversational recall: token-budgeted slice relevant to a query in scope. Returns [] when no memory matches lexically, via a graph seed, or semantically with cosine similarity >= 0.55. Working-tier matches follow all non-Working matches. Each item carries memory_id, scope (the item's own hierarchical scope, e.g. org:acme/agent:claude), content, tier, and score. Default visibility is inheritance: memories at `scope` or an ANCESTOR of it. Pass scope_prefix to flip to subtree-inclusive visibility instead.","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"scope":{"type":"string"},"scope_prefix":{"type":"string","description":"Optional subtree filter: when present, candidates are memories whose scope equals this prefix or DESCENDS from it (same predicate as memory.erase/memory.coverage scope_prefix), REPLACING the ancestor-visible inheritance filter from `scope`. \"\" = root subtree = every memory. Omitted or null = inheritance behavior. A recall with a prefix previews exactly the set memory.erase with that prefix would delete."},"seeds":{"type":"array","items":{"type":"string"}},"token_budget":{"type":"integer","default":2000},"intent":{"type":"object","additionalProperties":{"type":"string"},"description":"The session's intent tuple (axis→value). Recall returns the UNION of memories whose facets are a subset of this intent, specificity-ranked. A memory constraining an axis absent from intent is excluded. Omitted ⇒ empty ⇒ only unfaceted memories surface."}}}}),
-        json!({"name":"memory.reflect","description":"Consolidate a scope: distil episodic memories into semantic facts (T2), promote reinforced facts to skills (T3), and archive aged low-salience memories plus working memories older than 24 h (T4; nothing is deleted). Returns distilled_facts list.","inputSchema":{"type":"object","properties":{"scope":{"type":"string"}}}}),
+        json!({"name":"memory.reflect","description":"Consolidate a scope. First DELETES working memories older than 24 h (a summary built over one is removed, then rebuilt from its surviving durable sources), so do not keep scratch in working memory expecting reflect to preserve it. Then distils episodic memories into semantic facts (T2), promotes reinforced facts to skills (T3), and archives aged low-salience memories (T4). Returns distilled_facts list.","inputSchema":{"type":"object","properties":{"scope":{"type":"string"}}}}),
         json!({"name":"memory.erase","description":"Hard-delete memories. Pass exactly one of: `id` (erase that one memory, as memory.list or memory.recall returns its id) or `scope_prefix` (erase every memory whose scope is at or under the prefix).","inputSchema":{"type":"object","properties":{"scope_prefix":{"type":"string"},"id":{"type":"string"}}}}),
         json!({"name":"memory.learn","description":"Store a semantic fact and link it to code symbols atomically.","inputSchema":{"type":"object","required":["content","symbols"],"properties":{"content":{"description":"one specific, non-obvious fact","type":"string"},"scope":{"description":"e.g. project:my-repo","type":"string"},"symbols":{"description":"exact code symbol name(s) this fact concerns","items":{"type":"string"},"type":"array"},"tier":{"description":"semantic=fact/decision, procedural=how-it-works","enum":["semantic","procedural"],"type":"string"}}}}),
         json!({"name":"memory.coverage","description":"Coverage: memory node counts (total, by tier, by kind), optionally scoped.","inputSchema":{"type":"object","properties":{"scope_prefix":{"type":"string"}}}}),
@@ -3512,6 +3512,32 @@ mod tests {
                 "domain tool '{name}' must NOT be response-cacheable (#102)"
             );
         }
+    }
+
+    #[test]
+    fn memory_reflect_description_names_the_working_memory_deletion() {
+        // #395: reflect runs drop_expired_working first, which deletes; the description once
+        // said "nothing is deleted", which led agents to park scratch in working memory.
+        let schemas = memory_tool_schemas();
+        let reflect = schemas
+            .iter()
+            .find(|s| s["name"] == "memory.reflect")
+            .expect("memory.reflect is advertised");
+        let desc = reflect["description"]
+            .as_str()
+            .expect("description is text");
+        assert!(
+            !desc.contains("nothing is deleted"),
+            "reflect deletes expired working memories: {desc}"
+        );
+        assert!(
+            desc.contains("DELETES working memories older than 24 h"),
+            "description must name the deletion: {desc}"
+        );
+        assert!(
+            desc.contains("rebuilt from its surviving durable sources"),
+            "description must say what happens to summaries: {desc}"
+        );
     }
 
     #[test]
