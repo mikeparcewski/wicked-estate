@@ -1420,6 +1420,100 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         "restore must not create semantics for an absent symbol"
     );
 
+    // #461: deleting the last contribution retires semantics, including the validation claim.
+    let drop_node = Node::new(
+        sym("sem_drop"),
+        NodeKind::Function,
+        "sem_drop",
+        Language::new("rust"),
+        Location::new("src/sem_drop.rs", Span::ZERO),
+    );
+    store
+        .upsert_nodes(std::slice::from_ref(&drop_node))
+        .expect("#461: upsert sem_drop");
+    store
+        .set_node_semantics(
+            &sym("sem_drop"),
+            Some("removed symbol"),
+            Some("REQ-DROP"),
+            Some(&ValidationClaim::new(true, "conformance-drop-validator").expect("named actor")),
+        )
+        .expect("#461: set sem_drop semantics");
+    store
+        .remove_file("src/sem_drop.rs")
+        .expect("#461: remove sem_drop file");
+    assert!(
+        store
+            .node_semantics(&sym("sem_drop"))
+            .expect("#461: read removed sem_drop")
+            .is_none(),
+        "#461: a deleted node must have no semantics"
+    );
+    store
+        .upsert_nodes(std::slice::from_ref(&drop_node))
+        .expect("#461: re-upsert sem_drop without restoring semantics");
+    assert!(
+        store
+            .node_semantics(&sym("sem_drop"))
+            .expect("#461: read re-added sem_drop")
+            .is_none(),
+        "#461: re-adding a symbol must not revive its old semantics or approval"
+    );
+    assert!(
+        !store
+            .find_by_requirement("REQ-DROP")
+            .expect("#461: find removed requirement")
+            .iter()
+            .any(|n| n.symbol == sym("sem_drop")),
+        "#461: re-adding a symbol must not revive its old requirement lookup"
+    );
+
+    // #461: restoring an empty record stores nothing, and clears an existing record.
+    let empty_node = Node::new(
+        sym("sem_empty"),
+        NodeKind::Function,
+        "sem_empty",
+        Language::new("rust"),
+        Location::new("src/sem_empty.rs", Span::ZERO),
+    );
+    store
+        .upsert_nodes(&[empty_node])
+        .expect("#461: upsert sem_empty");
+    store
+        .restore_node_semantics(&sym("sem_empty"), &NodeSemantics::default())
+        .expect("#461: restore empty semantics on an unannotated node");
+    assert!(
+        store
+            .node_semantics(&sym("sem_empty"))
+            .expect("#461: read initially empty semantics")
+            .is_none(),
+        "#461: restoring default semantics on an unannotated node must store nothing"
+    );
+    store
+        .set_node_semantics(
+            &sym("sem_empty"),
+            Some("cleared symbol"),
+            Some("REQ-EMPTY"),
+            Some(&ValidationClaim::new(true, "conformance-empty-validator").expect("named actor")),
+        )
+        .expect("#461: set sem_empty semantics");
+    store
+        .restore_node_semantics(&sym("sem_empty"), &NodeSemantics::default())
+        .expect("#461: restore empty semantics over an existing record");
+    assert!(
+        store
+            .node_semantics(&sym("sem_empty"))
+            .expect("#461: read cleared semantics")
+            .is_none(),
+        "#461: restoring default semantics must clear an existing record and approval"
+    );
+    store
+        .remove_file("src/sem_drop.rs")
+        .expect("#461: clean up sem_drop");
+    store
+        .remove_file("src/sem_empty.rs")
+        .expect("#461: clean up sem_empty");
+
     // ── Typed annotations ─────────────────────────────────────────────────────
     // Every GraphStore must round-trip typed key/value annotations, support many per symbol,
     // filter by type, treat custom types identically to known ones, default untyped→"note", and
@@ -2504,7 +2598,26 @@ pub fn multi_file_contribution_suite<S: GraphStore>(store: &mut S) {
 
     // (MF-4) Remove the IMPL: the node survives RE-HOMED to the declaration contribution —
     // declaration-primary, the declaration's kind/doc/flag, edges still intact.
+    store
+        .set_node_semantics(
+            &sym("mf_reset"),
+            Some("shared symbol"),
+            Some("REQ-MF-KEEP"),
+            Some(&ValidationClaim::new(true, "conformance-mf-validator").expect("named actor")),
+        )
+        .expect("#461: set semantics on the two-file symbol");
+    let mf_semantics = store
+        .node_semantics(&sym("mf_reset"))
+        .expect("#461: snapshot two-file semantics")
+        .expect("#461: the two-file symbol has semantics");
     store.remove_file(DEF_FILE).expect("remove impl");
+    assert_eq!(
+        store
+            .node_semantics(&sym("mf_reset"))
+            .expect("#461: read semantics after re-home"),
+        Some(mf_semantics),
+        "#461: re-homing a node with a surviving contribution must preserve its semantics and approval"
+    );
     let got = store
         .get_node(&sym("mf_reset"))
         .expect("get_node after impl removal")
@@ -2539,6 +2652,13 @@ pub fn multi_file_contribution_suite<S: GraphStore>(store: &mut S) {
     // (MF-5) Remove the header as well — the LAST contribution: now the node is deleted, no
     // island, and the epoch machinery sees a real delete (a later re-add would be a reuse).
     store.remove_file(DECL_FILE).expect("remove last file");
+    assert!(
+        store
+            .node_semantics(&sym("mf_reset"))
+            .expect("#461: read semantics after last contribution removal")
+            .is_none(),
+        "#461: removing the last contribution must remove the symbol's semantics and approval"
+    );
     assert!(
         store
             .get_node(&sym("mf_reset"))
