@@ -813,6 +813,26 @@ impl FreshnessProbe {
                  results may mix old and new files and miss cross-file edges; re-run index if no run is active"
             ));
         }
+        if let Some(store) = self.store.as_deref() {
+            let repos = repo_scope::registry(store);
+            let keys = if repos.is_empty() {
+                vec![repo_scope::meta_key(None, "unreadable_files")]
+            } else {
+                repos
+                    .iter()
+                    .map(|repo| repo_scope::meta_key(Some(&repo.label), "unreadable_files"))
+                    .collect()
+            };
+            for key in keys {
+                for line in store.meta_get_key(&key).unwrap_or_default().lines() {
+                    if let Some((path, reason)) = line.split_once('\t') {
+                        diags.push(format!(
+                            "UNREADABLE: {path}: {reason} (old extractor output kept; retried each run)"
+                        ));
+                    }
+                }
+            }
+        }
 
         let mut files: BTreeSet<String> = BTreeSet::new();
         collect_files(content, &mut files);
@@ -983,6 +1003,56 @@ fn mark_rows(v: &mut Value, marks: &HashMap<&str, &str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotate_reports_unreadable_files_until_record_is_cleared() {
+        for label in [None, Some("ledger")] {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+            if let Some(label) = label {
+                store.meta_set_key("repo_labels", r#"["ledger","other"]"#);
+                for repo in [label, "other"] {
+                    store.meta_set_key(
+                        &repo_scope::meta_key(Some(repo), "root"),
+                        &root.path().to_string_lossy(),
+                    );
+                }
+                store.meta_set_key(&repo_scope::meta_key(Some("other"), "unreadable_files"), "");
+                // A labelled graph must read its per-repo records, not this unrelated key.
+                store.meta_set_key("unreadable_files", "ignored.rs\tread failed");
+            }
+            let key = repo_scope::meta_key(label, "unreadable_files");
+            let path = repo_scope::namespaced(label, "blocked.rs");
+            let doc = repo_scope::namespaced(label, "spec.docx");
+            store.meta_set_key(&key, &format!("{path}\tread failed\n{doc}\ttoo large"));
+            let mut probe = FreshnessProbe::with_store(":memory:", Some(Box::new(store)));
+            let mut content = json!({});
+            let mut diags = vec![];
+            probe.annotate(&mut content, &mut diags);
+            let unreadable: Vec<_> = diags
+                .iter()
+                .filter(|diag| diag.starts_with("UNREADABLE:"))
+                .collect();
+            assert_eq!(
+                unreadable,
+                vec![
+                    &format!(
+                        "UNREADABLE: {path}: read failed (old extractor output kept; retried each run)"
+                    ),
+                    &format!(
+                        "UNREADABLE: {doc}: too large (old extractor output kept; retried each run)"
+                    ),
+                ]
+            );
+            assert!(content["freshness"].get("unreadable_files").is_none());
+
+            probe.store.as_mut().unwrap().meta_set_key(&key, "");
+            let mut content = json!({});
+            let mut diags = vec![];
+            probe.annotate(&mut content, &mut diags);
+            assert!(!diags.iter().any(|diag| diag.starts_with("UNREADABLE:")));
+        }
+    }
 
     #[test]
     fn annotate_reports_unlabelled_indexing_until_marker_is_cleared() {

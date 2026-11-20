@@ -944,8 +944,12 @@ thread_local! {
     static TEST_MAX_EXTRACTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     // #515: probe another writer before each extraction chunk and the final write batch.
     static TEST_INDEX_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+    // #477: interrupt after graph commits, before certifying the extractor markers.
+    static TEST_INDEX_STAMP_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
     // The documents the converter skipped on this thread's index runs: (path, reason).
     static DOC_SKIPS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    // The files reported as retaining old extractor output on this thread: (path, reason).
+    static UNREADABLE_FILES: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -972,34 +976,36 @@ fn test_read_fails(abs: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The prefix written into the extractor version and rules-digest keys when a forced full
-/// re-extraction could not finish (a previously indexed file was skipped). No real version or
-/// digest starts with it, so the next run forces a full re-extraction whatever the binary or the
-/// rules are then, including after a rollback to the state the old markers named (#471).
+/// Written before a forced full re-extraction changes the graph. No real version or digest
+/// starts with it, so an interrupted run forces full re-extraction even after rollback (#477).
 const PENDING_FULL_PREFIX: &str = "pending-full:";
 
-/// Write the extractor version and rules-digest markers at the end of an index run (#471).
-/// `certify` is false when a forced full re-extraction skipped a previously indexed file: the
-/// markers then hold a `pending-full:` sentinel rather than the old values, because keeping the
-/// old values lets a rollback to that old binary or rule set match them and skip the
-/// re-extraction, leaving output from the newer extractor or rules under the old marker.
+/// Certify the current extractor markers and record files that still hold old output (#476).
+/// Those files retry individually, without forcing unrelated files through extraction again.
 fn stamp_extractor_markers(
     store: &mut dyn GraphStoreMutExt,
     version_key: &str,
     digest_key: &str,
     extra_digest: &str,
-    certify: bool,
+    unreadable_key: &str,
+    unreadable_files: &[(String, String)],
 ) {
-    if certify {
-        store.meta_set_key(version_key, env!("CARGO_PKG_VERSION"));
-        store.meta_set_key(digest_key, extra_digest);
-    } else {
-        store.meta_set_key(
-            version_key,
-            &format!("{PENDING_FULL_PREFIX}{}", env!("CARGO_PKG_VERSION")),
-        );
-        store.meta_set_key(digest_key, &format!("{PENDING_FULL_PREFIX}{extra_digest}"));
-    }
+    #[cfg(test)]
+    TEST_INDEX_STAMP_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+    // Persist the retry record before clearing either pending marker: interruption must not
+    // certify current output without preserving the skipped files' need for re-extraction.
+    let record = unreadable_files
+        .iter()
+        .map(|(path, reason)| format!("{path}\t{reason}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    store.meta_set_key(unreadable_key, &record);
+    store.meta_set_key(version_key, env!("CARGO_PKG_VERSION"));
+    store.meta_set_key(digest_key, extra_digest);
 }
 
 fn rel(root: &Path, path: &Path) -> String {
@@ -1579,6 +1585,24 @@ fn index_path_inner(
         );
     }
 
+    // #477: invalidate BOTH old markers before any extraction batch can commit. A killed run
+    // must not let rollback match the old markers and keep output from the interrupted run.
+    // Every successful exit replaces these sentinels with current markers and a retry record.
+    if force_full {
+        store.meta_set_key(
+            &version_key,
+            &format!("{PENDING_FULL_PREFIX}{}", env!("CARGO_PKG_VERSION")),
+        );
+        store.meta_set_key(&digest_key, &format!("{PENDING_FULL_PREFIX}{extra_digest}"));
+    }
+    let unreadable_key = repo_scope::meta_key(repo, "unreadable_files");
+    let prev_unreadable: HashSet<String> = store
+        .meta_get_key(&unreadable_key)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once('\t').map(|(path, _)| path.to_string()))
+        .collect();
+
     // W7: persist the git provenance collected above. A labelled run writes `repo:<label>:*` and
     // leaves the singular `repo_*` keys untouched — that is what stops the second repo indexed
     // into a graph from clobbering the first's commit/branch/remote/dirty.
@@ -1652,7 +1676,7 @@ fn index_path_inner(
     };
     // Report the skips collected so far (path + fixed reason; never document text). Called on
     // every successful exit, the no-change one included.
-    let flush_doc_skips = || {
+    let flush_doc_skips = |unreadable: &[(String, String)]| {
         let mut skips = doc_skips
             .lock()
             .map(|mut v| std::mem::take(&mut *v))
@@ -1663,6 +1687,13 @@ fn index_path_inner(
         }
         #[cfg(test)]
         DOC_SKIPS.with(|n| n.borrow_mut().extend(skips.iter().cloned()));
+        for (rel_path, reason) in unreadable {
+            eprintln!(
+                "UNREADABLE: {rel_path}: {reason} (old extractor output kept; retried each run)"
+            );
+        }
+        #[cfg(test)]
+        UNREADABLE_FILES.with(|n| n.borrow_mut().extend(unreadable.iter().cloned()));
     };
 
     let supported: Vec<(PathBuf, String)> = files
@@ -1754,21 +1785,32 @@ fn index_path_inner(
         })
         .collect();
 
-    // #471 (fix): a previously indexed file can leave `work` without being deleted. A read
-    // failure (a normal file) or a converter skip (a binary doc whose `read_capped` fails) drops
-    // it from the work list above while it stays in `current_rel_paths`, so it is neither
-    // re-extracted nor pruned. Under `force_full` (a version or rules change) the old extractor's
-    // output would then sit under a freshly stamped version/rules marker and a plain retry would
-    // never re-extract it. Detect that case here, once, so the three exits below write the
-    // `pending-full:` sentinel instead of the current version/rules (`stamp_extractor_markers`)
-    // and the next run forces a full re-extraction.
-    let skipped_prev_indexed = {
+    // #476: keep old output for unreadable indexed files, but retry only those that missed a
+    // full re-extraction or already held old output last run. Ordinary incremental read failures
+    // need no record: changed bytes will still mismatch their stored digest once readable.
+    let doc_skip_reasons: HashMap<String, String> = doc_skips
+        .lock()
+        .map(|skips| skips.iter().cloned().collect())
+        .unwrap_or_default();
+    let skipped_prev_indexed: HashSet<&String> = {
         let work_rels: HashSet<&str> = work.iter().map(|fw| fw.rel.as_str()).collect();
         previously_indexed
             .iter()
-            .any(|p| current_rel_paths.contains(p) && !work_rels.contains(p.as_str()))
+            .filter(|p| current_rel_paths.contains(*p) && !work_rels.contains(p.as_str()))
+            .collect()
     };
-    let stamp_version = !force_full || !skipped_prev_indexed;
+    let mut unreadable_files: Vec<(String, String)> = skipped_prev_indexed
+        .into_iter()
+        .filter(|path| force_full || prev_unreadable.contains(path.as_str()))
+        .map(|path| {
+            let reason = doc_skip_reasons
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| "read failed".to_string());
+            (path.clone(), reason)
+        })
+        .collect();
+    unreadable_files.sort();
 
     // ── Remove DELETED files ─────────────────────────────────────────────────────────────────
     let deleted: Vec<String> = previously_indexed
@@ -1810,6 +1852,7 @@ fn index_path_inner(
     for (rel, fw) in &work_by_rel {
         let stored = store.file_digest(rel)?;
         if force_full
+            || prev_unreadable.contains(rel)
             || forced_importers.contains(rel)
             || stored.as_deref() != Some(fw.digest.as_str())
         {
@@ -2028,17 +2071,16 @@ fn index_path_inner(
         if !override_gate {
             store.meta_set_key(&override_key, cur_overrides);
         }
-        // #471: certify the extractor version/rules only after successful indexing, and only when
-        // no previously indexed file was skipped under force_full — else the `pending-full:`
-        // sentinel goes in, so the next run re-extracts the skipped file.
+        // #476: certify current markers; skipped files retain their individual retry record.
         stamp_extractor_markers(
             store,
             &version_key,
             &digest_key,
             &extra_digest,
-            stamp_version,
+            &unreadable_key,
+            &unreadable_files,
         );
-        flush_doc_skips();
+        flush_doc_skips(&unreadable_files);
         return store.stats();
     }
 
@@ -2081,16 +2123,16 @@ fn index_path_inner(
         if !override_gate {
             store.meta_set_key(&override_key, cur_overrides);
         }
-        // #471: certify the extractor version/rules only after successful indexing, and only when
-        // no previously indexed file was skipped under force_full (see the stamp above).
+        // #476: deletion-only runs publish the same markers and retry record as other exits.
         stamp_extractor_markers(
             store,
             &version_key,
             &digest_key,
             &extra_digest,
-            stamp_version,
+            &unreadable_key,
+            &unreadable_files,
         );
-        flush_doc_skips();
+        flush_doc_skips(&unreadable_files);
         return store.stats();
     }
 
@@ -2379,7 +2421,7 @@ fn index_path_inner(
     }
     drop(seen_probes);
 
-    flush_doc_skips();
+    flush_doc_skips(&unreadable_files);
     let mut skipped_min = skipped_minified
         .into_inner()
         .unwrap_or_else(|e| e.into_inner());
@@ -2722,16 +2764,15 @@ fn index_path_inner(
 
     // The id-scheme key is written LAST — only after extraction + resolution durably completed —
     // so an interrupted migration re-fires the scheme gate instead of certifying a mixed DB.
-    // The version/rules keys follow the same discipline (#471), so rollback leaves a plain
-    // retry able to force full re-extraction. When a previously indexed file was skipped under
-    // force_full they hold the `pending-full:` sentinel instead, so neither a plain retry nor a
-    // rollback to the old binary or rules can skip the re-extraction.
+    // Replace the pending version/rules markers with current values (#477); files that still
+    // hold old output are recorded for individual retries (#476).
     stamp_extractor_markers(
         store,
         &version_key,
         &digest_key,
         &extra_digest,
-        stamp_version,
+        &unreadable_key,
+        &unreadable_files,
     );
     store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
     // The plugin-override key follows the same write-LAST rule (ADR-010): stamped only once the
@@ -6591,13 +6632,268 @@ mod semantics_survive_reindex_tests {
         }
     }
 
-    /// #471 (fix): under `force_full` a previously indexed file whose READ fails during a
-    /// version-change re-index is dropped from the work list but stays in `current_rel_paths`, so
-    /// it is neither re-extracted nor deleted. If the version/rules markers are stamped anyway, the
-    /// old extractor's output sits under the new marker and a plain retry (no metadata reset) never
-    /// re-extracts it. The fix writes the `pending-full:` sentinel instead, so the next plain retry
-    /// forces a full re-extraction. The blocked run must also keep the file's old rows and its
-    /// reviewed fields.
+    fn assert_same_extracted_graph(actual: &SqliteStore, fresh: &SqliteStore) {
+        let mut actual_nodes = GraphRead::all_nodes(actual).unwrap();
+        let mut fresh_nodes = GraphRead::all_nodes(fresh).unwrap();
+        actual_nodes.sort_by_key(|node| node.symbol.clone());
+        fresh_nodes.sort_by_key(|node| node.symbol.clone());
+        assert_eq!(actual_nodes, fresh_nodes);
+        let sorted_edges = |store: &SqliteStore| {
+            let mut edges: Vec<String> = store
+                .all_edges()
+                .unwrap()
+                .iter()
+                .map(|edge| serde_json::to_string(edge).unwrap())
+                .collect();
+            edges.sort();
+            edges
+        };
+        assert_eq!(sorted_edges(actual), sorted_edges(fresh));
+    }
+
+    /// #477: a killed run has committed the new rule's output and the file digests, but has
+    /// not stamped the markers. Rolling the rules back must still force full re-extraction.
+    #[test]
+    fn sqlite_interrupted_rules_change_then_rollback_retry_matches_fresh() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_INDEX_STAMP_HOOK.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.rs"), "pub fn keep() {}\n").unwrap();
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("g.db");
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        let rule_dir = src.path().join(".wicked-estate-extractors");
+        std::fs::create_dir(&rule_dir).unwrap();
+        let rule = rule_dir.join("interrupted.toml");
+        std::fs::write(
+            &rule,
+            r#"[[rule]]
+name = "reviewmarker"
+file_glob = "a.rs"
+pattern = '(?P<n>keep)'
+[rule.emit_node]
+id_template = "reviewmarker:{n}"
+label_capture = "n"
+kind = "synthetic"
+node_scheme = "reviewmarker"
+"#,
+        )
+        .unwrap();
+        let reset = Reset;
+        TEST_INDEX_STAMP_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|| panic!("interrupted before marker stamp")));
+        });
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            index_path(&mut store, src.path())
+        }));
+        drop(reset);
+        assert!(interrupted.is_err());
+        drop(store);
+
+        // Reopening proves the stale rule node AND the source digest were committed before
+        // interruption; an ordinary digest-based retry alone cannot remove the node.
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+        for key in ["indexed_version", "extra_rules_digest"] {
+            assert!(
+                store
+                    .meta_get_key(key)
+                    .is_some_and(|value| value.starts_with(PENDING_FULL_PREFIX)),
+                "{key} must stay pending after interruption"
+            );
+        }
+        assert!(
+            GraphRead::all_nodes(&store)
+                .unwrap()
+                .iter()
+                .any(|node| node.symbol.as_str().contains("reviewmarker"))
+        );
+        let bytes = std::fs::read(src.path().join("a.rs")).unwrap();
+        assert_eq!(
+            store.file_digest("a.rs").unwrap(),
+            Some(source_digest(&bytes, None))
+        );
+        std::fs::remove_file(rule).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        let mut fresh = SqliteStore::in_memory().unwrap();
+        index_path(&mut fresh, src.path()).unwrap();
+        assert_same_extracted_graph(&store, &fresh);
+    }
+
+    /// #476: after the upgrade pass, a persistently unreadable file must not make unrelated
+    /// readable files re-extract on each retry. Exercise each successful exit on run two.
+    fn persistent_read_failure_retries_only_recorded_file(exit: &str) {
+        let src = tempfile::tempdir().unwrap();
+        for (file, name) in [("a.rs", "readable"), ("b.rs", "blocked"), ("c.rs", "gone")] {
+            std::fs::write(src.path().join(file), format!("pub fn {name}() {{}}\n")).unwrap();
+        }
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("g.db");
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        let blocked_symbol = sym_of(&store, "blocked");
+        store.meta_set_key("indexed_version", "0.0.0-older");
+        let blocked = ReadFailGuard::new(src.path().join("b.rs"));
+        index_path(&mut store, src.path()).unwrap();
+        let side = rusqlite::Connection::open(&dbpath).unwrap();
+        assert_eq!(
+            side.execute(
+                "UPDATE nodes SET name = 'probe_readable' WHERE file = 'a.rs' AND name = 'readable'",
+                [],
+            )
+            .unwrap(),
+            1
+        );
+        match exit {
+            "no-change" => {}
+            "deletion-only" => std::fs::remove_file(src.path().join("c.rs")).unwrap(),
+            "normal-end" => {
+                std::fs::write(src.path().join("d.rs"), "pub fn added() {}\n").unwrap();
+            }
+            _ => panic!("unknown exit: {exit}"),
+        }
+        UNREADABLE_FILES.with(|notes| notes.borrow_mut().clear());
+        index_path(&mut store, src.path()).unwrap();
+        let untouched: usize = side
+            .query_row(
+                "SELECT count(*) FROM nodes WHERE name = 'probe_readable'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(untouched, 1, "run two must not re-extract a.rs ({exit})");
+        assert_eq!(
+            store.meta_get_key("indexed_version").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            store.meta_get_key("unreadable_files").as_deref(),
+            Some("b.rs\tread failed")
+        );
+        UNREADABLE_FILES.with(|notes| {
+            assert_eq!(
+                &*notes.borrow(),
+                &[("b.rs".to_string(), "read failed".to_string())],
+                "one diagnostic per recorded file per run"
+            );
+        });
+        // Recovery must force just b.rs, even though its bytes/digest never changed.
+        assert_eq!(
+            side.execute(
+                "UPDATE nodes SET name = 'old_blocked' WHERE name = 'blocked'",
+                []
+            )
+            .unwrap(),
+            1
+        );
+        drop(blocked);
+        UNREADABLE_FILES.with(|notes| notes.borrow_mut().clear());
+        index_path(&mut store, src.path()).unwrap();
+        assert_eq!(sym_of(&store, "blocked"), blocked_symbol);
+        let untouched: usize = side
+            .query_row(
+                "SELECT count(*) FROM nodes WHERE name = 'probe_readable'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(untouched, 1, "recovery must not re-extract a.rs");
+        assert_eq!(store.meta_get_key("unreadable_files").as_deref(), Some(""));
+        UNREADABLE_FILES.with(|notes| assert!(notes.borrow().is_empty()));
+    }
+
+    #[test]
+    fn sqlite_persistent_read_failure_no_change_retry_is_incremental() {
+        persistent_read_failure_retries_only_recorded_file("no-change");
+    }
+
+    #[test]
+    fn sqlite_persistent_read_failure_deletion_only_retry_is_incremental() {
+        persistent_read_failure_retries_only_recorded_file("deletion-only");
+    }
+
+    #[test]
+    fn sqlite_persistent_read_failure_normal_end_retry_is_incremental() {
+        persistent_read_failure_retries_only_recorded_file("normal-end");
+    }
+
+    #[test]
+    fn sqlite_version_change_deletion_only_records_unreadable_file() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.rs"), "pub fn blocked() {}\n").unwrap();
+        std::fs::write(src.path().join("b.rs"), "pub fn gone() {}\n").unwrap();
+        let mut store = SqliteStore::in_memory().unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        std::fs::remove_file(src.path().join("b.rs")).unwrap();
+        store.meta_set_key("indexed_version", "0.0.0-older");
+        let blocked = ReadFailGuard::new(src.path().join("a.rs"));
+        index_path(&mut store, src.path()).unwrap();
+        assert_eq!(
+            store.meta_get_key("indexed_version").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            store.meta_get_key("unreadable_files").as_deref(),
+            Some("a.rs\tread failed")
+        );
+        assert!(store.file_digest("b.rs").unwrap().is_none());
+        drop(blocked);
+        index_path(&mut store, src.path()).unwrap();
+        assert_eq!(store.meta_get_key("unreadable_files").as_deref(), Some(""));
+    }
+
+    #[test]
+    fn sqlite_unreadable_records_are_sorted_and_repo_scoped() {
+        let src = tempfile::tempdir().unwrap();
+        for file in ["b.rs", "a.rs"] {
+            std::fs::write(src.path().join(file), "pub fn kept() {}\n").unwrap();
+        }
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("other.rs"), "pub fn other() {}\n").unwrap();
+        let mut store = SqliteStore::in_memory().unwrap();
+        index_path_as(&mut store, src.path(), Some("ledger")).unwrap();
+        index_path_as(&mut store, other.path(), Some("other")).unwrap();
+        let other_version = repo_scope::meta_key(Some("other"), "indexed_version");
+        let key = repo_scope::meta_key(Some("ledger"), "unreadable_files");
+        store.meta_set_key(
+            &repo_scope::meta_key(Some("ledger"), "indexed_version"),
+            "older",
+        );
+        let blocked_a = ReadFailGuard::new(src.path().join("a.rs"));
+        let blocked_b = ReadFailGuard::new(src.path().join("b.rs"));
+        index_path_as(&mut store, src.path(), Some("ledger")).unwrap();
+        assert_eq!(
+            store.meta_get_key(&key).as_deref(),
+            Some("ledger/a.rs\tread failed\nledger/b.rs\tread failed")
+        );
+        index_path_as(&mut store, other.path(), Some("other")).unwrap();
+        assert_eq!(
+            store.meta_get_key(&key).as_deref(),
+            Some("ledger/a.rs\tread failed\nledger/b.rs\tread failed")
+        );
+        assert_eq!(
+            store.meta_get_key(&other_version).as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        // A deleted file leaves the retry record, while the still-unreadable file remains.
+        std::fs::remove_file(src.path().join("b.rs")).unwrap();
+        index_path_as(&mut store, src.path(), Some("ledger")).unwrap();
+        assert_eq!(
+            store.meta_get_key(&key).as_deref(),
+            Some("ledger/a.rs\tread failed")
+        );
+        drop((blocked_a, blocked_b));
+        index_path_as(&mut store, src.path(), Some("ledger")).unwrap();
+        assert_eq!(store.meta_get_key(&key).as_deref(), Some(""));
+    }
+
+    /// #471 / #476: an upgrade records a skipped file while certifying current markers. A plain
+    /// retry must re-extract that file once readable, keeping its old rows and reviewed fields
+    /// until then.
     #[test]
     fn sqlite_version_change_read_failure_plain_retry_reextracts() {
         let src = tempfile::tempdir().unwrap();
@@ -6656,16 +6952,16 @@ mod semantics_survive_reindex_tests {
         );
         assert_eq!(
             store.meta_get_key("indexed_version").as_deref(),
-            Some(&*format!(
-                "{PENDING_FULL_PREFIX}{}",
-                env!("CARGO_PKG_VERSION")
-            )),
-            "an incomplete forced run must leave the pending-full sentinel, not a current stamp"
+            Some(env!("CARGO_PKG_VERSION")),
+            "a successful run certifies the current version"
+        );
+        assert_eq!(
+            store.meta_get_key("unreadable_files").as_deref(),
+            Some("a.rs\tread failed"),
+            "the skipped file must be recorded for a plain retry"
         );
 
-        // Phase 3 (#471 fix): a plain retry, with NO metadata reset, must re-extract the skipped
-        // file. Stamping the version current in phase 2 made this retry see no change and leave
-        // the stale `old_pay` in place.
+        // Phase 3: a plain retry, with NO metadata reset, must re-extract the recorded file.
         index_path(&mut store, src.path()).unwrap();
         assert_eq!(
             count_name("pay"),
@@ -6687,13 +6983,14 @@ mod semantics_survive_reindex_tests {
             Some(env!("CARGO_PKG_VERSION")),
             "a complete run certifies the current version"
         );
+        assert_eq!(store.meta_get_key("unreadable_files").as_deref(), Some(""));
     }
 
     /// #471 (fix, rollback): change the extra-edge rules while a previously indexed file cannot be
     /// read, then roll the rules back before retrying. Keeping the OLD digest on the incomplete
     /// run let the rollback match it, so the retry skipped re-extraction and the readable file
-    /// kept a node only the rolled-back rule creates. The `pending-full:` sentinel matches no
-    /// rule set, so the retry re-extracts and the graph equals a fresh index under the same rules.
+    /// kept a node only the rolled-back rule creates. Stamping the current rules makes rollback
+    /// mismatch them, so the retry re-extracts and equals a fresh index under the same rules.
     #[test]
     fn sqlite_rules_change_with_skipped_file_then_rollback_retry_reextracts() {
         fn markers(store: &SqliteStore) -> usize {
@@ -6729,6 +7026,7 @@ node_scheme = "reviewmarker"
 "#,
         )
         .unwrap();
+        let (_, current_digest) = load_extra_edge_rules(src.path());
         {
             let _blocked = ReadFailGuard::new(b.clone());
             index_path(&mut store, src.path()).unwrap();
@@ -6738,11 +7036,14 @@ node_scheme = "reviewmarker"
             1,
             "the readable file is extracted under R1"
         );
-        assert!(
-            store
-                .meta_get_key("extra_rules_digest")
-                .is_some_and(|d| d.starts_with(PENDING_FULL_PREFIX)),
-            "the incomplete forced run leaves the pending-full sentinel"
+        assert_eq!(
+            store.meta_get_key("extra_rules_digest"),
+            Some(current_digest),
+            "a successful run stamps current rules even when a file was skipped"
+        );
+        assert_eq!(
+            store.meta_get_key("unreadable_files").as_deref(),
+            Some("b.rs\tread failed")
         );
 
         // Roll the rules back to R0 (no rules) and retry with b.rs readable again.
@@ -6752,6 +7053,7 @@ node_scheme = "reviewmarker"
         let mut fresh = SqliteStore::in_memory().unwrap();
         index_path(&mut fresh, src.path()).unwrap();
         assert_eq!(markers(&fresh), 0);
+        assert_same_extracted_graph(&store, &fresh);
         assert_eq!(
             markers(&store),
             markers(&fresh),
