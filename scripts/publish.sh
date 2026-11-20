@@ -10,6 +10,7 @@
 # Usage:
 #   ./scripts/publish.sh             # real publish (uploads to crates.io)
 #   ./scripts/publish.sh --dry-run   # package each crate without uploading
+#   ./scripts/publish.sh --list      # print publishable crates in dependency order
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -85,7 +86,7 @@ sys.exit(0 if (isinstance(pub, list) and not pub) else 1)
 # Vendored grammars are EXCLUDED from the workspace, so `-p` can't address them; publish each by its
 # manifest path (vendor/tree-sitter-<suffix>/Cargo.toml). Other crates are members addressable by `-p`.
 for c in "${CRATES[@]}"; do
-  echo ">>> $c"
+  if [ "$DRY" != "--list" ]; then echo ">>> $c"; fi
   # --allow-dirty: `cargo publish` regenerates each crate's Cargo.lock during its build/verify step
   # (deps drift between releases), which trips the git-clean check on a fresh CI checkout. The lock
   # is not part of a library's published package, so the upload still matches the tagged source.
@@ -94,7 +95,7 @@ for c in "${CRATES[@]}"; do
       suffix="${c#wicked-estate-tree-sitter-}"
       manifest="crates/wicked-estate-extract/vendor/tree-sitter-${suffix}/Cargo.toml"
       if manifest_is_nopublish "$manifest" "$c"; then
-        echo "    skip — \`publish = false\` in $manifest (not publishable to crates.io)"
+        if [ "$DRY" != "--list" ]; then echo "    skip — \`publish = false\` in $manifest (not publishable to crates.io)"; fi
         continue
       fi
       PUB=(cargo publish --manifest-path "$manifest" --allow-dirty)
@@ -102,13 +103,17 @@ for c in "${CRATES[@]}"; do
     *)
       case "$WORKSPACE_NOPUBLISH" in
         *" $c "*)
-          echo "    skip — \`publish = false\` (not publishable to crates.io)"
+          if [ "$DRY" != "--list" ]; then echo "    skip — \`publish = false\` (not publishable to crates.io)"; fi
           continue
           ;;
       esac
       PUB=(cargo publish -p "$c" --allow-dirty)
       ;;
   esac
+  if [ "$DRY" = "--list" ]; then
+    printf '%s\n' "$c"
+    continue
+  fi
   if [ "$DRY" = "--dry-run" ]; then
     # A dry-run can only fully validate crates whose deps are already on crates.io. Dependent
     # crates pin internal deps by version (e.g. wicked-estate-core = "0.0.1") that cargo can't
@@ -137,6 +142,8 @@ for c in "${CRATES[@]}"; do
     sleep 15
   fi
 done
+
+if [ "$DRY" = "--list" ]; then exit 0; fi
 
 echo
 echo "done. Users can now: cargo install wicked-estate"
