@@ -3491,9 +3491,10 @@ impl GraphWrite for SqliteStore {
         Ok(())
     }
 
+    /// IMMEDIATE takes the write lock before any read to prevent stale WAL snapshots (#532).
     fn begin_batch(&mut self) -> Result<()> {
         if !self.in_batch {
-            self.conn.execute_batch("BEGIN").map_err(st)?;
+            self.conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
             self.in_batch = true;
         }
         Ok(())
@@ -4300,26 +4301,37 @@ impl GraphWrite for SqliteStore {
     ) -> Result<SupportReplacement> {
         let facts = wicked_estate_core::support::scrub_facts(facts)?;
         let incoming = normalize_facts(&facts)?;
-        // A SAVEPOINT nests inside an open batch (BEGIN) and stands alone outside one, so the
-        // replacement is all-or-nothing in both modes without committing the caller's batch.
-        self.conn
-            .execute_batch("SAVEPOINT ts_s2a_replace")
-            .map_err(st)?;
-        match self.replace_edge_supports_inner(owner, generation, incoming) {
-            Ok(report) => {
-                self.conn
-                    .execute_batch("RELEASE ts_s2a_replace")
-                    .map_err(st)?;
-                Ok(report)
+        // A standalone SAVEPOINT is deferred: take the write lock before its reads (#532).
+        // Inside a batch, keep the savepoint without committing the caller's transaction.
+        let own_transaction = self.conn.is_autocommit();
+        if own_transaction {
+            self.conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
+        }
+        let result = (|| {
+            self.conn
+                .execute_batch("SAVEPOINT ts_s2a_replace")
+                .map_err(st)?;
+            let report = self.replace_edge_supports_inner(owner, generation, incoming)?;
+            self.conn
+                .execute_batch("RELEASE ts_s2a_replace")
+                .map_err(st)?;
+            if own_transaction {
+                self.conn.execute_batch("COMMIT").map_err(st)?;
             }
+            Ok(report)
+        })();
+        match result {
+            Ok(report) => Ok(report),
             Err(e) => {
                 // SQLite can abort the whole transaction on its own (SQLITE_FULL, IOERR, NOMEM):
                 // the savepoint is then gone, so its rollback fails. Report the ORIGINAL error
                 // either way, and stop claiming an open batch over a transaction that is dead.
-                if let Err(rollback) = self
-                    .conn
-                    .execute_batch("ROLLBACK TO ts_s2a_replace; RELEASE ts_s2a_replace")
-                {
+                let rollback = if own_transaction {
+                    "ROLLBACK"
+                } else {
+                    "ROLLBACK TO ts_s2a_replace; RELEASE ts_s2a_replace"
+                };
+                if let Err(rollback) = self.conn.execute_batch(rollback) {
                     if self.conn.is_autocommit() {
                         self.in_batch = false;
                     }
@@ -8258,6 +8270,126 @@ mod tests {
         )
     }
 
+    /// begin_batch stays usable on read-only handles after the IMMEDIATE change (#532).
+    #[test]
+    fn begin_batch_on_a_read_only_handle_still_reads_532() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("readonly-batch-532.db");
+        let node = wal_test_node("readonly_batch_532");
+        let mut store = SqliteStore::open(&path).unwrap();
+        store.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+        drop(store);
+
+        let mut store = SqliteStore::open_readonly(&path).unwrap();
+        store.begin_batch().unwrap();
+        assert!(store.get_node(&node.symbol).unwrap().is_some());
+        store.commit_batch().unwrap();
+    }
+
+    /// A read-first batch must serialize a concurrent writer and preserve both writes (#532).
+    /// Without BEGIN IMMEDIATE, the other writer commits first and the batch hits BUSY_SNAPSHOT.
+    #[test]
+    fn batch_that_reads_first_waits_for_a_concurrent_writer_532() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("batch-532.db");
+        let mut store = SqliteStore::open(&path).unwrap();
+        let writer = Connection::open(&path).unwrap();
+        writer.busy_timeout(Duration::from_secs(30)).unwrap();
+        let seed = wal_test_node("batch_seed_532");
+        let added = wal_test_node("batch_added_532");
+        store.upsert_nodes(std::slice::from_ref(&seed)).unwrap();
+
+        store.begin_batch().unwrap();
+        assert!(store.get_node(&seed.symbol).unwrap().is_some());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = writer.execute("INSERT INTO symbols(sym) VALUES ('batch_writer_532')", []);
+            done_tx.send(()).unwrap();
+            result
+        });
+        started_rx.recv().unwrap();
+        // Deferred BEGIN lets B commit here; IMMEDIATE keeps it waiting until A commits below.
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_millis(300)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        let write = store.upsert_nodes(std::slice::from_ref(&added));
+        let commit = store.commit_batch();
+        let other_write = writer.join().unwrap();
+
+        assert!(write.is_ok(), "read-first batch write failed: {write:?}");
+        assert!(commit.is_ok(), "batch commit failed: {commit:?}");
+        assert!(
+            other_write.is_ok(),
+            "concurrent write failed: {other_write:?}"
+        );
+        assert!(store.get_node(&added.symbol).unwrap().is_some());
+        let present: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM symbols WHERE sym = 'batch_writer_532')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            present,
+            "the concurrent writer's committed row must survive"
+        );
+    }
+
+    /// A standalone support replacement must wait before reading a concurrent writer's state.
+    /// Without its own IMMEDIATE transaction, its read-first savepoint fails to upgrade (#532).
+    #[test]
+    fn standalone_support_replacement_waits_for_a_concurrent_writer_532() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        use wicked_estate_core::ResolutionTier;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("support-532.db");
+        let mut store = SqliteStore::open(&path).unwrap();
+        let writer = Connection::open(&path).unwrap();
+        writer.busy_timeout(Duration::from_secs(30)).unwrap();
+        writer
+            .execute_batch(
+                "BEGIN IMMEDIATE; INSERT INTO symbols(sym) VALUES ('support_writer_532')",
+            )
+            .unwrap();
+        let owner = SupportOwner::new("scip-typescript", "web").unwrap();
+        let fact = SupportFact::from_edge(ts_flow(1, ResolutionTier::Scip, "scip")).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            ready_rx.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            writer.execute_batch("COMMIT")
+        });
+
+        assert!(store.conn.is_autocommit());
+        ready_tx.send(()).unwrap();
+        let replacement = store.replace_edge_supports(&owner, 1, std::slice::from_ref(&fact));
+        let other_commit = writer.join().unwrap();
+        assert!(
+            replacement.is_ok(),
+            "standalone support replacement failed: {replacement:?}"
+        );
+        assert!(
+            other_commit.is_ok(),
+            "concurrent commit failed: {other_commit:?}"
+        );
+        assert!(store.conn.is_autocommit());
+        assert!(!store.in_batch);
+        let (_, supports, generation) = ts_state(&store);
+        assert_eq!(generation, Some(1));
+        assert_eq!(supports.len(), 1);
+        assert_eq!(supports[0].fact_id, fact.fact_id);
+    }
+
     /// The conformance suite's failure cases are all rejected BEFORE any write, so they cannot
     /// prove the savepoint. This injects a storage failure MID-replacement (after the deletes and
     /// some inserts already ran) and requires the store to be byte-identical afterwards — outside
@@ -8321,6 +8453,8 @@ mod tests {
                 before,
                 "no half-old/half-new generation (in_batch={in_batch})"
             );
+            assert_eq!(store.conn.is_autocommit(), !in_batch);
+            assert_eq!(store.in_batch, in_batch);
             if in_batch {
                 store.commit_batch().unwrap();
                 assert!(
