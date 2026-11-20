@@ -939,6 +939,9 @@ fn secret_exclusion_note(deleted: &[String]) -> Option<String> {
 thread_local! {
     static SEMANTICS_DROPS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     static SECRET_NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    // #422: (source-byte budget, file cap), overridden only by this thread's index tests.
+    static TEST_EXTRACT_CHUNK_LIMITS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+    static TEST_MAX_EXTRACTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     // The documents the converter skipped on this thread's index runs: (path, reason).
     static DOC_SKIPS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -2005,164 +2008,270 @@ fn index_path_inner(
         return store.stats();
     }
 
-    // ── EXTRACT: parse + query only CHANGED/NEW files in parallel ───────────────────────────
-    // #438: EXTRACT runs BEFORE any destructive write. The old nodes of CHANGED and DELETED files
-    // are not removed until the single write batch below, so a parse that produces nothing (or an
-    // interrupted run) never commits a removal it cannot pair with a re-write.
-    // Each element carries the rel path + extraction + source text (for content storage).
-    // Minified files are detected via is_minified_or_huge and skipped; each skipped path is kept
-    // so index_path can name every file it passed over (#478).
+    // #422: bound each parallel extraction by source bytes AND file count. An oversized file
+    // runs alone so every chunk makes progress. Source bytes in `changed` remain resident; only
+    // a chunk's Extraction + redacted text are held until its writes finish.
+    const EXTRACT_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+    let (chunk_byte_budget, chunk_file_cap) = (EXTRACT_CHUNK_BYTES, 512);
+    #[cfg(test)]
+    let (chunk_byte_budget, chunk_file_cap) = TEST_EXTRACT_CHUNK_LIMITS
+        .with(|v| v.get())
+        .unwrap_or((chunk_byte_budget, chunk_file_cap));
     let skipped_minified: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-    let extractions: Vec<(String, wicked_estate_core::Extraction, String)> = changed
-        .par_iter()
-        .filter_map(|fw| {
-            let mut ext = fw
-                .abs
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            // A binary document (pdf, docx, pptx, ...) is converted to Markdown in-process and then
-            // handled exactly as a `.md` file: the same redaction, the markdown grammar, and the
-            // Markdown stored as the content under the document's own path. A document the
-            // converter cannot read is skipped with its reason, never fatal. The digest stays the
-            // raw bytes', so an unchanged document is neither re-converted nor retried.
-            let converted: Option<String> = if doc_convert::is_doc_ext(&ext) {
-                let bytes = confined_root
-                    .as_ref()
-                    .and_then(|c| c.resolve(&fw.abs))
-                    .ok_or(doc_convert::Skipped::Unreadable("outside the root"))
-                    .and_then(|p| doc_convert::read_capped(&p));
-                let bytes = match bytes {
-                    Ok(b) => b,
-                    Err(reason) => {
-                        skip_doc(&fw.rel, reason.to_string());
+    // ── EXTRACT + WRITE ────────────────────────────────────────────────────────────────────
+    // write-nodes: upsert nodes rows (hot path — prepare_cached, single transaction).
+    // write-content: zstd-compress + upsert content/files rows.
+    // write-FTS: bulk populate nodes_fts after all nodes are written (ONE INSERT SELECT).
+    //
+    // All writes run inside ONE outer transaction so SQLite flushes once, not per row.
+    // FTS5 is populated in a single bulk pass AFTER all node rows exist — this replaces the
+    // previous per-node DELETE+INSERT pair which caused ~2× extra write traffic on the FTS
+    // shadow tables and forced the FTS trie to be rebuilt incrementally rather than in one shot.
+    let mut all_refs = Vec::new();
+
+    store.begin_batch()?;
+    // #438: snapshot the semantic fields of every symbol homed in a file about to be removed —
+    // CHANGED and DELETED alike — INSIDE this batch, BEFORE either remove_file. remove_file deletes
+    // the node rows and with them those fields; a version change marks EVERY file changed. The
+    // snapshot is written back below onto whatever symbol the re-extraction (or a rename to a new
+    // file, same SymbolId) emits again. remove + upsert + restore share ONE batch, so a failure
+    // rolls the removal back and the stored fields survive (#438 item 2).
+    let saved_semantics = {
+        let mut rels: Vec<&str> = changed.iter().map(|fw| fw.rel.as_str()).collect();
+        rels.extend(deleted.iter().map(String::as_str));
+        store.semantics_in_files(&rels)?
+    };
+    // Remove the DELETED files' contributions (nodes/edges + file row) now, inside the batch.
+    for path in &deleted {
+        store.remove_file(path)?;
+        // W7.1: log the removal so subscribers see the deletion delta.
+        let _ = store.log_change(ChangeOp::Remove, path);
+    }
+    // Purge each CHANGED file's stale contributions before writing the new extraction. remove_file
+    // is idempotent when a file has no rows (never indexed before).
+    for fw in &changed {
+        store.remove_file(&fw.rel)?;
+    }
+    let mut total_symbols = 0usize;
+    let mut files_extracted = 0usize;
+    let mut extracted_files = Vec::new();
+    let mut extracted_symbols = HashSet::new();
+    let mut backfill_probes = Vec::new();
+    let mut seen_probes = HashSet::new();
+    let mut chunk_start = 0;
+    while chunk_start < changed.len() {
+        let mut chunk_end = chunk_start + 1;
+        let mut chunk_bytes = changed[chunk_start].bytes.len();
+        while chunk_end < changed.len()
+            && chunk_end - chunk_start < chunk_file_cap
+            && chunk_bytes.saturating_add(changed[chunk_end].bytes.len()) <= chunk_byte_budget
+        {
+            chunk_bytes = chunk_bytes.saturating_add(changed[chunk_end].bytes.len());
+            chunk_end += 1;
+        }
+        let chunk = &changed[chunk_start..chunk_end];
+        let extractions: Vec<(String, wicked_estate_core::Extraction, String)> = chunk
+            .par_iter()
+            .filter_map(|fw| {
+                let mut ext = fw
+                    .abs
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                // A binary document (pdf, docx, pptx, ...) is converted to Markdown in-process and then
+                // handled exactly as a `.md` file: the same redaction, the markdown grammar, and the
+                // Markdown stored as the content under the document's own path. A document the
+                // converter cannot read is skipped with its reason, never fatal. The digest stays the
+                // raw bytes', so an unchanged document is neither re-converted nor retried.
+                let converted: Option<String> = if doc_convert::is_doc_ext(&ext) {
+                    let bytes = confined_root
+                        .as_ref()
+                        .and_then(|c| c.resolve(&fw.abs))
+                        .ok_or(doc_convert::Skipped::Unreadable("outside the root"))
+                        .and_then(|p| doc_convert::read_capped(&p));
+                    let bytes = match bytes {
+                        Ok(b) => b,
+                        Err(reason) => {
+                            skip_doc(&fw.rel, reason.to_string());
+                            return None;
+                        }
+                    };
+                    // The digest recorded below is the classification read's: convert only those
+                    // bytes. A document that changed in between is skipped and, its new bytes no
+                    // longer matching that digest, converted on the next run.
+                    if source_digest(&bytes, None) != fw.digest {
+                        skip_doc(&fw.rel, "changed while indexing; converted next run".into());
                         return None;
                     }
+                    match doc_convert::to_markdown(&fw.raw, &bytes) {
+                        Ok(md) => {
+                            ext = "md".to_string();
+                            Some(md)
+                        }
+                        Err(reason) => {
+                            skip_doc(&fw.rel, reason.to_string());
+                            return None;
+                        }
+                    }
+                } else {
+                    None
                 };
-                // The digest recorded below is the classification read's: convert only those
-                // bytes. A document that changed in between is skipped and, its new bytes no
-                // longer matching that digest, converted on the next run.
-                if source_digest(&bytes, None) != fw.digest {
-                    skip_doc(&fw.rel, "changed while indexing; converted next run".into());
+                // #405: mask secret values BEFORE parsing, so nodes, signatures, the full-text index,
+                // unresolved-ref names and the stored content all derive from masked text (same byte
+                // length, so every span stays valid). The digest stays the file's own.
+                let committed = match &converted {
+                    Some(md) => md.as_str(),
+                    None => std::str::from_utf8(&fw.bytes).ok()?,
+                };
+                let redact_path = match converted {
+                    Some(_) => std::borrow::Cow::Owned(format!("{}.md", fw.raw)),
+                    None => std::borrow::Cow::Borrowed(fw.raw.as_str()),
+                };
+                let text = wicked_estate_extract::redact::redact_source(&redact_path, committed);
+                let extra_rules = extra.as_ref().filter(|x| x.matches_path(&fw.raw));
+
+                // Skip minified or huge files before any parsing — they generate noise, not signal.
+                // A file explicitly targeted by an extra-edge rule still gets the (regex-only) extra
+                // pass below; only the language extraction is skipped for it.
+                // A converted document is never dropped here: its text is already capped at 1 MiB,
+                // and long prose lines or table rows are what documents are made of. When the guard
+                // trips, the document keeps its content and File node, without heading nodes.
+                let minified = is_minified_or_huge(&text);
+                if minified && extra_rules.is_none() && converted.is_none() {
+                    skipped_minified
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(fw.rel.clone());
                     return None;
                 }
-                match doc_convert::to_markdown(&fw.raw, &bytes) {
-                    Ok(md) => {
-                        ext = "md".to_string();
-                        Some(md)
-                    }
-                    Err(reason) => {
-                        skip_doc(&fw.rel, reason.to_string());
-                        return None;
-                    }
-                }
-            } else {
-                None
-            };
-            // #405: mask secret values BEFORE parsing, so nodes, signatures, the full-text index,
-            // unresolved-ref names and the stored content all derive from masked text (same byte
-            // length, so every span stays valid). The digest stays the file's own.
-            let committed = match &converted {
-                Some(md) => md.as_str(),
-                None => std::str::from_utf8(&fw.bytes).ok()?,
-            };
-            let redact_path = match converted {
-                Some(_) => std::borrow::Cow::Owned(format!("{}.md", fw.raw)),
-                None => std::borrow::Cow::Borrowed(fw.raw.as_str()),
-            };
-            let text = wicked_estate_extract::redact::redact_source(&redact_path, committed);
-            let extra_rules = extra.as_ref().filter(|x| x.matches_path(&fw.raw));
 
-            // Skip minified or huge files before any parsing — they generate noise, not signal.
-            // A file explicitly targeted by an extra-edge rule still gets the (regex-only) extra
-            // pass below; only the language extraction is skipped for it.
-            // A converted document is never dropped here: its text is already capped at 1 MiB,
-            // and long prose lines or table rows are what documents are made of. When the guard
-            // trips, the document keeps its content and File node, without heading nodes.
-            let minified = is_minified_or_huge(&text);
-            if minified && extra_rules.is_none() && converted.is_none() {
-                skipped_minified
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(fw.rel.clone());
-                return None;
-            }
-
-            let mut extraction = if minified {
-                Extraction::default()
-            } else {
-                // None when no language extractor claims the file (e.g. a JSON catalog only the
-                // extra-edge rules target) — the extra pass below still runs on it.
-                base_extraction(&fw.rel, &ext, &text, &ext_map).unwrap_or_default()
-            };
-            if let Some(meta) = &fw.export_metadata {
-                wicked_estate_extract::apexlang::apply_export_metadata(
-                    &mut extraction,
-                    &fw.rel,
-                    meta.as_deref(),
-                );
-            }
-
-            // ── Extra-edge pass: drop-in domain rules (.wicked-estate-extractors/) ────────────
-            if let Some(x) = extra_rules {
-                // Rules glob against the RAW repo-relative path; the ids they mint are then
-                // rewritten into the repo's namespace (no-op when un-labelled).
-                // A drop-in rule is a user-declared identity extractor over a file the user chose
-                // (a catalog's names, a command table): it reads the file as committed, so its
-                // captures are not masked by the default-deny config policy. What it captures is
-                // stored as names/ids and still passes the store's token-shape backstop (#405;
-                // stated in docs/secret-redaction.md).
-                let sf = SourceFile {
-                    path: fw.raw.clone(),
-                    language: Language::new("text"),
-                    text: wicked_estate_core::redact::scrub(committed).into_owned(),
+                let mut extraction = if minified {
+                    Extraction::default()
+                } else {
+                    // None when no language extractor claims the file (e.g. a JSON catalog only the
+                    // extra-edge rules target) — the extra pass below still runs on it.
+                    base_extraction(&fw.rel, &ext, &text, &ext_map).unwrap_or_default()
                 };
-                let mut ee = x.extract_extra(&sf);
-                if let Some(label) = repo {
-                    repo_scope::namespace_extra(&mut ee, label, &fw.rel);
+                if let Some(meta) = &fw.export_metadata {
+                    wicked_estate_extract::apexlang::apply_export_metadata(
+                        &mut extraction,
+                        &fw.rel,
+                        meta.as_deref(),
+                    );
                 }
-                // Injected edges hang off the file node — guarantee it exists even for files no
-                // language extractor claims (e.g. a hidden `.claude-plugin/archetypes.json`).
-                let file_symbol = Symbol::file(&fw.rel).id();
-                if !extraction.nodes.iter().any(|n| n.symbol == file_symbol) {
-                    extraction.nodes.push(Node::new(
-                        file_symbol,
-                        NodeKind::File,
-                        fw.rel.clone(),
-                        Language::new("text"),
-                        Location::new(&fw.rel, Span::ZERO),
-                    ));
-                }
-                extraction.nodes.extend(ee.nodes);
-                extraction.local_edges.extend(ee.edges);
-                extraction.refs.extend(ee.unresolved_refs);
-            }
 
-            if converted.is_some() {
-                // A converted document always has its File node, so its content is stored even
-                // when the markdown grammar found no heading.
-                let file_symbol = Symbol::file(&fw.rel).id();
-                if !extraction.nodes.iter().any(|n| n.symbol == file_symbol) {
-                    extraction.nodes.push(Node::new(
-                        file_symbol,
-                        NodeKind::File,
-                        fw.rel.clone(),
-                        Language::new("markdown"),
-                        Location::new(&fw.rel, Span::ZERO),
-                    ));
+                // ── Extra-edge pass: drop-in domain rules (.wicked-estate-extractors/) ────────────
+                if let Some(x) = extra_rules {
+                    // Rules glob against the RAW repo-relative path; the ids they mint are then
+                    // rewritten into the repo's namespace (no-op when un-labelled).
+                    // A drop-in rule is a user-declared identity extractor over a file the user chose
+                    // (a catalog's names, a command table): it reads the file as committed, so its
+                    // captures are not masked by the default-deny config policy. What it captures is
+                    // stored as names/ids and still passes the store's token-shape backstop (#405;
+                    // stated in docs/secret-redaction.md).
+                    let sf = SourceFile {
+                        path: fw.raw.clone(),
+                        language: Language::new("text"),
+                        text: wicked_estate_core::redact::scrub(committed).into_owned(),
+                    };
+                    let mut ee = x.extract_extra(&sf);
+                    if let Some(label) = repo {
+                        repo_scope::namespace_extra(&mut ee, label, &fw.rel);
+                    }
+                    // Injected edges hang off the file node — guarantee it exists even for files no
+                    // language extractor claims (e.g. a hidden `.claude-plugin/archetypes.json`).
+                    let file_symbol = Symbol::file(&fw.rel).id();
+                    if !extraction.nodes.iter().any(|n| n.symbol == file_symbol) {
+                        extraction.nodes.push(Node::new(
+                            file_symbol,
+                            NodeKind::File,
+                            fw.rel.clone(),
+                            Language::new("text"),
+                            Location::new(&fw.rel, Span::ZERO),
+                        ));
+                    }
+                    extraction.nodes.extend(ee.nodes);
+                    extraction.local_edges.extend(ee.edges);
+                    extraction.refs.extend(ee.unresolved_refs);
+                }
+
+                if converted.is_some() {
+                    // A converted document always has its File node, so its content is stored even
+                    // when the markdown grammar found no heading.
+                    let file_symbol = Symbol::file(&fw.rel).id();
+                    if !extraction.nodes.iter().any(|n| n.symbol == file_symbol) {
+                        extraction.nodes.push(Node::new(
+                            file_symbol,
+                            NodeKind::File,
+                            fw.rel.clone(),
+                            Language::new("markdown"),
+                            Location::new(&fw.rel, Span::ZERO),
+                        ));
+                    }
+                }
+                if extraction.nodes.is_empty()
+                    && extraction.local_edges.is_empty()
+                    && extraction.refs.is_empty()
+                {
+                    return None;
+                }
+                Some((fw.rel.clone(), extraction, text))
+            })
+            .collect();
+        #[cfg(test)]
+        TEST_MAX_EXTRACTIONS.with(|v| v.set(v.get().max(extractions.len())));
+
+        for (rel_path, extraction, text) in extractions {
+            store.upsert_nodes_skip_fts(&extraction.nodes)?;
+            store.upsert_edges(&extraction.local_edges)?;
+            // Store source text for the file (best-effort; log on failure, don't abort).
+            if let Err(e) = store.set_file_content(&rel_path, &text) {
+                eprintln!("warning: set_file_content({rel_path}) failed: {e}");
+            }
+            // #220: record the file's value-flow call refs (`[]` records "none") so a later edit to a
+            // callee re-derives this file's call-derived flows without re-parsing it.
+            let call_refs: Vec<&wicked_estate_core::UnresolvedRef> = extraction
+                .refs
+                .iter()
+                .filter(|r| is_value_flow_call_ref(r))
+                .collect();
+            let call_refs_json = serde_json::to_string(&call_refs).map_err(|e| {
+                wicked_estate_core::Error::Invalid(format!("call refs of {rel_path}: {e}"))
+            })?;
+            store.set_file_call_refs(&rel_path, &call_refs_json)?;
+            total_symbols += extraction.nodes.len();
+            files_extracted += 1;
+            extracted_files.push(rel_path);
+            for n in &extraction.nodes {
+                extracted_symbols.insert(n.symbol.clone());
+                if n.name.is_empty() {
+                    continue;
+                }
+                // Keep exact-name, APEXlang and program probes in their original encounter order.
+                // Repeated lookups could only yield sites already deduped by the back-fill pass.
+                let probes = std::iter::once(n.name.clone())
+                    .chain(wicked_estate_resolve::apexlang::backfill_probes(n))
+                    .chain((n.kind == NodeKind::Module).then(|| {
+                        format!(
+                            "{}{}",
+                            wicked_estate_core::refs::COBOL_DYNAMIC_CALL_PREFIX,
+                            n.name
+                        )
+                    }));
+                for probe in probes {
+                    if seen_probes.insert(probe.clone()) {
+                        backfill_probes.push(probe);
+                    }
                 }
             }
-            if extraction.nodes.is_empty()
-                && extraction.local_edges.is_empty()
-                && extraction.refs.is_empty()
-            {
-                return None;
-            }
-            Some((fw.rel.clone(), extraction, text))
-        })
-        .collect();
+            all_refs.extend(extraction.refs);
+        }
+        // The chunk's extractions and source text are dropped before extracting the next one.
+        chunk_start = chunk_end;
+    }
+    drop(seen_probes);
 
     flush_doc_skips();
     let mut skipped_min = skipped_minified
@@ -2178,8 +2287,6 @@ fn index_path_inner(
 
     // ── Emit extraction counters (best-effort) ───────────────────────────────────────────────
     {
-        let total_symbols: usize = extractions.iter().map(|(_, e, _)| e.nodes.len()).sum();
-        let files_extracted = extractions.len();
         let sink = wicked_estate_observe::init_sink_from_env();
         let resource = wicked_estate_core::observability::Resource::service(
             "wicked_estate",
@@ -2237,67 +2344,12 @@ fn index_path_inner(
         }
     }
 
-    // ── WRITE ────────────────────────────────────────────────────────────────────────────────
-    // write-nodes: upsert nodes rows (hot path — prepare_cached, single transaction).
-    // write-content: zstd-compress + upsert content/files rows.
-    // write-FTS: bulk populate nodes_fts after all nodes are written (ONE INSERT SELECT).
-    //
-    // All writes run inside ONE outer transaction so SQLite flushes once, not per row.
-    // FTS5 is populated in a single bulk pass AFTER all node rows exist — this replaces the
-    // previous per-node DELETE+INSERT pair which caused ~2× extra write traffic on the FTS
-    // shadow tables and forced the FTS trie to be rebuilt incrementally rather than in one shot.
-    let mut all_refs = Vec::new();
-
-    store.begin_batch()?;
-    // #438: snapshot the semantic fields of every symbol homed in a file about to be removed —
-    // CHANGED and DELETED alike — INSIDE this batch, BEFORE either remove_file. remove_file deletes
-    // the node rows and with them those fields; a version change marks EVERY file changed. The
-    // snapshot is written back below onto whatever symbol the re-extraction (or a rename to a new
-    // file, same SymbolId) emits again. remove + upsert + restore share ONE batch, so a failure
-    // rolls the removal back and the stored fields survive (#438 item 2).
-    let saved_semantics = {
-        let mut rels: Vec<&str> = changed.iter().map(|fw| fw.rel.as_str()).collect();
-        rels.extend(deleted.iter().map(String::as_str));
-        store.semantics_in_files(&rels)?
-    };
-    // Remove the DELETED files' contributions (nodes/edges + file row) now, inside the batch.
-    for path in &deleted {
-        store.remove_file(path)?;
-        // W7.1: log the removal so subscribers see the deletion delta.
-        let _ = store.log_change(ChangeOp::Remove, path);
-    }
-    // Purge each CHANGED file's stale contributions before writing the new extraction. remove_file
-    // is idempotent when a file has no rows (never indexed before).
-    for fw in &changed {
-        store.remove_file(&fw.rel)?;
-    }
-    for (rel_path, extraction, text) in &extractions {
-        store.upsert_nodes_skip_fts(&extraction.nodes)?;
-        store.upsert_edges(&extraction.local_edges)?;
-        all_refs.extend(extraction.refs.iter().cloned());
-        // Store source text for the file (best-effort; log on failure, don't abort).
-        if let Err(e) = store.set_file_content(rel_path, text) {
-            eprintln!("warning: set_file_content({rel_path}) failed: {e}");
-        }
-        // #220: record the file's value-flow call refs (`[]` records "none") so a later edit to a
-        // callee re-derives this file's call-derived flows without re-parsing it.
-        let call_refs: Vec<&wicked_estate_core::UnresolvedRef> = extraction
-            .refs
-            .iter()
-            .filter(|r| is_value_flow_call_ref(r))
-            .collect();
-        let call_refs_json = serde_json::to_string(&call_refs).map_err(|e| {
-            wicked_estate_core::Error::Invalid(format!("call refs of {rel_path}: {e}"))
-        })?;
-        store.set_file_call_refs(rel_path, &call_refs_json)?;
-    }
-
     // Bulk-rebuild FTS for every node that belongs to a changed file in one SQL pass.
     // This is O(1) SQL statements instead of O(2 × nodes) DELETE+INSERT pairs.
     store.bulk_rebuild_fts_for_files(
-        &extractions
+        &extracted_files
             .iter()
-            .map(|(p, _, _)| p.as_str())
+            .map(String::as_str)
             .collect::<Vec<_>>(),
     )?;
 
@@ -2388,9 +2440,7 @@ fn index_path_inner(
     // as they are, exactly as for any unchanged dependent of an edit.
     if !rederive_refs.is_empty() {
         let mut targets = changed_symbols.clone();
-        for (_, extraction, _) in &extractions {
-            targets.extend(extraction.nodes.iter().map(|n| n.symbol.clone()));
-        }
+        targets.extend(extracted_symbols);
         let rederived = resolve_all_with_coverage(resolvers, &rederive_refs, &index)?;
         let sites: HashSet<CallSiteKey> = rederived
             .site_edges
@@ -2460,44 +2510,11 @@ fn index_path_inner(
         }
         let mut seen: HashSet<(String, String, EdgeKind, String, u32, u32, u32)> = HashSet::new();
         let mut candidates: Vec<wicked_estate_core::UnresolvedRef> = Vec::new();
-        // Name lane: one exact indexed lookup per distinct extracted name.
-        let mut probed: HashSet<&str> = HashSet::new();
-        // Probed apart from `probed`: a field named PRICEPGM must not hide the program PRICEPGM.
-        let mut probed_programs: HashSet<&str> = HashSet::new();
-        for (_, extraction, _) in &extractions {
-            for n in &extraction.nodes {
-                if n.name.is_empty() {
-                    continue;
-                }
-                if probed.insert(n.name.as_str()) {
-                    for r in store.unresolved_refs_for_name(&n.name)? {
-                        if admissible(&r) && seen.insert(site_key(&r)) {
-                            candidates.push(r);
-                        }
-                    }
-                }
-                // A new APEXlang component can bind a parked `apexlang-ref:` of its kind (or an
-                // untyped one) under any of its enclosing scopes (estate#313).
-                for probe in wicked_estate_resolve::apexlang::backfill_probes(n) {
-                    for r in store.unresolved_refs_for_name(&probe)? {
-                        if admissible(&r) && seen.insert(site_key(&r)) {
-                            candidates.push(r);
-                        }
-                    }
-                }
-                // A new program can also bind a parked COBOL dynamic call to it, whose raw name
-                // carries the `cobol-dynamic-call:` prefix (`DynamicCallResolver`).
-                if n.kind == NodeKind::Module && probed_programs.insert(n.name.as_str()) {
-                    let prefixed = format!(
-                        "{}{}",
-                        wicked_estate_core::refs::COBOL_DYNAMIC_CALL_PREFIX,
-                        n.name
-                    );
-                    for r in store.unresolved_refs_for_name(&prefixed)? {
-                        if admissible(&r) && seen.insert(site_key(&r)) {
-                            candidates.push(r);
-                        }
-                    }
+        // Name lane: exact indexed lookups in the extracted nodes' original probe order.
+        for probe in &backfill_probes {
+            for r in store.unresolved_refs_for_name(probe)? {
+                if admissible(&r) && seen.insert(site_key(&r)) {
+                    candidates.push(r);
                 }
             }
         }
@@ -3690,6 +3707,180 @@ mod tests {
     use super::*;
     use wicked_estate_core::{GraphWrite, Language, Location, Node, NodeKind, Span, SymbolId};
     use wicked_estate_store::{GraphStoreMutExt, MemStore};
+
+    // #422: keep chunk overrides on the indexing thread, isolated from concurrent tests.
+    fn index_with_chunk_limits(
+        store: &mut dyn GraphStoreMutExt,
+        root: &Path,
+        limits: Option<(usize, usize)>,
+    ) -> usize {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_EXTRACT_CHUNK_LIMITS.with(|v| v.set(None));
+            }
+        }
+        let _reset = Reset;
+        TEST_EXTRACT_CHUNK_LIMITS.with(|v| v.set(limits));
+        TEST_MAX_EXTRACTIONS.with(|v| v.set(0));
+        index_path(store, root).unwrap();
+        TEST_MAX_EXTRACTIONS.with(|v| v.get())
+    }
+
+    fn chunk_graph_snapshot(
+        store: &wicked_estate_store::SqliteStore,
+        db: &Path,
+    ) -> serde_json::Value {
+        fn sorted<T: serde::Serialize>(rows: Vec<T>) -> Vec<String> {
+            let mut rows: Vec<String> = rows
+                .iter()
+                .map(|r| serde_json::to_string(r).unwrap())
+                .collect();
+            rows.sort();
+            rows
+        }
+        // Enumerate every parked name, rather than assuming which refs the fixture leaves.
+        let conn = rusqlite::Connection::open(db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT raw_name FROM unresolved_refs ORDER BY raw_name")
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let refs: Vec<_> = names
+            .iter()
+            .flat_map(|name| store.unresolved_refs_for_name(name).unwrap())
+            .collect();
+        assert!(!refs.is_empty(), "fixture must exercise parked refs");
+        let mut files = store.indexed_files().unwrap();
+        files.sort();
+        let content: Vec<_> = files
+            .iter()
+            .map(|file| {
+                let text = store.file_content(file).unwrap().unwrap();
+                (file, text)
+            })
+            .collect();
+        let fts: Vec<_> = ["normalize", "consume", "rust_helper", "py_helper"]
+            .iter()
+            .map(|name| {
+                let hits = store
+                    .find_symbols(&wicked_estate_core::SymbolQuery {
+                        text: Some((*name).to_string()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert!(!hits.is_empty(), "fixture must have FTS hits for {name}");
+                (name, sorted(hits))
+            })
+            .collect();
+        serde_json::json!({
+            "nodes": sorted(GraphRead::all_nodes(store).unwrap()),
+            "edges": sorted(store.all_edges().unwrap()),
+            "refs": sorted(refs),
+            "content": content,
+            "fts": fts,
+        })
+    }
+
+    #[test]
+    fn chunked_index_matches_default_graph() {
+        let src = tempfile::tempdir().unwrap();
+        for (file, text) in [
+            (
+                "a.ts",
+                "export function consume() { return normalize(missingInput); }\n",
+            ),
+            (
+                "b.ts",
+                "export function normalize(value: string) { return value; }\n",
+            ),
+            ("c.rs", "pub fn rust_helper() {}\n"),
+            ("d.py", "def py_helper():\n    return missing_python()\n"),
+        ] {
+            std::fs::write(src.path().join(file), text).unwrap();
+        }
+        let dbdir = tempfile::tempdir().unwrap();
+        let default_db = dbdir.path().join("default.db");
+        let chunked_db = dbdir.path().join("chunked.db");
+        let mut default = wicked_estate_store::SqliteStore::open(&default_db).unwrap();
+        let mut chunked = wicked_estate_store::SqliteStore::open(&chunked_db).unwrap();
+        assert_eq!(index_with_chunk_limits(&mut default, src.path(), None), 4);
+        assert_eq!(
+            index_with_chunk_limits(&mut chunked, src.path(), Some((usize::MAX, 1))),
+            1
+        );
+        let nodes = GraphRead::all_nodes(&default).unwrap();
+        assert!(
+            default.all_edges().unwrap().iter().any(|edge| {
+                edge.kind == EdgeKind::Calls
+                    && nodes
+                        .iter()
+                        .any(|n| n.symbol == edge.source && n.location.file == "a.ts")
+                    && nodes
+                        .iter()
+                        .any(|n| n.symbol == edge.target && n.location.file == "b.ts")
+            }),
+            "fixture must resolve a call across files"
+        );
+        assert_eq!(
+            chunk_graph_snapshot(&chunked, &chunked_db),
+            chunk_graph_snapshot(&default, &default_db)
+        );
+
+        // Exercise the lightweight leftovers too: rederive an unchanged TS caller's flows and
+        // back-fill an unchanged Python caller when its missing target appears in another chunk.
+        std::fs::write(
+            src.path().join("b.ts"),
+            "export function normalize(value: string) { const result = value; return result; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("e.py"),
+            "def missing_python():\n    return never_bound()\n",
+        )
+        .unwrap();
+        index_with_chunk_limits(&mut default, src.path(), None);
+        index_with_chunk_limits(&mut chunked, src.path(), Some((usize::MAX, 1)));
+        assert!(
+            chunked
+                .unresolved_refs_for_name("missing_python")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            chunk_graph_snapshot(&chunked, &chunked_db),
+            chunk_graph_snapshot(&default, &default_db)
+        );
+    }
+
+    #[test]
+    fn chunked_index_bounds_live_extractions() {
+        let src = tempfile::tempdir().unwrap();
+        let text = "pub fn chunk_fixture() {}\n";
+        let total = 9;
+        for i in 0..total {
+            std::fs::write(src.path().join(format!("file{i}.rs")), text).unwrap();
+        }
+        // Byte budget, oversized singleton progress, and file-count cap, respectively.
+        for (bytes, files, expected) in [(text.len() * 2, 512, 2), (1, 512, 1), (usize::MAX, 3, 3)]
+        {
+            let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+            let max = index_with_chunk_limits(&mut store, src.path(), Some((bytes, files)));
+            assert!(
+                max > 0,
+                "the live-extraction counter must observe extraction"
+            );
+            assert!(
+                max <= expected,
+                "held {max} extractions; chunk allows {expected}"
+            );
+            assert!(max < total, "must not retain every file's extraction");
+            assert_eq!(store.indexed_files().unwrap().len(), total);
+        }
+    }
 
     fn resource_node(sym: &str, name: &str, origin: &str) -> Node {
         let mut meta = serde_json::Map::new();
