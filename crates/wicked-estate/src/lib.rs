@@ -2032,7 +2032,11 @@ fn index_path_inner(
         // A direct importer of a DELETED file is forced into `changed` even with a matching
         // digest (Decision J): consulted HERE, while the FileWork is still alive — the
         // unchanged arm drops it.
-        let forced = forced_importers.contains(&rel) || forced_value_flow_callers.contains(&rel);
+        // #476: a file recorded as still holding old extractor output is re-extracted alone once
+        // readable, though its bytes (and so its digest) never changed.
+        let forced = forced_importers.contains(&rel)
+            || forced_value_flow_callers.contains(&rel)
+            || prev_unreadable.contains(&rel);
         if !force_full && !forced && stored.as_deref() == Some(&fw.digest) {
             // UNCHANGED: skip extraction entirely; its nodes/edges already in the store.
             //
@@ -6735,7 +6739,6 @@ node_scheme = "reviewmarker"
         let dbpath = dbdir.path().join("g.db");
         let mut store = SqliteStore::open(&dbpath).unwrap();
         index_path(&mut store, src.path()).unwrap();
-        let blocked_symbol = sym_of(&store, "blocked");
         store.meta_set_key("indexed_version", "0.0.0-older");
         let blocked = ReadFailGuard::new(src.path().join("b.rs"));
         index_path(&mut store, src.path()).unwrap();
@@ -6793,7 +6796,14 @@ node_scheme = "reviewmarker"
         drop(blocked);
         UNREADABLE_FILES.with(|notes| notes.borrow_mut().clear());
         index_path(&mut store, src.path()).unwrap();
-        assert_eq!(sym_of(&store, "blocked"), blocked_symbol);
+        let count_blocked = |name: &str| -> usize {
+            side.query_row("SELECT count(*) FROM nodes WHERE name = ?1", [name], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(count_blocked("blocked"), 1, "recovery must re-extract b.rs");
+        assert_eq!(count_blocked("old_blocked"), 0);
         let untouched: usize = side
             .query_row(
                 "SELECT count(*) FROM nodes WHERE name = 'probe_readable'",
