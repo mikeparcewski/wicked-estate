@@ -447,11 +447,20 @@ impl MemoryEngine {
     /// scatter its unigrams (S3 parity bench, symbolish class). Skipped when the query is already
     /// a single bare term (identical list, no signal). Mirrors knowledge's `keyword_candidates`.
     fn keyword_candidates(&self, query: &str) -> wicked_estate_core::Result<Vec<SymbolId>> {
-        // Significant terms (len ≥ 2 keeps "AI"/"DB"/"ML"); fall back to the cleaned whole query.
+        const FUNCTION_WORDS: &[&str] = &[
+            "about", "all", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can",
+            "could", "did", "do", "does", "for", "from", "had", "has", "have", "how", "if", "in",
+            "into", "is", "it", "its", "of", "on", "or", "our", "should", "that", "the", "their",
+            "them", "there", "these", "they", "this", "to", "was", "we", "were", "what", "when",
+            "which", "who", "will", "with", "would", "you", "your",
+        ];
+        // Significant terms (len ≥ 2 keeps "AI"/"DB"/"ML") exclude function words so prose
+        // cannot accumulate relevance from them; fall back to the cleaned whole query.
         let mut terms: Vec<String> = query
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| w.len() >= 2)
             .map(|w| w.to_lowercase())
+            .filter(|w| !FUNCTION_WORDS.contains(&w.as_str()))
             .collect();
         if terms.is_empty() {
             let q = query.trim().to_lowercase();
@@ -961,6 +970,88 @@ mod tests {
         assert!(
             !run(false, RecallMode::VectorOnly).is_empty(),
             "explicit VectorOnly ablation must stay honored even for a non-semantic embedder"
+        );
+    }
+
+    #[test]
+    fn recall_ranks_topical_memory_above_legacy_session_goal() {
+        let mut eng = MemoryEngine::in_memory()
+            .unwrap()
+            .with_embedder(Box::new(HashEmbedder::new(256)));
+        let scope = Scope::parse("project:demo");
+        let t0 = 1_000;
+        let session_goal = Memory::new(
+            MemKind::Working,
+            Tier::Working,
+            scope.clone(),
+            "Session goal (turn 3): what does the build do to the files and the plan",
+            t0,
+        );
+        let topical = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            scope.clone(),
+            "billing database is postgres on port 5432",
+            t0,
+        );
+        eng.capture(&session_goal).unwrap();
+        eng.capture(&topical).unwrap();
+
+        let out = eng
+            .recall(
+                "what does the billing database do",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                500,
+                t0 + 60,
+            )
+            .unwrap();
+        assert_eq!(
+            out.first().map(|r| &r.id),
+            Some(&topical.symbol()),
+            "the topical memory must rank first"
+        );
+        assert!(
+            out.iter().all(|r| r.id != session_goal.symbol()),
+            "function-word overlap must not surface the legacy session goal"
+        );
+    }
+
+    #[test]
+    fn recall_function_words_without_a_phrase_match_returns_empty() {
+        let mut eng = MemoryEngine::in_memory()
+            .unwrap()
+            .with_embedder(Box::new(HashEmbedder::new(256)));
+        let scope = Scope::parse("project:demo");
+        let t0 = 1_000;
+        for (kind, tier, content) in [
+            (
+                MemKind::Working,
+                Tier::Working,
+                "Session goal (turn 3): what does the build do to the files and the plan",
+            ),
+            (
+                MemKind::Fact,
+                Tier::Semantic,
+                "billing database is postgres on port 5432",
+            ),
+        ] {
+            eng.capture(&Memory::new(kind, tier, scope.clone(), content, t0))
+                .unwrap();
+        }
+
+        let out = eng
+            .recall(
+                "what does the to be",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                500,
+                t0 + 60,
+            )
+            .unwrap();
+        assert!(
+            out.is_empty(),
+            "unrelated function words must recall nothing"
         );
     }
 
