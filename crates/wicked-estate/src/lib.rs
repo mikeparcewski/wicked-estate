@@ -6820,8 +6820,7 @@ mod semantics_survive_reindex_tests {
         let mut fresh = SqliteStore::open(&fresh_db).unwrap();
         index_path(&mut fresh, root).unwrap();
         let nodes = |store: &SqliteStore| {
-            let mut rows: Vec<_> = store
-                .all_nodes()
+            let mut rows: Vec<_> = GraphRead::all_nodes(store)
                 .unwrap()
                 .into_iter()
                 .map(|n| (n.symbol.0, format!("{:?}", n.kind), n.location.file))
@@ -7008,8 +7007,7 @@ mod semantics_survive_reindex_tests {
         let mut store = SqliteStore::open(&db).unwrap();
         index_path(&mut store, src.path()).unwrap();
         assert!(
-            store
-                .all_nodes()
+            GraphRead::all_nodes(&store)
                 .unwrap()
                 .iter()
                 .any(|node| node.name == "value" && node.is_value_flow_node())
@@ -7142,8 +7140,7 @@ mod semantics_survive_reindex_tests {
             Some(source_digest(new_text.as_bytes(), None))
         );
         assert!(
-            store
-                .all_nodes()
+            GraphRead::all_nodes(&store)
                 .unwrap()
                 .iter()
                 .any(|n| n.name == "current")
