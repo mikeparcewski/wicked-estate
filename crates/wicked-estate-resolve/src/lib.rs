@@ -279,6 +279,25 @@ fn family_compatible(
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ScopedNameResolver;
 
+/// Whether a scoped binding is unaffected by candidates added or removed in these files.
+/// Other resolver tiers must be re-evaluated whenever their name's candidate set changes.
+pub fn scoped_binding_survives(
+    edge: &Edge,
+    owner_file: &str,
+    changed_candidate_files: &[&str],
+) -> bool {
+    if edge.resolved_by != ScopedNameResolver.id() {
+        return false;
+    }
+    match edge.metadata.get("scope").and_then(|value| value.as_str()) {
+        Some("same-file" | "local-binding") => !changed_candidate_files.contains(&owner_file),
+        Some("same-dir") => changed_candidate_files
+            .iter()
+            .all(|file| dir_of(file) != dir_of(owner_file)),
+        _ => false,
+    }
+}
+
 /// Scope tier assigned to a candidate during disambiguation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ScopeTier {
@@ -1343,6 +1362,34 @@ mod tests {
             "no confident edge should be emitted, got {}",
             edges.len()
         );
+    }
+
+    #[test]
+    fn scoped_binding_survives_only_outside_its_winning_scope() {
+        let mut edge = Edge::new(
+            SymbolId("caller".into()),
+            SymbolId("target".into()),
+            EdgeKind::Calls,
+            ResolutionTier::ImportMap,
+            "scoped-name-resolver",
+        );
+        for scope in ["same-file", "local-binding"] {
+            edge.metadata
+                .insert("scope".into(), serde_json::json!(scope));
+            assert!(scoped_binding_survives(&edge, "src/a.rs", &["other/b.rs"]));
+            assert!(!scoped_binding_survives(&edge, "src/a.rs", &["src/a.rs"]));
+        }
+        edge.metadata
+            .insert("scope".into(), serde_json::json!("same-dir"));
+        assert!(scoped_binding_survives(&edge, "src/a.rs", &["other/b.rs"]));
+        assert!(!scoped_binding_survives(&edge, "src/a.rs", &["src/b.rs"]));
+        assert!(!scoped_binding_survives(&edge, "a.rs", &["b.rs"]));
+        edge.metadata.clear();
+        assert!(!scoped_binding_survives(&edge, "src/a.rs", &["other/b.rs"]));
+        edge.metadata
+            .insert("scope".into(), serde_json::json!("same-file"));
+        edge.resolved_by = "name-resolver".into();
+        assert!(!scoped_binding_survives(&edge, "src/a.rs", &["other/b.rs"]));
     }
 
     // ── ScopedNameResolver tests ─────────────────────────────────────────────
