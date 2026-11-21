@@ -3215,7 +3215,7 @@ mod tests {
 
     #[test]
     fn unsupported_memory_retirement_is_not_available() {
-        let store = SqliteStore::in_memory().unwrap();
+        let store = fixture();
         for (tool, args) in [
             ("memory.retire", json!({"id": "unknown"})),
             ("memory.unretire", json!({"id": "unknown"})),
