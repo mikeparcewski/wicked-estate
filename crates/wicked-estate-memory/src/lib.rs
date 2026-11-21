@@ -1229,7 +1229,7 @@ mod tests {
         }
         assert!(eng.recall_episodic_batch(&scope).unwrap().is_empty());
         let reflected =
-            MemoryApi::reflect(&mut eng, scope.as_path(), 100 + WORKING_TTL_SECS).unwrap();
+            MemoryApi::reflect(&mut eng, &scope.as_path(), 100 + WORKING_TTL_SECS).unwrap();
         assert_eq!(reflected.node_count, 0);
         assert!(reflected.distilled_facts.is_empty());
         assert_eq!(MemoryApi::coverage(&eng, None).unwrap().total, 0);
