@@ -1,30 +1,305 @@
 //! Binary documents (PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB) to GitHub-flavored
-//! Markdown, in-process, with the [anydoc] crate. This is the ONE converter estate uses wherever it
-//! meets a document it cannot read as text: the repo index stores and searches the Markdown under
-//! the document's own path, and `knowledge.ingest {path}` chunks it.
+//! Markdown with the [anydoc] crate. This is the ONE converter estate uses wherever it meets a
+//! document it cannot read as text: the repo index stores and searches the Markdown under the
+//! document's own path, and `knowledge.ingest {path}` chunks it.
 //!
 //! Local only. The anydoc Rust crate has no OCR and no network code (its hosted OCR lives only in
 //! the npm wrapper, which estate does not use): a scanned or image-only PDF comes back as
 //! [`Skipped::NeedsOcr`], and nothing leaves the host. The test
 //! `anydoc_dependency_closure_has_no_network_client` is a tripwire on the dependency closure.
 //!
-//! Bounds, and what they do not cover: the input is capped at [`MAX_INPUT_BYTES`] before it is
-//! read ([`read_capped`]) and the converted text at [`MAX_TEXT_BYTES`]; anydoc bounds
-//! Office/ODF/EPUB decompression (128 MiB per archive entry, 512 MiB per archive, 2M XML nodes) and
-//! pdf-inspector bounds PDF streams per stream and per page. Conversions run on the caller's
-//! threads (the indexer's rayon pool), so at most one document per worker is in memory at once.
-//! There is no document-wide PDF memory budget and no timer (a thread cannot be preempted), and an
-//! abort (out of memory, stack overflow) inside the parser ends the process: a hostile PDF can cost
-//! memory or time. Unwinding panics are caught and reported as a skip. Skip reasons are fixed
-//! strings; document text never reaches a reason.
+//! Bounds: input is capped at [`MAX_INPUT_BYTES`] before it is read ([`read_capped`]), and
+//! converted text at [`MAX_TEXT_BYTES`]. The shipped binaries convert in a supervised child with
+//! a [`MAX_CONVERT_MEMORY_BYTES`] live heap budget and a [`CONVERT_DEADLINE`] wall-clock limit.
+//! Recoverable allocation refusals become memory skips; a crash or abort stays inside that child.
+//! A timed-out child is killed and reaped. At most one child per indexer worker converts at once.
+//! Library callers that do not enable isolation convert in-process with unwind containment only.
+//! Skip reasons are fixed strings; document text and source paths never reach a child diagnostic.
 //!
 //! [anydoc]: https://github.com/firecrawl/anydoc
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 /// Largest document converted, in bytes (32 MiB). Bigger files are skipped, never parsed.
 pub const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Maximum live heap held by one isolated conversion (1 GiB).
+pub const MAX_CONVERT_MEMORY_BYTES: usize = 1 << 30;
+
+/// Maximum wall-clock time for one isolated conversion.
+pub const CONVERT_DEADLINE: Duration = Duration::from_secs(120);
+
+/// Private child mode shared by the two shipped binaries.
+pub const CHILD_ARG: &str = "__doc-convert";
+
+const MEMORY_REASON: &str = "over the 1 GiB conversion memory budget";
+const DEADLINE_REASON: &str = "took longer than the 120 s conversion limit";
+const UNAVAILABLE_REASON: &str = "isolated converter unavailable";
+const UNREADABLE_REASONS: &[&str] = &[
+    "cannot open",
+    "not a regular file",
+    "cannot read",
+    "unrecognized format",
+    "over a converter safety limit",
+    "unsupported content",
+    "missing part",
+    "malformed document",
+    "no text",
+    "converted text is over the 1 MiB limit",
+    MEMORY_REASON,
+    DEADLINE_REASON,
+    UNAVAILABLE_REASON,
+];
+
+/// A System allocator with an optional live-heap budget. Unarmed calls only load the limit.
+/// Arm once, at child startup: freeing pre-arm blocks adds headroom through the signed counter.
+pub struct BudgetAlloc {
+    limit: AtomicUsize,
+    live: AtomicIsize,
+    refused: AtomicBool,
+}
+
+impl BudgetAlloc {
+    /// Create an unarmed allocator.
+    pub const fn new() -> Self {
+        Self {
+            limit: AtomicUsize::new(0),
+            live: AtomicIsize::new(0),
+            refused: AtomicBool::new(false),
+        }
+    }
+
+    /// Enable accounting; zero leaves the allocator unarmed.
+    pub fn arm(&self, limit: usize) {
+        self.limit
+            .store(limit.min(isize::MAX as usize), Ordering::Relaxed);
+    }
+
+    /// Whether any request has been refused by the budget.
+    pub fn refused(&self) -> bool {
+        self.refused.load(Ordering::Relaxed)
+    }
+
+    fn charge(&self, delta: isize, limit: usize) -> bool {
+        let charged = self
+            .live
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+                live.checked_add(delta)
+                    .filter(|&next| delta <= 0 || next <= limit as isize)
+            });
+        if charged.is_err() {
+            self.refused.store(true, Ordering::Relaxed);
+        }
+        charged.is_ok()
+    }
+}
+
+impl Default for BudgetAlloc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// SAFETY: every operation delegates the unchanged pointer and layout to System. Accounting never
+// accesses allocated memory, and a failed allocation/reallocation leaves the caller's block alone.
+unsafe impl GlobalAlloc for BudgetAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let limit = self.limit.load(Ordering::Relaxed);
+        if limit != 0 && !self.charge(layout.size() as isize, limit) {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: the caller supplies a valid nonzero allocation layout, forwarded to System.
+        let ptr = unsafe { System.alloc(layout) };
+        if limit != 0 && ptr.is_null() {
+            self.live
+                .fetch_sub(layout.size() as isize, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let limit = self.limit.load(Ordering::Relaxed);
+        if limit != 0 && !self.charge(layout.size() as isize, limit) {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: the caller supplies a valid nonzero allocation layout, forwarded to System.
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if limit != 0 && ptr.is_null() {
+            self.live
+                .fetch_sub(layout.size() as isize, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let limit = self.limit.load(Ordering::Relaxed);
+        // SAFETY: ptr and its original layout come from the caller and are forwarded unchanged.
+        unsafe { System.dealloc(ptr, layout) };
+        if limit != 0 {
+            self.live
+                .fetch_sub(layout.size() as isize, Ordering::Relaxed);
+        }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let limit = self.limit.load(Ordering::Relaxed);
+        let delta = new_size as isize - layout.size() as isize;
+        if limit != 0 && !self.charge(delta, limit) {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: the caller supplies the live block, original layout and valid new size.
+        let resized = unsafe { System.realloc(ptr, layout, new_size) };
+        if limit != 0 && resized.is_null() {
+            self.live.fetch_sub(delta, Ordering::Relaxed);
+        }
+        resized
+    }
+}
+
+static ISOLATED_EXE: OnceLock<std::io::Result<PathBuf>> = OnceLock::new();
+
+/// Route subsequent conversions through this binary's child mode, including on lookup failure.
+pub fn isolate_conversions() {
+    ISOLATED_EXE.get_or_init(std::env::current_exe);
+}
+
+/// Run the hidden conversion mode before any runtime or application initialization.
+pub fn run_child_if_requested(alloc: &'static BudgetAlloc) -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() != Some(std::ffi::OsStr::new(CHILD_ARG)) {
+        return None;
+    }
+    alloc.arm(MAX_CONVERT_MEMORY_BYTES);
+    let hint = args.next().unwrap_or_default();
+    let ext = format_hint(hint.to_str().unwrap_or(""));
+    let mut bytes = Vec::new();
+    let mut reply = match std::io::stdin()
+        .take(MAX_INPUT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+    {
+        Ok(_) if bytes.len() > MAX_INPUT_BYTES => Err(Skipped::TooLarge(bytes.len() as u64)),
+        Ok(_) => convert_in_process(ext, &bytes),
+        Err(_) => Err(Skipped::Unreadable("cannot read")),
+    };
+    if alloc.refused() {
+        reply = Err(Skipped::Unreadable(MEMORY_REASON));
+    }
+    // The caller exits right after; flush explicitly so the reply is never left in a buffer.
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(encode_reply(&reply).as_bytes());
+    let _ = out.flush();
+    Some(0)
+}
+
+fn format_hint(ext: &str) -> &str {
+    if ext.len() <= 8 && ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        ext
+    } else {
+        ""
+    }
+}
+
+fn encode_reply(reply: &Result<String, Skipped>) -> String {
+    match reply {
+        Ok(md) => format!("OK\n{md}"),
+        Err(Skipped::NeedsOcr(pages)) => format!("SKIP\nocr\t{pages}"),
+        Err(Skipped::TooLarge(size)) => format!("SKIP\nlarge\t{size}"),
+        Err(Skipped::Encrypted) => "SKIP\nencrypted".to_string(),
+        Err(Skipped::Unreadable(reason)) => format!("SKIP\nunreadable\t{reason}"),
+        Err(Skipped::Panicked) => "SKIP\npanicked".to_string(),
+    }
+}
+
+fn decode_reply(bytes: &[u8]) -> Result<String, Skipped> {
+    let wire = std::str::from_utf8(bytes).map_err(|_| Skipped::Panicked)?;
+    if let Some(md) = wire.strip_prefix("OK\n") {
+        return if md.len() <= MAX_TEXT_BYTES && !md.trim().is_empty() {
+            Ok(md.to_string())
+        } else {
+            Err(Skipped::Panicked)
+        };
+    }
+    let Some(skip) = wire.strip_prefix("SKIP\n") else {
+        return Err(Skipped::Panicked);
+    };
+    let (kind, arg) = skip.split_once('\t').unwrap_or((skip, ""));
+    Err(match kind {
+        "ocr" => Skipped::NeedsOcr(
+            arg.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == ' ')
+                .take(64)
+                .collect(),
+        ),
+        "large" => arg
+            .parse()
+            .map(Skipped::TooLarge)
+            .unwrap_or(Skipped::Panicked),
+        "encrypted" if arg.is_empty() => Skipped::Encrypted,
+        "unreadable" => UNREADABLE_REASONS
+            .iter()
+            .find(|&&reason| reason == arg)
+            .map(|&reason| Skipped::Unreadable(reason))
+            .unwrap_or(Skipped::Panicked),
+        _ => Skipped::Panicked,
+    })
+}
+
+fn supervise(mut cmd: Command, bytes: &[u8], deadline: Duration) -> Result<String, Skipped> {
+    let start = Instant::now();
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| Skipped::Unreadable(UNAVAILABLE_REASON))?;
+    let mut stdin = child.stdin.take().ok_or(Skipped::Panicked)?;
+    let stdout = child.stdout.take().ok_or(Skipped::Panicked)?;
+    // Scoped threads borrow the input (up to 32 MiB) instead of copying it.
+    let (status, output) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(bytes));
+        let reader = scope.spawn(move || {
+            let mut output = Vec::new();
+            stdout
+                .take((MAX_TEXT_BYTES + 4096) as u64)
+                .read_to_end(&mut output)?;
+            Ok::<_, std::io::Error>(output)
+        });
+        let mut backoff = Duration::from_millis(1);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if start.elapsed() < deadline => {
+                    std::thread::sleep(backoff.min(deadline.saturating_sub(start.elapsed())));
+                    backoff = (backoff * 2).min(Duration::from_millis(25));
+                }
+                state => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(if state.is_err() {
+                        Skipped::Panicked
+                    } else {
+                        Skipped::Unreadable(DEADLINE_REASON)
+                    });
+                }
+            }
+        };
+        // Killing and reaping our child closes both pipe ends, so blocked I/O can finish too.
+        let _ = writer.join();
+        (status, reader.join())
+    });
+    let output = output.map_err(|_| Skipped::Panicked)?;
+    if !status?.success() {
+        return Err(Skipped::Panicked);
+    }
+    decode_reply(&output.map_err(|_| Skipped::Panicked)?)
+}
 
 /// Extensions (lowercase, no dot) this converter reads: every extension anydoc names except CSV,
 /// which is already text.
@@ -111,6 +386,18 @@ pub fn to_markdown(path: &str, bytes: &[u8]) -> Result<String, Skipped> {
         return Err(Skipped::TooLarge(bytes.len() as u64));
     }
     let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    if let Some(exe) = ISOLATED_EXE.get() {
+        let exe = exe
+            .as_ref()
+            .map_err(|_| Skipped::Unreadable(UNAVAILABLE_REASON))?;
+        let mut cmd = Command::new(exe);
+        cmd.arg(CHILD_ARG).arg(format_hint(ext));
+        return supervise(cmd, bytes, CONVERT_DEADLINE);
+    }
+    convert_in_process(ext, bytes)
+}
+
+fn convert_in_process(ext: &str, bytes: &[u8]) -> Result<String, Skipped> {
     // A malformed document must not take the index run down with it. Detection opens containers
     // too, so it runs inside the unwind boundary as well.
     let converted = {
@@ -273,6 +560,147 @@ pub fn chunk_markdown(md: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_round_trips_markdown_and_every_skip_kind() {
+        let replies = [
+            Ok("# Runbook\nsettle_invoice".to_string()),
+            Err(Skipped::NeedsOcr("all 3 pages need OCR".to_string())),
+            Err(Skipped::TooLarge(42_000_000)),
+            Err(Skipped::Encrypted),
+            Err(Skipped::Unreadable("no text")),
+            Err(Skipped::Panicked),
+        ];
+        for reply in replies {
+            assert_eq!(decode_reply(encode_reply(&reply).as_bytes()), reply);
+        }
+        for reason in UNREADABLE_REASONS {
+            let reply = Err(Skipped::Unreadable(reason));
+            assert_eq!(decode_reply(encode_reply(&reply).as_bytes()), reply);
+        }
+    }
+
+    #[test]
+    fn wire_rejects_untrusted_output_and_sanitizes_ocr() {
+        for bad in [
+            b"SKIP\nunreadable\tsource text".as_slice(),
+            b"SKIP\nunknown",
+            b"OK\n\xff",
+            b"",
+            b"OK\n",
+            b"SKIP\nlarge\tnot a number",
+        ] {
+            assert_eq!(decode_reply(bad), Err(Skipped::Panicked));
+        }
+        let oversized = format!("OK\n{}", "x".repeat(MAX_TEXT_BYTES + 1));
+        assert_eq!(decode_reply(oversized.as_bytes()), Err(Skipped::Panicked));
+        let ocr = format!("SKIP\nocr\tpage /tmp/private.pdf\n{}", "éA!".repeat(80));
+        let Err(Skipped::NeedsOcr(pages)) = decode_reply(ocr.as_bytes()) else {
+            panic!("expected sanitized OCR reply");
+        };
+        assert_eq!(pages.len(), 64);
+        assert!(
+            pages
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b' ')
+        );
+        assert!(pages.starts_with("page tmpprivatepdf"));
+    }
+
+    #[test]
+    fn budget_refuses_growth_keeps_the_block_and_credits_frees() {
+        use std::alloc::{GlobalAlloc, Layout};
+
+        let alloc = BudgetAlloc::new();
+        alloc.arm(32);
+        let layout = Layout::from_size_align(16, 8).unwrap();
+        // SAFETY: layouts are valid; successful blocks are used within bounds and freed once.
+        unsafe {
+            let first = alloc.alloc(layout);
+            assert!(!first.is_null());
+            first.write(73);
+            let second = alloc.alloc_zeroed(layout);
+            assert!(!second.is_null());
+            assert_eq!(second.read(), 0);
+            assert!(alloc.alloc(layout).is_null());
+            assert!(alloc.alloc_zeroed(layout).is_null());
+            assert!(alloc.realloc(first, layout, 24).is_null());
+            assert_eq!(
+                first.read(),
+                73,
+                "failed realloc preserves the original block"
+            );
+            assert!(alloc.refused());
+            alloc.dealloc(second, layout);
+            let grown = alloc.realloc(first, layout, 24);
+            assert!(!grown.is_null());
+            assert_eq!(grown.read(), 73);
+            let shrunk = alloc.realloc(grown, Layout::from_size_align(24, 8).unwrap(), 8);
+            assert!(!shrunk.is_null());
+            let rest = alloc.alloc(Layout::from_size_align(24, 8).unwrap());
+            assert!(!rest.is_null(), "shrinking realloc credits the delta");
+            alloc.dealloc(rest, Layout::from_size_align(24, 8).unwrap());
+            alloc.dealloc(shrunk, Layout::from_size_align(8, 8).unwrap());
+        }
+    }
+
+    #[test]
+    fn unarmed_budget_forwards_and_prearm_frees_add_headroom() {
+        use std::alloc::{GlobalAlloc, Layout};
+
+        let alloc = BudgetAlloc::new();
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        // SAFETY: valid layouts, each successful System-backed block is freed exactly once.
+        unsafe {
+            let block = alloc.alloc(layout);
+            assert!(!block.is_null());
+            let block = alloc.realloc(block, layout, 128);
+            assert!(!block.is_null());
+            let zeroed = alloc.alloc_zeroed(layout);
+            assert!(!zeroed.is_null());
+            alloc.dealloc(zeroed, layout);
+            assert!(!alloc.refused());
+            alloc.arm(1);
+            alloc.dealloc(block, Layout::from_size_align(128, 8).unwrap());
+            let block = alloc.alloc(layout);
+            assert!(
+                !block.is_null(),
+                "pre-arm frees cannot wrap the live counter"
+            );
+            alloc.dealloc(block, layout);
+            assert!(!alloc.refused());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervise_kills_a_stalled_child_before_the_deadline() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let start = std::time::Instant::now();
+        assert_eq!(
+            supervise(cmd, b"", std::time::Duration::from_millis(200)),
+            Err(Skipped::Unreadable(DEADLINE_REASON))
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervise_contains_a_signal_and_decodes_a_reply_after_stdin_is_closed() {
+        let mut crash = std::process::Command::new("sh");
+        crash.args(["-c", "kill -9 $$"]);
+        assert_eq!(
+            supervise(crash, b"input", std::time::Duration::from_secs(5)),
+            Err(Skipped::Panicked)
+        );
+        let mut reply = std::process::Command::new("sh");
+        reply.args(["-c", "cat >/dev/null; printf 'SKIP\\nunreadable\\tno text'"]);
+        assert_eq!(
+            supervise(reply, &[0; 128 * 1024], std::time::Duration::from_secs(5)),
+            Err(Skipped::Unreadable("no text"))
+        );
+    }
 
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(format!(

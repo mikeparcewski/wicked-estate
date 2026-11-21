@@ -1040,8 +1040,8 @@ fn stamp_extractor_markers(
     version_key: &str,
     digest_key: &str,
     extra_digest: &str,
-    unreadable_key: &str,
-    unreadable_files: &[(String, String)],
+    unreadable: (&str, &[(String, String)]),
+    skipped_documents: (&str, &[(String, String)]),
 ) {
     #[cfg(test)]
     TEST_INDEX_STAMP_HOOK.with(|hook| {
@@ -1051,14 +1051,40 @@ fn stamp_extractor_markers(
     });
     // Persist the retry record before clearing either pending marker: interruption must not
     // certify current output without preserving the skipped files' need for re-extraction.
-    let record = unreadable_files
-        .iter()
-        .map(|(path, reason)| format!("{path}\t{reason}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    store.meta_set_key(unreadable_key, &record);
+    for (key, entries) in [unreadable, skipped_documents] {
+        let record = entries
+            .iter()
+            .map(|(path, reason)| format!("{path}\t{reason}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        store.meta_set_key(key, &record);
+    }
     store.meta_set_key(version_key, env!("CARGO_PKG_VERSION"));
     store.meta_set_key(digest_key, extra_digest);
+}
+
+/// Documents present in the indexed trees that could not be converted, sorted by path.
+/// Labelled graphs read each repo's record; an unlabelled graph reads the bare meta key.
+pub fn skipped_documents(store: &dyn GraphStoreMutExt) -> Vec<(String, String)> {
+    let repos = repo_scope::registry(store);
+    let keys = if repos.is_empty() {
+        vec![repo_scope::meta_key(None, "skipped_documents")]
+    } else {
+        repos
+            .iter()
+            .map(|repo| repo_scope::meta_key(Some(&repo.label), "skipped_documents"))
+            .collect()
+    };
+    let mut skipped = Vec::new();
+    for key in keys {
+        for line in store.meta_get_key(&key).unwrap_or_default().lines() {
+            if let Some((path, reason)) = line.split_once('\t') {
+                skipped.push((path.to_string(), reason.to_string()));
+            }
+        }
+    }
+    skipped.sort();
+    skipped
 }
 
 fn rel(root: &Path, path: &Path) -> String {
@@ -1717,6 +1743,16 @@ fn index_path_inner(
         .lines()
         .filter_map(|line| line.split_once('\t').map(|(path, _)| path.to_string()))
         .collect();
+    let doc_skips_key = repo_scope::meta_key(repo, "skipped_documents");
+    let prev_doc_skips: Vec<(String, String)> = store
+        .meta_get_key(&doc_skips_key)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            line.split_once('\t')
+                .map(|(path, reason)| (path.to_string(), reason.to_string()))
+        })
+        .collect();
 
     // W7: persist the git provenance collected above. A labelled run writes `repo:<label>:*` and
     // leaves the singular `repo_*` keys untouched — that is what stops the second repo indexed
@@ -1780,6 +1816,9 @@ fn index_path_inner(
 
     // Documents the converter could not read (needs OCR, encrypted, too large, ...): path + reason.
     let doc_skips: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+    // Documents handed to the converter this run (whatever the outcome): their old skip records
+    // are replaced by this run's result, never carried forward.
+    let attempted_documents = std::sync::Mutex::new(HashSet::new());
     let skip_doc = |rel: &str, reason: String| {
         if let Ok(mut v) = doc_skips.lock() {
             v.push((rel.to_string(), reason));
@@ -1864,13 +1903,8 @@ fn index_path_inner(
         }
     };
     // Report fixed reasons and paths only, on every successful exit, including no-change runs.
-    let flush_doc_skips = |unreadable: &[(String, String)]| {
-        let mut skips = doc_skips
-            .lock()
-            .map(|mut v| std::mem::take(&mut *v))
-            .unwrap_or_default();
-        skips.sort();
-        for (rel_path, reason) in &skips {
+    let flush_doc_skips = |skips: &[(String, String)], unreadable: &[(String, String)]| {
+        for (rel_path, reason) in skips {
             eprintln!("DOC-SKIPPED: {rel_path}: {reason}");
         }
         #[cfg(test)]
@@ -1925,6 +1959,23 @@ fn index_path_inner(
         .iter()
         .map(|(_, r)| repo_scope::namespaced(repo, r))
         .collect();
+    let document_skip_record = || {
+        let mut skips: std::collections::BTreeMap<String, String> = doc_skips
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        let attempted = attempted_documents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (path, reason) in &prev_doc_skips {
+            if current_rel_paths.contains(path) && !attempted.contains(path) {
+                skips.entry(path.clone()).or_insert_with(|| reason.clone());
+            }
+        }
+        skips.into_iter().collect::<Vec<_>>()
+    };
 
     let work: Vec<FileWork> = supported
         .into_par_iter()
@@ -2285,15 +2336,16 @@ fn index_path_inner(
             store.meta_set_key(&override_key, cur_overrides);
         }
         // #476: certify current markers; skipped files retain their individual retry record.
+        let skipped_documents = document_skip_record();
         stamp_extractor_markers(
             store,
             &version_key,
             &digest_key,
             &extra_digest,
-            &unreadable_key,
-            &unreadable_files,
+            (&unreadable_key, &unreadable_files),
+            (&doc_skips_key, &skipped_documents),
         );
-        flush_doc_skips(&unreadable_files);
+        flush_doc_skips(&skipped_documents, &unreadable_files);
         return store.stats();
     }
 
@@ -2418,6 +2470,10 @@ fn index_path_inner(
                     // under the document's own path. Conversion failures are reported and skipped.
                     // The digest stays the raw bytes', so unchanged documents are not converted.
                     let converted: Option<String> = if doc_convert::is_doc_ext(&ext) {
+                        attempted_documents
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(fw.rel.clone());
                         let bytes = confined_root
                             .as_ref()
                             .and_then(|c| c.resolve(&fw.abs))
@@ -2753,7 +2809,8 @@ fn index_path_inner(
     drop(unchanged_work);
 
     unreadable_files.sort();
-    flush_doc_skips(&unreadable_files);
+    let skipped_documents = document_skip_record();
+    flush_doc_skips(&skipped_documents, &unreadable_files);
     let mut skipped_min = skipped_minified
         .into_inner()
         .unwrap_or_else(|e| e.into_inner());
@@ -3089,8 +3146,8 @@ fn index_path_inner(
         &version_key,
         &digest_key,
         &extra_digest,
-        &unreadable_key,
-        &unreadable_files,
+        (&unreadable_key, &unreadable_files),
+        (&doc_skips_key, &skipped_documents),
     );
     store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
     // The plugin-override key follows the same write-LAST rule (ADR-010): stamped only once the
@@ -6484,14 +6541,41 @@ pattern = "(?P<k>\\{)"
         assert_eq!(skips[1].0, "docs/scanned.pdf");
         assert!(skips[1].1.starts_with("needs OCR"), "{skips:?}");
         assert!(!files.contains(&"docs/huge.pdf".to_string()));
+        assert_eq!(skipped_documents(&store), skips);
 
-        // Unchanged documents: no re-conversion, no retry of the scan. The oversized one is still
-        // reported, on the no-change exit too.
+        // Unchanged documents: no re-conversion, but both skips remain recorded and reported.
+        let first_skips = skips;
         DOC_SKIPS.with(|n| n.borrow_mut().clear());
         index_path(&mut store, tmp.path()).unwrap();
         let skips = DOC_SKIPS.with(|n| n.borrow().clone());
+        assert_eq!(skips, first_skips);
+        assert_eq!(skipped_documents(&store), first_skips);
+
+        // A successful conversion retires its old skip; deleting a skipped file retires it too.
+        std::fs::copy(
+            format!("{fixtures}/runbook.pdf"),
+            tmp.path().join("docs/scanned.pdf"),
+        )
+        .unwrap();
+        DOC_SKIPS.with(|n| n.borrow_mut().clear());
+        index_path(&mut store, tmp.path()).unwrap();
+        let skips = skipped_documents(&store);
         assert_eq!(skips.len(), 1, "{skips:?}");
         assert_eq!(skips[0].0, "docs/huge.pdf");
+        assert_eq!(DOC_SKIPS.with(|n| n.borrow().clone()), skips);
+        assert!(
+            store
+                .file_content("docs/scanned.pdf")
+                .unwrap()
+                .unwrap()
+                .contains("retry_budget")
+        );
+
+        std::fs::remove_file(tmp.path().join("docs/huge.pdf")).unwrap();
+        DOC_SKIPS.with(|n| n.borrow_mut().clear());
+        index_path(&mut store, tmp.path()).unwrap();
+        assert!(skipped_documents(&store).is_empty());
+        assert!(DOC_SKIPS.with(|n| n.borrow().is_empty()));
     }
 
     #[test]
