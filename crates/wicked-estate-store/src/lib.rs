@@ -1582,6 +1582,12 @@ pub trait GraphStoreMutExt: GraphStore {
         Ok(None)
     }
 
+    /// Clean memory/knowledge text and its full-text index (#406). `None` means unsupported;
+    /// callers must not report a store this backend cannot migrate as clean.
+    fn migrate_text_redaction(&mut self) -> wicked_estate_core::Result<Option<RedactionReport>> {
+        Ok(None)
+    }
+
     /// True while the store holds text written before the current redaction policy and reads
     /// therefore withhold stored source text, signatures and docs (#405).
     fn redaction_pending(&self) -> bool {
@@ -1676,6 +1682,9 @@ pub(crate) fn unresolved_site_key(
 }
 
 impl GraphStoreMutExt for SqliteStore {
+    fn migrate_text_redaction(&mut self) -> wicked_estate_core::Result<Option<RedactionReport>> {
+        SqliteStore::migrate_text_redaction(self).map(Some)
+    }
     fn migrate_redaction(
         &mut self,
         redact_file: &dyn Fn(&str, &str) -> String,

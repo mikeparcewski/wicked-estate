@@ -31,6 +31,20 @@
 //! | as_written       | local arrow            | none                | stale arrow            | none                 |
 //! | nested_before_kept | local arrow          | none                | none                   | none                 |
 //!
+//! #495 / #494 / #504 cases (`Head` only; `other.Card` in the first two rows is the ordinary
+//! unimported-name fallback any free name gets, not the out-of-scope local the bug bound):
+//! | case | main 591286c | Head |
+//! |------|--------------|------|
+//! | hidden_block_function | caller.Card (false) | other.Card |
+//! | body_var_in_parameter_default | caller.Card (false) | other.Card |
+//! | static_import_value_alias | parked | other.Card |
+//! | body_import_value_alias | parked | other.Card |
+//! | local_value_alias | parked | local Local arrow |
+//! | loop_back_edge | parked | local arrow |
+//! | finally_write | stale arrow | parked |
+//! | many_writes_after_kill | stale arrow | parked |
+//! | nested_pattern_default | stale arrow in inner default | parked in inner default |
+//!
 //! `write_lookup_size` (#497): on `Head` the bound file costs under twice the unbound one; on
 //! `Main493` (the per-call scan) over twice, which shows the test catches it. Not timed on
 //! `Main`, whose unbound path rescans the body per call (#493 memoised it).
@@ -702,7 +716,7 @@ fn nested_let_reassigned() {
     case("nested_let_reassigned", "", body, [true, true, false]);
 }
 
-/// Past 32 writes the lookup stops ordering: every known write stays possible.
+/// Conditional writes keep the arrow possible even when there are more than 32.
 #[test]
 fn many_conditional_writes() {
     let body = format!(
@@ -792,4 +806,243 @@ fn static_field_after() {
 fn static_field_before() {
     let body = "class CLS { static value = READ; } { var Card = () => null; }";
     class_case("static_field_before", body, [2, 0, 0]);
+}
+
+/// #495: a strict-mode block function is reachable only inside its block.
+#[test]
+fn hidden_block_function() {
+    if BUILD != Build::Head {
+        return;
+    }
+    let g = index(
+        "hidden_block_function",
+        "export function ViaCall() { { function Card() {} } return Card(); }\n\
+         export function ViaJsx() { { function Card() {} } return <Card />; }\n\
+         export function Inside() { function Card() {} return Card(); }\n",
+        &["ViaCall", "ViaJsx", "Inside"],
+    );
+    // No edge to the block-scoped `caller.Card`; a free name keeps the ordinary cross-file
+    // name fallback, as any unbound name does.
+    for c in CALLERS {
+        assert_one("hidden_block_function", &g, c, "src/other/Card().");
+    }
+    assert_one("hidden_block_function", &g, "Inside", "src/caller/Card().");
+}
+
+/// #495: a body var is invisible while default parameters are evaluated.
+#[test]
+fn body_var_in_parameter_default() {
+    if BUILD != Build::Head {
+        return;
+    }
+    let g = index(
+        "body_var_in_parameter_default",
+        "export function ViaCall(x = Card()) { var Card = () => null; return x; }\n\
+         export function ViaJsx(x = <Card />) { var Card = () => null; return x; }\n",
+        &CALLERS,
+    );
+    for c in CALLERS {
+        assert_one("body_var_in_parameter_default", &g, c, "src/other/Card().");
+    }
+}
+
+/// #494: static-block aliases follow the imported binding, including TS wrappers.
+#[test]
+fn static_import_value_alias() {
+    if BUILD != Build::Head {
+        return;
+    }
+    let g = index(
+        "static_import_value_alias",
+        "import { Card as Selected } from './other';\n\
+         export class ViaCall { static { { var Card = Selected; } Card(); } }\n\
+         export class ViaJsx { static { \
+         { var Card = (Selected! as any) satisfies any; } void (<Card />); } }\n",
+        &CALLERS,
+    );
+    for c in CALLERS {
+        assert_one("static_import_value_alias", &g, c, "src/other/Card().");
+    }
+}
+
+/// #494: body declarators and assignments can alias an imported value.
+#[test]
+fn body_import_value_alias() {
+    if BUILD != Build::Head {
+        return;
+    }
+    let g = index(
+        "body_import_value_alias",
+        "import { Card as Selected } from './other';\n\
+         export function ViaCall() { var Card = Selected; return Card(); }\n\
+         export function ViaJsx() { var Card; Card = (Selected); return <Card />; }\n",
+        &CALLERS,
+    );
+    for c in CALLERS {
+        assert_one("body_import_value_alias", &g, c, "src/other/Card().");
+    }
+}
+
+/// #494: aliases join the initializer's local definition rather than a global homonym.
+#[test]
+fn local_value_alias() {
+    if BUILD != Build::Head {
+        return;
+    }
+    let g = index(
+        "local_value_alias",
+        "export function ViaCall() { const Local = () => null; var Card = Local; return Card(); }\n\
+         export function ViaJsx() { const Local = () => null; \
+         let Selected = Local; var Card = Selected; return <Card />; }\n",
+        &CALLERS,
+    );
+    for c in CALLERS {
+        assert_one("local_value_alias", &g, c, "src/caller/Local().");
+    }
+    for (tag, body, want) in [
+        (
+            "alias_snapshot",
+            "const Local = () => null; let Selected = Local; var Card = Selected; \
+             Selected = null; return Card();",
+            Some("src/caller/Local()."),
+        ),
+        (
+            "alias_four_hops",
+            "const Local = () => null; const D = Local; const C = D; const B = C; \
+             var Card = B; return Card();",
+            Some("src/caller/Local()."),
+        ),
+        (
+            "alias_five_hops",
+            "const Local = () => null; const E = Local; const D = E; const C = D; \
+             const B = C; var Card = B; return Card();",
+            None,
+        ),
+        (
+            "alias_cycle",
+            "const Card = Next; const Next = Card; return Card();",
+            None,
+        ),
+        (
+            "alias_multiple_values",
+            "var Card = null; if (on) Card = Selected; return Card();",
+            None,
+        ),
+        (
+            "alias_local_shadow",
+            "const Selected = null; var Card = Selected; return Card();",
+            None,
+        ),
+        (
+            "alias_destructured_value",
+            "const { Card } = Selected; return Card();",
+            None,
+        ),
+    ] {
+        let g = index(
+            tag,
+            &format!(
+                "import {{ Card as Selected }} from './other'; \
+                 export function ViaCall() {{ {body} }}",
+            ),
+            &["ViaCall"],
+        );
+        if let Some(path) = want {
+            assert_one(tag, &g, "ViaCall", path);
+        } else {
+            assert_none(tag, &g, "ViaCall");
+        }
+    }
+}
+
+fn head_write_case(tag: &str, body: &str, arrow: bool) {
+    if BUILD != Build::Head {
+        return;
+    }
+    let g = index(
+        tag,
+        &format!(
+            "export function ViaCall(Card: any) {{ {} }}\n\
+             export function ViaJsx(Card: any) {{ {} }}\n",
+            body.replace("READ", "Card()"),
+            body.replace("READ", "<Card />"),
+        ),
+        &CALLERS,
+    );
+    for c in CALLERS {
+        if arrow {
+            assert_one(tag, &g, c, "src/caller/Card().");
+        } else {
+            assert_none(tag, &g, c);
+        }
+    }
+}
+
+/// #504: later iterations can read a write after the call in source order.
+#[test]
+fn loop_back_edge() {
+    for (tag, body) in [
+        (
+            "loop_back_edge",
+            "for (let i = 0; i < 2; i++) { if (i) void (READ); var Card = () => null; }",
+        ),
+        (
+            "for_of_back_edge",
+            "for (const i of [0, 1]) { if (i) void (READ); var Card = () => null; }",
+        ),
+        (
+            "while_back_edge",
+            "let i = 0; while (i++ < 2) { if (i > 1) void (READ); var Card = () => null; }",
+        ),
+        (
+            "do_back_edge",
+            "let i = 0; do { if (i) void (READ); var Card = () => null; } while (i++ < 1);",
+        ),
+        (
+            "loop_init_does_not_kill_back_edge",
+            "for (Card = null; on;) { void (READ); var Card = () => null; }",
+        ),
+    ] {
+        head_write_case(tag, body, true);
+    }
+    head_write_case(
+        "loop_back_edge_killed",
+        "for (;;) { Card = null; void (READ); var Card = () => null; }",
+        false,
+    );
+}
+
+/// #504: a finally write is guaranteed before a call after its try statement.
+#[test]
+fn finally_write() {
+    head_write_case(
+        "finally_write",
+        "var Card = () => null; try {} finally { { Card = null; } } return READ;",
+        false,
+    );
+}
+
+/// #504: 38 conditional writes cannot revive the arrow killed by the preceding write.
+#[test]
+fn many_writes_after_kill() {
+    let body = format!(
+        "var Card = () => null; Card = null; {} return READ;",
+        "if (on) Card = null; ".repeat(38)
+    );
+    head_write_case("many_writes_after_kill", &body, false);
+}
+
+/// #504: a nested element takes effect before a sibling's default, but after an outer default.
+#[test]
+fn nested_pattern_default() {
+    head_write_case(
+        "nested_pattern_inner",
+        "var Card = () => null; let x; [[Card, x = READ] = [null]] = next; return x;",
+        false,
+    );
+    head_write_case(
+        "nested_pattern_outer",
+        "var Card = () => null; let x; [[Card, x] = [READ]] = next; return x;",
+        true,
+    );
 }
