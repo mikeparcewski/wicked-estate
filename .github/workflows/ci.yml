@@ -1,14 +1,16 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
 
 # A newer push to the same pull request supersedes the running checks (#360: the macOS/Windows
-# legs are the long ones). Pushes to a branch are never cancelled.
+# legs are the long ones). Pushes to main are never cancelled; a pushed PR branch runs once,
+# as its pull_request run (a push run on every branch doubled the queue).
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

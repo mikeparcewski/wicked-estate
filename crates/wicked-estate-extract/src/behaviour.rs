@@ -14,6 +14,8 @@
 //!
 //! Inspected: callables and classes/structs in Python, TypeScript, TSX, JavaScript and Rust, and COBOL
 //! paragraphs and sections (a body of only EXIT, CONTINUE or GOBACK is a stub).
+//!
+//! [`HAS_BODY_KEY`] separately records implementation evidence for selected callable grammars.
 
 use std::sync::LazyLock;
 
@@ -23,6 +25,78 @@ use tree_sitter::Node as TsNode;
 pub const BEHAVIOUR_KEY: &str = "behaviour";
 /// Metadata key: why the unit is not `real` (a short snake_case code).
 pub const BEHAVIOUR_REASON_KEY: &str = "behaviour_reason";
+/// Metadata key: whether an inspected callable contribution has an implementation body.
+pub const HAS_BODY_KEY: &str = "has_body";
+
+/// Inspect a callable's exact anchor range. Other languages and kinds have unknown body evidence.
+#[must_use]
+pub fn has_body(
+    lang: &str,
+    kind: &str,
+    tree: &tree_sitter::Tree,
+    start: usize,
+    end: usize,
+    decl: bool,
+) -> Option<bool> {
+    if !matches!(kind, "function" | "method" | "constructor")
+        || !matches!(
+            lang,
+            "java"
+                | "csharp"
+                | "apex"
+                | "php"
+                | "kotlin"
+                | "scala"
+                | "typescript"
+                | "tsx"
+                | "javascript"
+        )
+    {
+        return None;
+    }
+    if decl {
+        return Some(false);
+    }
+    let Some(node) = anchor(
+        tree,
+        start,
+        end,
+        &[
+            "method_declaration",
+            "constructor_declaration",
+            "local_function_statement",
+            "annotation_type_element_declaration",
+            "function_definition",
+            "function_declaration",
+            "generator_function_declaration",
+            "secondary_constructor",
+            "method_definition",
+            "method_signature",
+            "abstract_method_signature",
+            "function_signature",
+            "variable_declarator",
+            "public_field_definition",
+            "field_definition",
+        ],
+    ) else {
+        return Some(false);
+    };
+    Some(match (lang, node.kind()) {
+        ("kotlin", "function_declaration") => named_children(node)
+            .iter()
+            .any(|c| c.kind() == "function_body"),
+        ("kotlin", "secondary_constructor") => {
+            named_children(node).iter().any(|c| c.kind() == "block")
+        }
+        (
+            "typescript" | "tsx" | "javascript",
+            "variable_declarator" | "public_field_definition" | "field_definition",
+        ) => node
+            .child_by_field_name("value")
+            .is_some_and(|v| matches!(v.kind(), "arrow_function" | "function_expression")),
+        _ => node.child_by_field_name("body").is_some(),
+    })
+}
 
 /// The class one definition falls into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -897,6 +971,143 @@ const PY_DECL_CALLS: &[&str] = &[
     "enum.auto",
 ];
 
+const PY_CONSTRAINT_KEYS: &[&str] = &[
+    "gt",
+    "ge",
+    "lt",
+    "le",
+    "multiple_of",
+    "min_length",
+    "max_length",
+    "pattern",
+    "regex",
+    "min_items",
+    "max_items",
+    "unique_items",
+    "max_digits",
+    "decimal_places",
+    "allow_inf_nan",
+    "strict",
+    "const",
+    "frozen",
+    "validator",
+    "validators",
+    "converter",
+];
+
+const PY_CONSTRAINT_CALLS: &[&str] = &[
+    "constr",
+    "conint",
+    "confloat",
+    "condecimal",
+    "conlist",
+    "conset",
+    "confrozenset",
+    "conbytes",
+    "condate",
+    "StringConstraints",
+    "Gt",
+    "Ge",
+    "Lt",
+    "Le",
+    "MultipleOf",
+    "MinLen",
+    "MaxLen",
+    "Len",
+    "Interval",
+    "Predicate",
+];
+
+/// A declaring call with a constraint keyword states a product rule (#434).
+fn py_decl_call_constrains(call: TsNode<'_>, src: &[u8]) -> bool {
+    call.child_by_field_name("function")
+        .is_some_and(|f| py_name_chain(f, 0) && PY_DECL_CALLS.contains(&text(f, src)))
+        && call.child_by_field_name("arguments").is_some_and(|args| {
+            named_children(args).into_iter().any(|a| {
+                a.kind() == "keyword_argument"
+                    && a.child_by_field_name("name")
+                        .is_some_and(|n| PY_CONSTRAINT_KEYS.contains(&text(n, src)))
+            })
+        })
+}
+
+fn py_annotation_constrains(node: TsNode<'_>, src: &[u8], depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    if node.kind() == "identifier" && text(node, src) == "Literal" {
+        return true;
+    }
+    if node.kind() == "call"
+        && (py_decl_call_constrains(node, src)
+            || node.child_by_field_name("function").is_some_and(|f| {
+                py_name_chain(f, 0)
+                    && text(f, src)
+                        .rsplit('.')
+                        .next()
+                        .is_some_and(|name| PY_CONSTRAINT_CALLS.contains(&name))
+            }))
+    {
+        return true;
+    }
+    named_children(node)
+        .into_iter()
+        .any(|c| py_annotation_constrains(c, src, depth + 1))
+}
+
+fn py_restricting_setting(name: &str, value: TsNode<'_>, src: &[u8]) -> bool {
+    match name {
+        "extra" => matches!(text(value, src), "\"forbid\"" | "'forbid'" | "Extra.forbid"),
+        "frozen" | "strict" => value.kind() == "true",
+        "allow_mutation" => value.kind() == "false",
+        _ => false,
+    }
+}
+
+fn py_restricting_keyword(arg: TsNode<'_>, src: &[u8]) -> bool {
+    arg.kind() == "keyword_argument"
+        && arg.child_by_field_name("name").is_some_and(|name| {
+            arg.child_by_field_name("value")
+                .is_some_and(|value| py_restricting_setting(text(name, src), value, src))
+        })
+}
+
+fn py_restricting_model_config(assignment: TsNode<'_>, src: &[u8]) -> bool {
+    assignment
+        .child_by_field_name("left")
+        .is_some_and(|l| l.kind() == "identifier" && text(l, src) == "model_config")
+        && assignment.child_by_field_name("right").is_some_and(|v| {
+            v.kind() == "call"
+                && v.child_by_field_name("function")
+                    .is_some_and(|f| matches!(text(f, src), "ConfigDict" | "SettingsConfigDict"))
+                && v.child_by_field_name("arguments").is_some_and(|args| {
+                    named_children(args)
+                        .into_iter()
+                        .any(|a| py_restricting_keyword(a, src))
+                })
+        })
+}
+
+fn py_restricting_nested_config(class: TsNode<'_>, src: &[u8]) -> bool {
+    class
+        .child_by_field_name("name")
+        .is_some_and(|n| text(n, src) == "Config")
+        && class.child_by_field_name("body").is_some_and(|body| {
+            py_statements(body).into_iter().any(|s| {
+                s.kind() == "expression_statement"
+                    && s.named_child(0).is_some_and(|a| {
+                        a.kind() == "assignment"
+                            && a.child_by_field_name("left").is_some_and(|name| {
+                                name.kind() == "identifier"
+                                    && a.child_by_field_name("right").is_some_and(|v| {
+                                        py_restricting_setting(text(name, src), v, src)
+                                    })
+                            })
+                    })
+            })
+        })
+}
+
 /// A field value that declares a shape and runs no product code: a simple value, a container of
 /// declared values, or a declaring call (`Field(default=None, description="…")`) whose arguments
 /// are declared values. A `default_factory` must be a plain type (`list`, `dict`, …): any other
@@ -923,6 +1134,7 @@ fn py_decl_value(v: TsNode<'_>, src: &[u8], depth: usize) -> bool {
                 .child_by_field_name("function")
                 .is_some_and(|f| py_name_chain(f, 0) && PY_DECL_CALLS.contains(&text(f, src)));
             callee_ok
+                && !py_decl_call_constrains(v, src)
                 && v.child_by_field_name("arguments")
                     .is_some_and(|a| py_decl_args(a, src, depth + 1))
         }
@@ -981,6 +1193,12 @@ fn py_member(s: TsNode<'_>, src: &[u8]) -> PyMember {
             match e.kind() {
                 "ellipsis" => PyMember::Field,
                 "assignment" => {
+                    if e.child_by_field_name("type")
+                        .is_some_and(|t| py_annotation_constrains(t, src, 0))
+                        || py_restricting_model_config(e, src)
+                    {
+                        return PyMember::Other;
+                    }
                     let left_ok = e
                         .child_by_field_name("left")
                         .is_some_and(|l| l.kind() == "identifier");
@@ -1010,6 +1228,9 @@ fn py_member(s: TsNode<'_>, src: &[u8]) -> PyMember {
 }
 
 fn py_nested_class(c: TsNode<'_>, src: &[u8]) -> PyMember {
+    if py_restricting_nested_config(c, src) {
+        return PyMember::Other;
+    }
     match py_class(c, src) {
         Behaviour::Data(_) => PyMember::Field,
         _ => PyMember::Other,
@@ -1032,9 +1253,12 @@ fn py_class(node: TsNode<'_>, src: &[u8]) -> Behaviour {
     if !py_decorators(node)
         .into_iter()
         .all(|d| py_dataclass_like_decorator(d, src))
-        || node
-            .child_by_field_name("superclasses")
-            .is_some_and(|b| contains_kind(b, &["call", "lambda"]))
+        || node.child_by_field_name("superclasses").is_some_and(|b| {
+            contains_kind(b, &["call", "lambda"])
+                || named_children(b)
+                    .into_iter()
+                    .any(|a| py_restricting_keyword(a, src))
+        })
     {
         return Behaviour::Real;
     }
@@ -2325,7 +2549,7 @@ class Base(ABC):
         let t = tags("pkg/m.py", "python", code);
         is(&t, "Empty", "data", Some("empty_class"));
         is(&t, "Doc", "data", Some("empty_class"));
-        is(&t, "Model", "data", Some("fields_only_class"));
+        is(&t, "Model", "real", None);
         is(&t, "Config", "data", Some("fields_only_class"));
         is(&t, "Color", "data", Some("fields_only_class"));
         is(&t, "Point", "data", Some("fields_only_class"));
@@ -2340,6 +2564,118 @@ class Base(ABC):
         is(&t, "send", "stub", Some("pass_only"));
         is(&t, "Base", "stub", Some("interface_only"));
         is(&t, "run", "stub", Some("not_implemented"));
+    }
+
+    #[test]
+    fn python_field_constraints_are_behaviour() {
+        for field in [
+            "mode: Literal[\"chatgpt\"]",
+            "status: Literal[\"pending\", \"complete\"]",
+            "mode: typing.Literal[\"chatgpt\"]",
+            "mode: Optional[Literal[\"chatgpt\"]]",
+            "name: str = Field(pattern=\"^[a-z]+$\")",
+            "count: int = Field(ge=0)",
+            "count: Annotated[int, Field(gt=0)]",
+            "name: str = attr.ib(validator=None)",
+        ] {
+            let code = format!("class M(ProjectModel):\n    {field}\n");
+            let t = tags("pkg/m.py", "python", &code);
+            is(&t, "M", "real", None);
+        }
+        for field in [
+            "name: str",
+            "name: str = Field(default=None, description=\"x\")",
+            "model_config = ConfigDict(populate_by_name=True)",
+            "model_config = SettingsConfigDict(extra=\"allow\", allow_mutation=True)",
+        ] {
+            let code = format!("class M:\n    {field}\n");
+            let t = tags("pkg/m.py", "python", &code);
+            is(&t, "M", "data", Some("fields_only_class"));
+        }
+    }
+
+    #[test]
+    fn python_annotation_constraint_calls_are_behaviour() {
+        for call in [
+            "constr()",
+            "conint()",
+            "confloat()",
+            "condecimal()",
+            "conlist(int)",
+            "conset(int)",
+            "confrozenset(int)",
+            "conbytes()",
+            "condate()",
+            "StringConstraints()",
+            "annotated_types.Gt(0)",
+            "Ge(0)",
+            "Lt(10)",
+            "Le(10)",
+            "MultipleOf(2)",
+            "MinLen(1)",
+            "MaxLen(10)",
+            "Len(1, 10)",
+            "Interval(gt=0)",
+            "Predicate(bool)",
+        ] {
+            let code = format!("@dataclass\nclass M:\n    value: Annotated[int, {call}]\n");
+            let t = tags("pkg/m.py", "python", &code);
+            is(&t, "M", "real", None);
+        }
+        let t = tags(
+            "pkg/m.py",
+            "python",
+            "class M(TypedDict):\n    x: Literal[1]\n",
+        );
+        is(&t, "M", "real", None);
+    }
+
+    #[test]
+    fn python_restricting_config_is_behaviour() {
+        for setting in [
+            "extra=\"forbid\"",
+            "extra=Extra.forbid",
+            "frozen=True",
+            "strict=True",
+            "allow_mutation=False",
+        ] {
+            for config in ["ConfigDict", "SettingsConfigDict"] {
+                let code = format!("class M(BaseModel):\n    model_config = {config}({setting})\n");
+                let t = tags("pkg/m.py", "python", &code);
+                is(&t, "M", "real", None);
+            }
+            let assignment = setting.replace('=', " = ");
+            let code = format!("class M:\n    class Config:\n        {assignment}\n");
+            let t = tags("pkg/m.py", "python", &code);
+            is(&t, "M", "real", None);
+            let code = format!("class M(BaseModel, {setting}):\n    name: str\n");
+            let t = tags("pkg/m.py", "python", &code);
+            is(&t, "M", "real", None);
+        }
+        let code = r#"
+class Auth(BaseModel):
+    mode: Literal["chatgpt"]
+    model_config = ConfigDict(extra="forbid")
+
+class Frozen(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+class Plain(BaseModel):
+    name: str
+    class Config:
+        orm_mode = True
+
+class Validated(BaseModel):
+    name: str
+    @pydantic.field_validator("name")
+    def check(cls, value):
+        pass
+"#;
+        let t = tags("pkg/m.py", "python", code);
+        for name in ["Auth", "Frozen", "Validated"] {
+            is(&t, name, "real", None);
+        }
+        is(&t, "Plain", "data", Some("fields_only_class"));
     }
 
     #[test]
