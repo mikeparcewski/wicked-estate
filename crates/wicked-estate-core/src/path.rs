@@ -14,6 +14,7 @@ use crate::query::{Subgraph, SymbolQuery, TraversalSpec};
 use crate::symbol::SymbolId;
 use crate::traits::GraphRead;
 use crate::{Direction, Result};
+use std::collections::HashSet;
 
 /// Which endpoint of a path request could not be resolved.
 ///
@@ -38,10 +39,11 @@ impl Unresolved {
 
 /// The result of a path query.
 ///
-/// `found == false` with both bound flags clear is a **proven** absence — no route exists in
-/// the graph. `found == false` with either flag set is a **bounded** absence: the search was
-/// cut off and a route may lie beyond it. Conflating the two is the R3 failure the engine
-/// contract forbids, which is why both flags are reported rather than one "truncated" bit.
+/// `found == false` with both bound flags clear and `unresolved_on_frontier == Some(0)` is a
+/// **proven** absence — no route exists in the graph. With either flag set it is a **bounded**
+/// absence: the search was cut off and a route may lie beyond it. Otherwise the absence is in
+/// the RESOLVED graph only: unresolved references may carry a route (estate#348). Conflating
+/// these cases is the R3 failure the engine contract forbids.
 ///
 /// `#[non_exhaustive]` so a new field (a further bound cause, say) is not a breaking change.
 /// Outside this crate, build one from `PathResult::default()` and assign the fields.
@@ -84,6 +86,13 @@ pub struct PathResult {
     /// different node sets once the cap binds, so results are comparable across backends
     /// only while it does not.
     pub node_bounded: bool,
+    /// Unresolved references (per site) whose referencing symbol was reached by some candidate
+    /// traversal. Computed only for a no-route answer with both bound flags clear and both
+    /// operands resolved (`None` otherwise, and `None` when the store cannot count).
+    ///
+    /// `found == false`, both bound flags clear and `unresolved_on_frontier == Some(0)` is a
+    /// proven absence; any other value is an absence in the RESOLVED graph only (estate#348).
+    pub unresolved_on_frontier: Option<u64>,
     /// Which endpoint failed to resolve, if either did. `Some(_)` always implies
     /// `found == false`, and distinguishes "you named something that isn't here" from
     /// "these two exist but nothing connects them".
@@ -166,6 +175,7 @@ pub fn path_between(
                 found: true,
                 depth_bounded: false,
                 node_bounded: false,
+                unresolved_on_frontier: None,
                 unresolved: None,
             });
         }
@@ -185,9 +195,16 @@ pub fn path_between(
     // Disjunctions, not the winning candidate's values — see the field docs.
     let mut depth_bounded = false;
     let mut node_bounded = false;
+    let mut reached: HashSet<SymbolId> = HashSet::new();
 
     for start in &from_ids {
         let subgraph = store.traverse(start, &spec)?;
+        reached.insert(start.clone());
+        reached.extend(subgraph.nodes.iter().map(|n| n.symbol.clone()));
+        for edge in &subgraph.edges {
+            reached.insert(edge.source.clone());
+            reached.insert(edge.target.clone());
+        }
         // (#230) The EXACT cause (wicked-estate#222): the horizon declined to expand a node that
         // had an unreached neighbour. A frontier merely touched, with nothing beyond it, is not
         // a bound — the walk saw everything it could.
@@ -206,9 +223,17 @@ pub fn path_between(
     }
 
     let Some((hops, subgraph)) = best else {
+        let unresolved_on_frontier = if !depth_bounded && !node_bounded {
+            let mut reached: Vec<SymbolId> = reached.into_iter().collect();
+            reached.sort_by(|a, b| a.0.cmp(&b.0));
+            store.count_unresolved_refs_from(&reached)?
+        } else {
+            None
+        };
         return Ok(PathResult {
             depth_bounded,
             node_bounded,
+            unresolved_on_frontier,
             ..Default::default()
         });
     };
@@ -234,6 +259,7 @@ pub fn path_between(
         found: true,
         depth_bounded,
         node_bounded,
+        unresolved_on_frontier: None,
         unresolved: None,
     })
 }

@@ -575,7 +575,7 @@ wicked-estate-mcp --db /path/to/graph.db
 |------|-------------|
 | `SearchEntity` | Search symbols by name (substring/BM25). Required: `name`. Optional: `limit` (default 20, max 100). |
 | `RetrieveEntity` | Fetch full node details by stable symbol ID. Required: `symbol`. |
-| `Path` | The ordered hops from one symbol to another, each with edge kind and confidence. Required: `from`, `to` (symbol name or SymbolId). Optional: `depth` (default 8, min 1, max 16), `max_nodes` (default 1000, max 5000). `found:false` with `depth_bounded` or `node_bounded` set is a bounded search, not a proven absence: raise the bound before concluding. |
+| `Path` | The ordered hops from one symbol to another, each with edge kind and confidence. Required: `from`, `to` (symbol name or SymbolId). Optional: `depth` (default 8, min 1, max 16), `max_nodes` (default 1000, max 5000). `found:false` with `depth_bounded` or `node_bounded` set is a bounded search, not a proven absence: raise the bound before concluding; a proven absence also requires `unresolved_on_frontier:0`. |
 | `TraverseGraph` | Multi-hop graph traversal from a symbol. Required: `symbol`. Optional: `depth` (default 4, max 16), `direction` (`dependencies`/`dependents`/`both`), `edge_kinds`, `max_nodes` (default 200, max 1000). |
 | `BlastRadius` | Enumerate all transitive dependents of a symbol. Required: `symbol`. Optional: `depth` (default 8, max 24), `cursor` (a previous page's `next_cursor`). The answer is paged: keep calling with `cursor` while `next_cursor` is non-null. |
 | `FetchContent` | Retrieve the source text stored for a symbol. Required: `symbol`. |

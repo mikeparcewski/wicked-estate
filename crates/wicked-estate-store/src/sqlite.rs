@@ -4855,6 +4855,27 @@ impl GraphRead for SqliteStore {
         Ok(out)
     }
 
+    fn count_unresolved_refs_from(&self, from: &[SymbolId]) -> Result<Option<u64>> {
+        let from: BTreeSet<&str> = from.iter().map(|id| id.as_str()).collect();
+        let from: Vec<&str> = from.into_iter().collect();
+        let mut total = 0_u64;
+        for chunk in from.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT COUNT(*) FROM unresolved_refs u JOIN symbols s ON s.sid = u.from_sym \
+                 WHERE s.sym IN ({placeholders})"
+            );
+            let count: i64 = self
+                .conn
+                .prepare_cached(&sql)
+                .map_err(st)?
+                .query_row(rusqlite::params_from_iter(chunk.iter()), |r| r.get(0))
+                .map_err(st)?;
+            total += count as u64;
+        }
+        Ok(Some(total))
+    }
+
     fn indexed_files(&self) -> Result<Vec<String>> {
         // Delegates to the inherent method of the same name, which the incremental CLI already
         // calls directly; the trait method exists so `index_path` — which sees a `dyn` store — can

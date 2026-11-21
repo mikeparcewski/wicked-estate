@@ -176,6 +176,8 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
 );
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_name ON unresolved_refs(raw_name);
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file ON unresolved_refs(file);
+-- Path's reached-set unresolved count (estate#348) looks rows up by source symbol.
+CREATE INDEX IF NOT EXISTS idx_unresolved_refs_from ON unresolved_refs(from_sym);
 
 -- W11.1: content-addressed source-text store.
 -- Keyed by git_sha (the git blob id), NOT by file path, so identical content deduplicates.
