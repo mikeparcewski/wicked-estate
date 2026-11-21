@@ -21,7 +21,7 @@ Produces two binaries:
 | Binary | Purpose |
 |--------|---------|
 | `target/release/wicked-estate` | CLI — index, query, blast-radius, path, lineage, traverse, rank, rules-inventory, rules-recall, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
-| `target/release/wicked-estate-mcp` | MCP stdio server — 35 tools (12 estate + 9 memory + 10 knowledge + 4 proposal) for LLM agents |
+| `target/release/wicked-estate-mcp` | MCP stdio server — 36 tools (12 estate + 9 memory + 11 knowledge + 4 proposal) for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
 
@@ -567,7 +567,7 @@ wicked-estate-mcp --db /path/to/graph.db
 # or: WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 ```
 
-### The 35 tools (12 estate + 9 memory + 10 knowledge + 4 proposal)
+### The 36 tools (12 estate + 9 memory + 11 knowledge + 4 proposal)
 
 #### Estate tools
 
@@ -657,10 +657,11 @@ development binary needs `wicked-estate index <path> --force` once.
 
 | Tool | Description |
 |------|-------------|
-| `knowledge.ingest` | Ingest a document or chunk into the knowledge store. |
+| `knowledge.ingest` | Ingest a document or chunk. With `replace_source: true` and a non-empty `source`, replace that source's document knowledge; returns `doc_id` and `replaced`. |
+| `knowledge.forget` | Hard-delete by exactly one `id`, exact citation `source`, or `scope_prefix` subtree. A doc takes its chunks with it. Empty prefix needs `confirm_erase_all: true`. Other kinds survive; live-source nodes are refused by id, otherwise skipped and counted. Write tool. |
 | `knowledge.write` | Write a curated knowledge node with typed relations. |
 | `knowledge.relate` | Add a typed relation between two knowledge nodes. |
-| `knowledge.recall` | Retrieve knowledge nodes matching a query. Items carry `scope`, `deps` and `untrusted`; pass `visible` (`source:<id>` / `repo:<id>`) to see knowledge derived from sources and repos — an item is returned only when every dep is visible, filtered before ranking. |
+| `knowledge.recall` | Retrieve knowledge nodes matching a query. Items carry `scope`, `deps` and `untrusted`; pass `visible` (`source:<id>` / `repo:<id>`) to see knowledge derived from sources and repos — an item is returned only when every dep is visible, filtered before ranking. Optional `require` keeps only items containing every required dep; each must also be visible, and filtering precedes ranking and budgeting. |
 | `knowledge.coverage` | Report knowledge store statistics (node count, relation types). |
 | `knowledge.relate_code` | Link a knowledge node to a code symbol in the estate graph. |
 | `knowledge.recall_about_code` | Recall knowledge nodes related to a given code symbol (same `visible` rule). |
@@ -672,7 +673,7 @@ development binary needs `wicked-estate index <path> --force` once.
 
 | Tool | Description |
 |------|-------------|
-| `proposal.submit` | Submit a governed proposal (`memory`, `knowledge`, or `policy:<type>`). Knowledge requires non-empty `content` and `source`; optional `class` defaults to `chunk`, with `scope`, ISO-8601 `observed_at`, and `source_rev` carried in the payload. A data shape adds `relate[]` / `relate_code[]` (typed links; approve derives its `deps` and refuses a declared `deps` that differs). A SAFE write — lands `Pending`, inert until approved (allowed under `--readonly`). |
+| `proposal.submit` | Submit a governed proposal (`memory`, `knowledge`, or `policy:<type>`). Knowledge requires non-empty `content` and `source`; optional `class` defaults to `chunk`, with `scope`, ISO-8601 `observed_at`, and `source_rev` carried in the payload. A data shape adds `relate[]` / `relate_code[]` (typed links; approve derives its `deps` and refuses a declared `deps` that differs). A SAFE write — lands `Pending`, inert until approved (allowed under `--readonly` only with an existing memory store; a missing store is refused with its path). |
 | `proposal.list` | List queued proposals, optionally by exact kind_type (`memory`, `knowledge`, or `policy:<type>`) / state. |
 | `proposal.approve` | Approve a proposal → promote it to the active memory or knowledge store, or hand it off (policy). |
 | `proposal.reject` | Reject a proposal. |

@@ -405,11 +405,12 @@ async fn main() -> Result<()> {
 
     // 3b. Open domain stores (fail-soft: if any fails, all domains = None).
     let home = wicked_home();
-    let memory_path = read_only_store(
-        std::env::var("WICKED_MEMORY_DB").unwrap_or_else(|_| format!("{home}/memory.db")),
-        read_only,
-        "memory",
-    );
+    let memory_spec =
+        std::env::var("WICKED_MEMORY_DB").unwrap_or_else(|_| format!("{home}/memory.db"));
+    let memory_path = read_only_store(memory_spec.clone(), read_only, "memory");
+    if memory_path != memory_spec {
+        status = status.with_memory_store_absent(memory_spec);
+    }
     let knowledge_path = read_only_store(
         std::env::var("WICKED_KNOWLEDGE_DB").unwrap_or_else(|_| format!("{home}/knowledge.db")),
         read_only,
@@ -485,10 +486,7 @@ async fn main() -> Result<()> {
             eprintln!("[wicked-estate] WARN: {e}");
             eprintln!("[wicked-estate] WARN: memory and knowledge tools disabled (domains=None)");
             // Loud on the wire as well as stderr: an agent never reads the server's stderr.
-            status = ServerStatus::domains_unavailable(e.to_string());
-            if let Some(reason) = &graph_refused {
-                status = status.with_graph_unavailable(reason.clone());
-            }
+            status.domains_unavailable = Some(e.to_string());
             None
         }
     };

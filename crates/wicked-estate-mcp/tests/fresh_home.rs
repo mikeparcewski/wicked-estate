@@ -6,7 +6,7 @@
 //! never reads). Each test runs the real binary under a temporary HOME.
 //!
 //! * The default layout (`$HOME/.wicked/*.db`) and the installer's explicit `WICKED_*_DB` env
-//!   both get their directory created (0700 on unix) and serve all 35 tools.
+//!   both get their directory created (0700 on unix) and serve all 36 tools.
 //! * A store that still cannot open is reported on the wire: `initialize` `instructions`, the
 //!   `tools/list` `_meta`, and the refusal text of every domain call name the cause.
 
@@ -108,7 +108,7 @@ fn tool_names(list: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The domain tools a write-mode server serves: 9 memory + 10 knowledge + 4 proposal.
+/// The domain tools a write-mode server serves: 9 memory + 11 knowledge + 4 proposal.
 fn domain_tool_count(names: &[String]) -> usize {
     names
         .iter()
@@ -130,10 +130,10 @@ fn assert_serves_every_domain(mcp: &mut McpChild) {
     let names = tool_names(&list);
     assert_eq!(
         domain_tool_count(&names),
-        23,
+        24,
         "fresh home must serve every memory/knowledge/proposal tool, got {names:?}"
     );
-    assert_eq!(names.len(), 35, "fresh home must serve 35 tools: {names:?}");
+    assert_eq!(names.len(), 36, "fresh home must serve 36 tools: {names:?}");
     assert!(list["result"].get("_meta").is_none(), "{list}");
 
     let cap = mcp.call(
@@ -172,7 +172,7 @@ fn assert_private_dir(dir: &Path) {
 }
 
 #[test]
-fn fresh_home_default_layout_serves_all_35_tools() {
+fn fresh_home_default_layout_serves_all_36_tools() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
     let wicked = home.path().join(".wicked");
@@ -188,7 +188,7 @@ fn fresh_home_default_layout_serves_all_35_tools() {
 
 /// The env the installer writes for Claude Code (`WICKED_MEMORY_DB=~/.wicked/memory.db` etc.).
 #[test]
-fn fresh_home_installer_env_serves_all_35_tools() {
+fn fresh_home_installer_env_serves_all_36_tools() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
     let wicked = home.path().join(".wicked");

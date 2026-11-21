@@ -27,7 +27,7 @@ The server is invoked the same way everywhere:
 Use an **absolute** DB path — clients launch the server with an unpredictable working directory.
 (Alternatively set `WICKED_ESTATE_DB` in the server's `env`; `--db` takes precedence.)
 
-It exposes **35 tools across 3 domains** plus `SemanticSearch` when embeddings are present:
+It exposes **36 tools across 3 domains** plus `SemanticSearch` when embeddings are present:
 
 **Estate (12 tools):** `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `Path`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `rules.recall`, `RankHotspots`, `Communities`, `Lineage`
 
@@ -35,7 +35,30 @@ It exposes **35 tools across 3 domains** plus `SemanticSearch` when embeddings a
 
 **Proposal queue (4 tools, memory domain):** `proposal.submit`, `proposal.list`, `proposal.approve`, `proposal.reject`
 
-**Knowledge (10 tools):** `knowledge.ingest`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`, `knowledge.replace_source`, `knowledge.source_catalog`, `knowledge.neighbors`
+**Knowledge (11 tools):** `knowledge.ingest`, `knowledge.forget`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`, `knowledge.replace_source`, `knowledge.source_catalog`, `knowledge.neighbors`
+
+`knowledge.forget` takes exactly one of `id` (uuid or full SymbolId), `source` (an exact citation
+string, including file paths and URLs), or `scope_prefix` (a whole-segment subtree). An empty prefix
+requires `confirm_erase_all: true`. It returns `{forgotten, skipped_live_source}`; deleting a document
+also deletes its derived chunks and owned links. Only knowledge kinds are eligible. Live-source
+structure is refused by id and otherwise skipped and counted: refresh that structure with
+`knowledge.replace_source`, which accepts registry ids and covers live data sources only.
+
+To refresh citation-sourced documents, call `knowledge.ingest` with `replace_source: true` and a
+non-empty `source`; it replaces knowledge with that exact source and returns `{doc_id, replaced}`.
+An omitted or false flag keeps the existing append behavior. `source_rev` and `observed_at` remain
+accepted but are not stored. An emptied topic can use `knowledge.forget {"source": "..."}`.
+
+`knowledge.recall` accepts `require: ["source:<id>"]` alongside `visible`. Every required dep must
+be visible and present in the item's effective deps (stored deps plus scope deps). Both filters run
+before ranking and token budgeting, so other sources cannot consume a source-pinned recall's budget.
+Omitted or null `require` imposes no requirement; malformed entries or deps outside `visible` are
+invalid params.
+
+`--readonly` hides and refuses `knowledge.forget`. `proposal.submit` remains available when its
+memory store exists; when that store is missing, submission is refused with the missing path and
+instructions to start a writable server once or select an existing store. Reads still serve empty,
+and the read-only server creates no store.
 
 ---
 

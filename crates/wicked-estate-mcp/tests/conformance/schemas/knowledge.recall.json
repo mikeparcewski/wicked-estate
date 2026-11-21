@@ -1,5 +1,5 @@
 {
-  "captured_from": "wicked-estate-mcp-0.31.x (DES-KNOWLEDGE-DATA-001: +visible, additive optional param)",
+  "captured_from": "wicked-estate-mcp (estate-C6 PR A: additive optional parameter)",
   "description": "Standalone recall: the most relevant token-budgeted knowledge slice for a query (keyword \u222a vector, RRF-fused).",
   "inputSchema": {
     "properties": {
@@ -17,6 +17,16 @@
           "type": "string"
         },
         "type": "array"
+      },
+      "require": {
+        "type": [
+          "array",
+          "null"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "description": "Require every dep in the effective deps before ranking and budget packing; each must be visible."
       }
     },
     "required": [

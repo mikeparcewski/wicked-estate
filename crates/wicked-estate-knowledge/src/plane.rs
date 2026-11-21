@@ -231,9 +231,9 @@ pub fn stamp(node: &mut Node, deps: &[String], untrusted: bool) {
 }
 
 /// The set of sources, repos and projects a reader may see (`source:<id>` / `repo:<id>` /
-/// `project:<id>`).
+/// `project:<id>`). The private sets hold visible deps and required deps, respectively.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Visible(BTreeSet<String>);
+pub struct Visible(BTreeSet<String>, BTreeSet<String>);
 
 impl Visible {
     /// The empty set: only dep-free knowledge is visible.
@@ -259,7 +259,39 @@ impl Visible {
             }
             set.insert(d.to_string());
         }
-        Ok(Self(set))
+        Ok(Self(set, BTreeSet::new()))
+    }
+
+    /// Require every given dep in addition to visibility, before ranking or budget packing.
+    /// A required dep must be well-formed and visible, otherwise it could never match.
+    pub fn with_required<I, S>(mut self, deps: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for dep in deps {
+            let dep = dep.as_ref();
+            if !valid_dep(dep) {
+                return Err(format!(
+                    "invalid require entry {:?}: expected source:<id>, repo:<id> or project:<id>",
+                    shown(dep)
+                ));
+            }
+            if !self.contains(dep) {
+                return Err(format!("require entry {:?} is outside visible", shown(dep)));
+            }
+            self.1.insert(dep.to_string());
+        }
+        Ok(self)
+    }
+
+    /// Does this query require any deps? Implementers without deps must return no hits then.
+    pub fn requires_any(&self) -> bool {
+        !self.1.is_empty()
+    }
+
+    pub(crate) fn matches_required(&self, deps: &[String]) -> bool {
+        self.1.iter().all(|dep| deps.contains(dep))
     }
 
     /// Is `dep` in the set?

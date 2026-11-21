@@ -194,7 +194,8 @@ impl SourceGeneration {
     pub fn validate(&self) -> wicked_estate_core::Result<()> {
         if !valid_source_id(&self.source_id) {
             return Err(bad(format!(
-                "invalid sourceId {:?}: expected the registry id, 1-128 of [A-Za-z0-9._-]",
+                "invalid sourceId {:?}: expected the registry id, 1-128 of [A-Za-z0-9._-]; \
+                 for citation-sourced knowledge use knowledge.forget {{source}}",
                 shown(&self.source_id)
             )));
         }
