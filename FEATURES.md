@@ -436,7 +436,7 @@ knowledge is what estate read (docs, and the structure of live data sources). Ea
 `source <name>` · `semantic <query>` · `cross-graph <name> --db a --db b …` · `compact` ·
 `watch <path> [--history]` · `subscribe [--since <seq>]` · `semantics <symbol> [--description]
 [--requirement] [--validated]` · `by-requirement <REQ>` · `clusters` · `context` · `annotate` ·
-`annotations` · `stale-annotations` · `fingerprint` · `changed-since` · `entrypoints` · `leaves` ·
+`write-batch <file.ndjson|->` · `annotations` · `stale-annotations` · `fingerprint` · `changed-since` · `entrypoints` · `leaves` ·
 `dead-code` · `nodes` · `resolve` · `correspond` · `export` · `plugins list`.
 
 ---

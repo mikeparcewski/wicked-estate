@@ -32,6 +32,7 @@
 //!   wicked-estate annotate <name>        --key K --value V [--type T] [--confidence F] [--provenance P] [--author A]
 //!                                        [--source-type S] [--extraction-method M] [--last-verified now|<secs>|YYYY-MM-DD] [--db ...]
 //!   wicked-estate annotate --symbol <id> --key K --value V [same flags] [--db ...]
+//!   wicked-estate write-batch <file.ndjson|-> [--json] [--db ...]
 //!   wicked-estate annotations <name>     [--type T] [--json] [--db ...]
 //!   wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]
 //!   wicked-estate misses [--since <epoch-ms>] [--limit N] [--json] [--db ...]
@@ -2754,6 +2755,12 @@ fn main() -> Result<()> {
             let sem_validated = args.bool("validated");
             let sem_validated_by = args.str("validated-by");
             let mut store = open_store_ext(&db).map_err(to_any)?;
+            wicked_estate::write_batch::require_node(
+                &*store,
+                &wicked_estate_core::SymbolId::from(symbol),
+                "semantics",
+            )
+            .map_err(to_any)?;
             // #405: a store written before secret redaction is cleaned before this write.
             wicked_estate::ensure_redacted(&mut *store).map_err(to_any)?;
             let setting =
@@ -3028,6 +3035,55 @@ fn main() -> Result<()> {
                 }
             }
         }
+        "write-batch" => {
+            use std::io::BufReader;
+            use wicked_estate::write_batch;
+
+            let file = args.required(0);
+            let json_out = args.switch("json");
+            let rows = if file == "-" {
+                write_batch::parse(std::io::stdin().lock()).map_err(to_any)?
+            } else {
+                let input = std::fs::File::open(file).with_context(|| {
+                    format!("write-batch refused: cannot read {file}; nothing was written")
+                })?;
+                write_batch::parse(BufReader::new(input)).map_err(to_any)?
+            };
+            let summary = if rows.is_empty() {
+                write_batch::Summary::default()
+            } else {
+                require_existing_graph(&db, "write-batch")?;
+                let _writer = lock_writer(&db, "write-batch")?;
+                let mut store = SqliteStore::open(&db).map_err(to_any)?;
+                wicked_estate::ensure_redacted(&mut store).map_err(to_any)?;
+                let summary = write_batch::apply(&mut store, &rows).map_err(to_any)?;
+                emit::emit_event(&emit::EmitEvent::new(
+                    "wicked.estate.annotated",
+                    "estate.write-batch",
+                    serde_json::json!({
+                        "db": db,
+                        "count": summary.rows,
+                        "annotations": summary.annotations,
+                        "semantics": summary.semantics,
+                        "replaced": summary.replaced,
+                    }),
+                ));
+                summary
+            };
+            if json_out {
+                println!("{}", serde_json::to_string(&summary)?);
+            } else if summary.rows == 0 {
+                println!("wrote 0 row(s)");
+            } else {
+                println!(
+                    concat!(
+                        "wrote {} row(s): {} annotation(s) ({} prior row(s) replaced), ",
+                        "{} semantics update(s)",
+                    ),
+                    summary.rows, summary.annotations, summary.replaced, summary.semantics,
+                );
+            }
+        }
         // Agent A: annotation API — tag any indexed symbol with a TYPED key/value note.
         //
         // Usage:
@@ -3061,6 +3117,14 @@ fn main() -> Result<()> {
             ensure_db_dir(&db)?;
             let _writer = lock_writer(&db, "annotate")?;
             let mut store = SqliteStore::open(&db).map_err(to_any)?;
+            if let Some(symbol) = args.str("symbol") {
+                wicked_estate::write_batch::require_node(
+                    &store,
+                    &wicked_estate_core::SymbolId::from(symbol),
+                    "annotate",
+                )
+                .map_err(to_any)?;
+            }
             // #405: a store written before secret redaction is cleaned before this write.
             wicked_estate::ensure_redacted(&mut store).map_err(to_any)?;
             // Build the typed annotation once; clone per target. ts=0 → store stamps it.
@@ -3738,7 +3802,8 @@ fn main() -> Result<()> {
         // This is the read a write path's precondition depends on: names are NOT unique — one name
         // can fan out to many SymbolIds (carddemo `MAIN-PARA` × 21) — so a consumer resolves
         // name → SymbolId HERE before calling `annotate --symbol <id>` / `semantics <id>`, where a
-        // bare name is a silent no-op. Deterministic: `find_symbols(exact_name)` orders by SymbolId.
+        // bare name is refused as unknown. Deterministic: `find_symbols(exact_name)` orders by
+        // SymbolId.
         "resolve" => {
             use wicked_estate_core::query::SymbolQuery;
             let json_out = args.switch("json");
@@ -4294,6 +4359,19 @@ fn main() -> Result<()> {
             );
             println!(
                 "    --last-verified      now | <unix-seconds> | YYYY-MM-DD (UTC) — the freshness clock stale-annotations reads (default: 0 = never verified)"
+            );
+            println!("  wicked-estate write-batch <file.ndjson|-> [--json] [--db ...]");
+            println!(
+                "    Many annotate / semantics writes in one lock and one transaction. One JSON row per line:"
+            );
+            println!(
+                "    {{\"op\":\"annotate\",\"symbol\",\"key\",\"value\",\"type\"?,\"confidence\"?,\"provenance\"?,\"author\"?,\"replace\"?}}"
+            );
+            println!(
+                "    {{\"op\":\"semantics\",\"symbol\",\"description\"?,\"requirement\"?,\"validated\"?,\"validated_by\"?}}"
+            );
+            println!(
+                "    A bad row or a symbol that is not a node refuses the whole batch, naming the row; nothing is written."
             );
             println!("  wicked-estate annotations <name>   [--type T] [--json] [--db ...]");
             println!("  wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]");
