@@ -2559,7 +2559,23 @@ fn main() -> Result<()> {
             let mut store = open_store_ext(&db).map_err(to_any)?;
             use wicked_estate::RedactionOutcome as O;
             let epoch = wicked_estate_core::redact::REDACTION_EPOCH;
+            let code_graph = store.meta_get_key("indexed_root").is_some()
+                || !store.indexed_files().map_err(to_any)?.is_empty();
             match wicked_estate::ensure_redacted(&mut *store).map_err(to_any)? {
+                O::Migrated(rep) if !code_graph => {
+                    // A memory/knowledge store (#406): node text only, nothing to re-index.
+                    println!("redact-store({db}):");
+                    println!("  node rows rewritten:      {}", rep.nodes_rewritten);
+                    println!("  other rows rewritten:     {}", rep.rows_scrubbed);
+                    println!(
+                        "  WAL truncated:            {}",
+                        if rep.wal_truncated {
+                            "yes"
+                        } else {
+                            "no (a reader is attached; re-run when idle)"
+                        }
+                    );
+                }
                 O::Migrated(rep) => {
                     println!("redact-store({db}):");
                     println!("  file texts re-masked:     {}", rep.files_rewritten);

@@ -208,7 +208,22 @@ impl MemoryEngine {
 
     /// Open a durable engine at `path` (sidecar index at `<path>.memext`; reconciled at open).
     pub fn open(path: &str) -> wicked_estate_core::Result<Self> {
-        let eng = Self::build(Box::new(SqliteStore::open(path)?), MemExt::open(path)?);
+        let store = SqliteStore::open(path)?;
+        use wicked_estate_core::redact::{TEXT_REDACTION_EPOCH, TEXT_REDACTION_EPOCH_KEY};
+        let epoch = store
+            .meta_get(TEXT_REDACTION_EPOCH_KEY)?
+            .and_then(|v| v.parse::<u32>().ok());
+        if !epoch.is_some_and(|e| e >= TEXT_REDACTION_EPOCH)
+            && wicked_estate_core::GraphRead::stats(&store)?.node_count > 0
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "REDACTION-PENDING: {path} holds text written before redaction; run \
+                 `wicked-estate redact-store --db {path}`"
+            );
+        }
+        let eng = Self::build(Box::new(store), MemExt::open(path)?);
         // Crash-recovery: rebuild the sidecar index if it diverged from the authoritative nodes.
         let all = eng.all_memories()?;
         eng.ext.reconcile(&all)?;
@@ -302,7 +317,8 @@ impl MemoryEngine {
 
     /// Embed text with the engine's embedder (used by consolidation).
     pub(crate) fn embed_for(&self, text: &str) -> Vec<f32> {
-        self.embedder.embed(text)
+        self.embedder
+            .embed(&wicked_estate_core::redact::redact_free_text(text))
     }
 
     /// Fetch a node by id.
@@ -310,7 +326,10 @@ impl MemoryEngine {
         &self,
         id: &SymbolId,
     ) -> wicked_estate_core::Result<Option<wicked_estate_core::Node>> {
-        self.store.get_node(id)
+        Ok(self
+            .store
+            .get_node(id)?
+            .map(|node| wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node)))
     }
 
     /// Right-to-erasure (FR-15/AC-10): hard-delete every memory whose scope is within `scope_prefix`,
@@ -373,7 +392,8 @@ impl MemoryEngine {
         let node = mem.to_node();
         let sym = mem.symbol();
         self.store.upsert_nodes(&[node])?;
-        let vec = self.embedder.embed(&mem.content);
+        let text = wicked_estate_core::redact::redact_free_text(&mem.content);
+        let vec = self.embedder.embed(&text);
         self.store.set_embedding(&sym, &vec)?;
         self.ext.upsert(mem)?; // keep the sidecar index in sync (PR-1)
         Ok(())
@@ -764,6 +784,67 @@ impl MemoryEngine {
 mod tests {
     use super::*;
     use wicked_estate_memory_core::{MemKind, Tier};
+
+    #[test]
+    fn durable_capture_redacts_database_wal_and_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let scope = Scope::root();
+        {
+            let mut eng = MemoryEngine::open(path.to_str().unwrap()).unwrap();
+            eng.capture(&Memory::new(
+                MemKind::Fact,
+                Tier::Semantic,
+                scope.clone(),
+                "redaction fixture DB_PASSWORD=hunter2-example AKIAIOSFODNN7EXAMPLE",
+                1,
+            ))
+            .unwrap();
+            let hits = eng
+                .recall(
+                    "redaction fixture",
+                    ScopeFilter::Ancestors(&scope),
+                    &[],
+                    500,
+                    2,
+                )
+                .unwrap();
+            assert!(!hits.is_empty());
+            for hit in hits {
+                assert!(!hit.content.contains("hunter2-example"));
+                assert!(!hit.content.contains("AKIAIOSFODNN7EXAMPLE"));
+            }
+            eng.submit_proposal(
+                "memory",
+                serde_json::json!({"content": "password: \"hunter2-example\""}),
+                Facets::default(),
+                std::collections::BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+            let proposals = eng.list_proposals(None, None).unwrap();
+            assert_eq!(proposals.len(), 1);
+            assert!(!proposals[0].payload.to_string().contains("hunter2-example"));
+            assert_capture_files_clean(&path);
+        }
+        assert_capture_files_clean(&path);
+    }
+
+    fn assert_capture_files_clean(path: &std::path::Path) {
+        for path in [
+            path.to_path_buf(),
+            std::path::PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => panic!("read fixture: {e}"),
+            };
+            for value in ["hunter2-example", "AKIAIOSFODNN7EXAMPLE"] {
+                assert!(!bytes.windows(value.len()).any(|w| w == value.as_bytes()));
+            }
+        }
+    }
 
     #[test]
     fn with_backend_constructor_is_backend_agnostic() {

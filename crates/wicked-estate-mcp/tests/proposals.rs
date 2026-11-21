@@ -866,3 +866,40 @@ fn proposal_submit_validates_reach_per_kind() {
         }
     }
 }
+
+#[test]
+fn capture_and_knowledge_write_dispatch_redact_before_recall() {
+    let dir = tempfile::tempdir().unwrap();
+    let mem_path = dir.path().join("memory.db");
+    let know_path = dir.path().join("knowledge.db");
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::open(mem_path.to_str().unwrap()).unwrap();
+    let mut know = KnowledgeEngine::open(know_path.to_str().unwrap()).unwrap();
+    let text = "redaction fixture DB_PASSWORD=hunter2-example AKIAIOSFODNN7EXAMPLE";
+    for tool in ["memory.capture", "knowledge.write"] {
+        let result = call(
+            &store,
+            &mut mem,
+            &mut know,
+            tool,
+            json!({"content": text, "kind": "fact", "tier": "semantic", "class": "chunk"}),
+            false,
+        );
+        assert!(result.get("error").is_none(), "{result}");
+        assert_eq!(result["result"]["isError"], false);
+    }
+    for tool in ["memory.recall", "knowledge.recall"] {
+        let result = call(
+            &store,
+            &mut mem,
+            &mut know,
+            tool,
+            json!({"query": "redaction fixture", "token_budget": 2000}),
+            false,
+        );
+        let payload = result_payload(&result).to_string();
+        assert!(payload.contains("redaction fixture"));
+        assert!(!payload.contains("hunter2-example"));
+        assert!(!payload.contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+}

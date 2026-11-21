@@ -193,6 +193,8 @@ impl Memory {
     /// Reconstruct a `Memory` from an estate `Node` written by [`Memory::to_node`].
     /// Returns `None` if the node is not a memory node / is missing required fields.
     pub fn from_node(node: &Node) -> Option<Memory> {
+        let redacted = wicked_estate_core::redact::redact_text_node(node);
+        let node = redacted.as_ref().unwrap_or(node);
         match &node.kind {
             NodeKind::Other(k) if k == MEMORY_NODE_KIND => {}
             _ => return None,
@@ -287,7 +289,7 @@ impl Memory {
                 m.insert(meta_keys::FACETS.into(), v);
             }
         }
-        node
+        wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node)
     }
 }
 
@@ -560,6 +562,37 @@ pub trait MemoryApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_masks_new_nodes_and_legacy_reads() {
+        let mem = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            Scope::root(),
+            "DB_PASSWORD=hunter2-example AKIAIOSFODNN7EXAMPLE",
+            1,
+        );
+        let mut node = mem.to_node();
+        assert!(!node.name.contains("hunter2-example"));
+        assert!(
+            !serde_json::to_string(&node)
+                .unwrap()
+                .contains("AKIAIOSFODNN7EXAMPLE")
+        );
+        node.name = mem.content.clone();
+        node.metadata
+            .insert(meta_keys::CONTENT.into(), mem.content.clone().into());
+        let served = Memory::from_node(&node).unwrap();
+        assert!(!served.content.contains("hunter2-example"));
+        assert!(!served.content.contains("AKIAIOSFODNN7EXAMPLE"));
+        node.metadata.remove(meta_keys::CONTENT);
+        assert!(
+            !Memory::from_node(&node)
+                .unwrap()
+                .content
+                .contains("hunter2-example")
+        );
+    }
 
     #[test]
     fn memory_roundtrips_to_node() {
