@@ -310,3 +310,77 @@ fn a_back_fill_never_binds_a_local_binding_to_a_new_homonym() {
         );
     }
 }
+
+#[test]
+fn java_overloads_keep_body_evidence_and_bind_every_member() {
+    let dir = fresh_dir("java_overloads");
+    fs::write(
+        dir.join("src/I.java"),
+        "interface I { default void m(int x) {} void m(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/Caller.java"),
+        "class Caller { void run(I i) { i.m(1); } }\n",
+    )
+    .unwrap();
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    let nodes = store.all_nodes().unwrap();
+    let mut overloads: Vec<_> = nodes.iter().filter(|n| n.name == "m").collect();
+    overloads.sort_by_key(|n| n.location.span.start_byte);
+    assert_eq!(overloads.len(), 2, "both Java overloads survive the store");
+    assert!(overloads[0].symbol.as_str().ends_with("/I#m()."));
+    assert!(overloads[1].symbol.as_str().ends_with("/I#m(+1)."));
+    assert_eq!(overloads[0].metadata["has_body"], serde_json::json!(true));
+    assert_eq!(overloads[1].metadata["has_body"], serde_json::json!(false));
+
+    let caller = nodes.iter().find(|n| n.name == "run").unwrap();
+    let calls: Vec<_> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == EdgeKind::Calls && e.source == caller.symbol)
+        .collect();
+    assert_eq!(calls.len(), 2, "a call binds the whole overload family");
+    for overload in overloads {
+        let edge = calls.iter().find(|e| e.target == overload.symbol).unwrap();
+        assert_eq!(edge.metadata["overloads"], serde_json::json!(2));
+    }
+    assert!(store.unresolved_refs_for_name("m").unwrap().is_empty());
+}
+
+#[test]
+fn typescript_merge_evidence_survives_the_store_winner() {
+    for (tag, source, kinds) in [
+        (
+            "class_first",
+            "class X { m() {} }\ninterface X { m(): void }\n",
+            serde_json::json!(["class", "interface"]),
+        ),
+        (
+            "interface_first",
+            "interface X { m(): void }\nclass X { m() {} }\n",
+            serde_json::json!(["interface", "class"]),
+        ),
+    ] {
+        let dir = fresh_dir(tag);
+        fs::write(dir.join("src/merge.ts"), source).unwrap();
+        let mut store = SqliteStore::in_memory().unwrap();
+        wicked_estate::index_path(&mut store, &dir).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+
+        let nodes = store.all_nodes().unwrap();
+        let merged = nodes.iter().find(|n| n.name == "X").unwrap();
+        assert_eq!(merged.metadata["merged_kinds"], kinds, "{tag}");
+        let method = nodes.iter().find(|n| n.name == "m").unwrap();
+        assert_eq!(
+            method.metadata["has_body"],
+            serde_json::json!(true),
+            "{tag}"
+        );
+        assert!(!method.metadata.contains_key("merged_kinds"), "{tag}");
+    }
+}

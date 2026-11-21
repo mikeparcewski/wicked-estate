@@ -88,6 +88,15 @@
   (extends_type_clause (type_identifier) @code_extends.target)
 ) @code_extends.def
 
+; Namespace containers, excluding string-named ambient modules (#377).
+(internal_module
+  name: [(identifier) (nested_identifier)] @code_namespace.name
+) @code_namespace.def
+
+(module
+  name: [(identifier) (nested_identifier)] @code_namespace.name
+) @code_namespace.def
+
 ; Type alias declarations
 (type_alias_declaration
   name: (type_identifier) @code_type.name

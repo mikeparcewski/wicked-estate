@@ -65,6 +65,13 @@
   )
 ) @code_field.def
 
+; Interface constants use a distinct declaration node (#377).
+(constant_declaration
+  declarator: (variable_declarator
+    name: (identifier) @code_field.name
+  )
+) @code_field.def
+
 ; Import declarations
 (import_declaration
   (scoped_identifier) @import.source

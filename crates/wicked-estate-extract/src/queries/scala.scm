@@ -29,6 +29,11 @@
   pattern: (identifier) @code_variable.name
 ) @code_variable.def
 
+; Var definitions (mutable bindings, including trait members) (#377).
+(var_definition
+  pattern: (identifier) @code_variable.name
+) @code_variable.def
+
 ; Package declarations (→ module)
 (package_clause
   name: (_) @code_module.name

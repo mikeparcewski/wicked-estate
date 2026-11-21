@@ -350,14 +350,14 @@ Treats infrastructure + mainframe as **just more languages/collectors** feeding 
 
 ## 9. MCP server ✅
 `wicked-estate-mcp` — JSON-RPC: `tools/list` returns the tools with derived JSON Schema;
-`tools/call` dispatches + wraps results in the MCP envelope. **34 tools across 3 domains** with all
+`tools/call` dispatches + wraps results in the MCP envelope. **36 tools across 3 domains** with all
 stores open: 12 unconditional estate read tools (`all_tools()` — SearchEntity, RetrieveEntity,
 TraverseGraph, Path, BlastRadius, FetchContent, ContextBundle, RulesInventory, `rules.recall`,
-RankHotspots, Communities, Lineage), 7 `memory.*` tools plus the 4 `proposal.*` queue tools, and 11
-`knowledge.*` tools. `SemanticSearch` is a 35th, listed only when embeddings are present
+RankHotspots, Communities, Lineage), 9 `memory.*` tools plus the 4 `proposal.*` queue tools, and 10
+`knowledge.*` tools. `SemanticSearch` is a 37th, listed only when embeddings are present
 (`live_semantic_search` → `handle_request_with_semantic`). Estate-only mode (no memory/knowledge
-domains) lists the 12 estate tools (13 with `SemanticSearch`). `--readonly` omits the 12 write tools
-(`memory.capture`/`erase`/`learn`/`reflect`, `knowledge.ingest`/`forget`/`write`/`relate`/`relate_code`/`replace_source`,
+domains) lists the 12 estate tools (13 with `SemanticSearch`). `--readonly` omits the 14 write tools
+(`memory.capture`/`erase`/`retire`/`unretire`/`learn`/`reflect`, `knowledge.ingest`/`forget`/`write`/`relate`/`relate_code`/`replace_source`,
 `proposal.approve`/`reject`) from `tools/list` and rejects them in `tools/call`; `proposal.submit` stays (it only queues; a missing memory store is refused under `--readonly`). Rule authorship flows only through human-merged doc
 PRs (ADR-012). Implements the R1–R7 behavior contract.
 
@@ -369,7 +369,7 @@ cross-engine edge store (`xedge.db`, `wicked-estate-overlay`). Memory is what ha
 knowledge is what estate read (docs, and the structure of live data sources). Each store has its own tools
 (`memory.*`, `knowledge.*`), so a result's store is the tool that returned it.
 
-### Memory ✅ (`wicked-estate-memory`, 7 tools)
+### Memory ✅ (`wicked-estate-memory`, 9 tools)
 - **Scoped capture and recall** ✅ — hierarchical scopes (`org:acme/agent:claude`); tiers
   `working|episodic|semantic|procedural|archival`. `memory.recall` is token-budgeted and inherits from ancestor
   scopes (`scope_prefix` flips it to the subtree); each item carries `memory_id`, `scope`, `content`, `tier`, `score`.
@@ -378,8 +378,11 @@ knowledge is what estate read (docs, and the structure of live data sources). Ea
 - **Reflection** ✅ — `memory.reflect` deletes working memories older than 24 h first (a summary built over one is
   removed, then rebuilt from its surviving durable sources), distils episodes into facts, promotes reinforced facts
   to skills, and archives aged low-salience memories.
-- **Browse and erase** ✅ — `memory.list` (the whole in-scope set with facets, for a management surface),
-  `memory.coverage` (counts by tier and kind), `memory.erase` (one id, or everything under a scope prefix).
+- **Browse and erase** ✅ — `memory.list` (the active in-scope set with facets, for a management surface),
+  `memory.coverage` (active counts by tier and kind), `memory.retire` / `memory.unretire`
+  (hide from recall / restore with the same id), and `memory.erase` (permanently remove one id,
+  or everything under a scope prefix, including retired memories). `memory.list {retired: true}`
+  lists only retired memories with `retired_at`.
 - **Propose, then approve** ✅ — `proposal.submit` queues an inert `memory`, `knowledge` or `policy:<type>`
   proposal (safe under `--readonly`; provenance is stamped by the server, never taken from args);
   `proposal.list`; `proposal.approve` promotes it (a `policy:*` proposal is handed back for steering);

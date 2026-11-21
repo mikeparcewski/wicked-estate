@@ -1,6 +1,6 @@
 {
   "captured_from": "wicked-memory-mcp-0.12.1",
-  "description": "Right-to-erasure: hard-delete one memory by id, or all memories under a scope prefix (exactly one of the two).",
+  "description": "Hard-delete active or retired memories permanently by id or scope_prefix.",
   "inputSchema": {
     "properties": {
       "id": {

@@ -1,4 +1,4 @@
-//! `MemoryApi` (7-method, DES-001 §4.2 + DES-MEM-FACETED-001) implemented for
+//! `MemoryApi` (DES-001 §4.2 + DES-MEM-FACETED-001) implemented for
 //! [`crate::MemoryEngine`]. Uses `wicked_estate_memory_core` types directly.
 
 use crate::{MemoryEngine, RecallMode, ScopeFilter};
@@ -6,9 +6,21 @@ use std::collections::{BTreeMap, HashMap};
 use wicked_estate_core::SymbolId;
 use wicked_estate_memory_core::{
     ApproveOutcome, CaptureRequest, Facets, MemKind, Memory, MemoryApi, MemoryCoverage,
-    MemoryListItem, Proposal, ProposalState, RecallQuery, RecalledItem, ReflectResult, Scope, Tier,
+    MemoryListItem, Proposal, ProposalState, RecallQuery, RecalledItem, ReflectResult,
+    RetiredMemory, Scope, Tier,
 };
 use wicked_estate_overlay::XEdge;
+
+fn memory_list_item(m: Memory) -> MemoryListItem {
+    MemoryListItem {
+        id: m.id,
+        content: m.content,
+        tier: m.tier.as_str().to_string(),
+        scope: m.scope.as_path().to_string(),
+        facets: m.facets,
+        created_at: m.created_at,
+    }
+}
 
 fn parse_kind(s: &str) -> anyhow::Result<MemKind> {
     Ok(match s {
@@ -146,7 +158,7 @@ impl MemoryApi for MemoryEngine {
         }
         // collect victim symbol IDs for xedge cleanup BEFORE erasing
         let victim_ids: Vec<String> = self
-            .all_memories()?
+            .erasure_memories()?
             .into_iter()
             .filter(|m| m.scope.path_in_prefix(scope_prefix))
             .map(|m| m.symbol().0)
@@ -227,17 +239,31 @@ impl MemoryApi for MemoryEngine {
                 .collect(),
             None => mems,
         };
-        Ok(filtered
-            .into_iter()
-            .map(|m| MemoryListItem {
-                id: m.id,
-                content: m.content,
-                tier: m.tier.as_str().to_string(),
-                scope: m.scope.as_path().to_string(),
-                facets: m.facets,
-                created_at: m.created_at,
-            })
-            .collect())
+        Ok(filtered.into_iter().map(memory_list_item).collect())
+    }
+
+    fn retire(&mut self, id: &str, now: i64) -> Result<Option<u32>, anyhow::Error> {
+        Ok(Some(u32::from(
+            MemoryEngine::retire(self, id, now)?.is_some(),
+        )))
+    }
+
+    fn unretire(&mut self, id: &str, _now: i64) -> Result<Option<u32>, anyhow::Error> {
+        Ok(Some(u32::from(MemoryEngine::unretire(self, id)?.is_some())))
+    }
+
+    fn list_retired(
+        &self,
+        scope_prefix: Option<&str>,
+    ) -> Result<Option<Vec<RetiredMemory>>, anyhow::Error> {
+        Ok(Some(
+            self.retired(scope_prefix)?
+                .into_iter()
+                .map(|(memory, retired_at)| {
+                    RetiredMemory::new(memory_list_item(memory), retired_at)
+                })
+                .collect(),
+        ))
     }
 
     // ── Proposal queue (DES-MEM-FACETED-001 §5.0) — forwards to the inherent engine methods ──
