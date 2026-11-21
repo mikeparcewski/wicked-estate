@@ -1540,6 +1540,26 @@ pub(crate) fn cobol_paragraph_end(header: tree_sitter::Node) -> Option<usize> {
     Some(parent.end_byte())
 }
 
+/// Give the next header its whole line, then trim the preceding paragraph's trailing whitespace.
+fn cobol_paragraph_span_end(src: &[u8], header_end: usize, true_end: usize) -> usize {
+    let line_start = src[..true_end]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    let mut cut = true_end;
+    if true_end - line_start <= 7
+        || src[line_start..true_end]
+            .iter()
+            .all(u8::is_ascii_whitespace)
+    {
+        cut = line_start.max(header_end);
+    }
+    while cut > header_end && matches!(src[cut - 1], b' ' | b'\t' | b'\r' | b'\n' | 0x0c) {
+        cut -= 1;
+    }
+    cut
+}
+
 fn ts_span(n: tree_sitter::Node) -> Span {
     let s = n.start_position();
     let e = n.end_position();
@@ -4634,20 +4654,19 @@ impl Extractor for TreeSitterExtractor {
             for node in &mut def_nodes {
                 let start = node.location.span.start_byte as usize;
                 if let Some(&true_end) = end_map.get(&start) {
-                    let end_pos = tree
-                        .root_node()
-                        .descendant_for_byte_range(true_end.saturating_sub(1), true_end)
-                        .map(|n| n.end_position())
-                        .unwrap_or_else(|| {
-                            let e = node.location.span.end_byte as usize;
-                            tree.root_node()
-                                .descendant_for_byte_range(e, e)
-                                .map(|n| n.end_position())
-                                .unwrap_or(tree_sitter::Point { row: 0, column: 0 })
-                        });
-                    node.location.span.end_byte = true_end as u32;
-                    node.location.span.end_line = end_pos.row as u32;
-                    node.location.span.end_col = end_pos.column as u32;
+                    let cut = cobol_paragraph_span_end(
+                        src,
+                        node.location.span.end_byte as usize,
+                        true_end,
+                    );
+                    let line_start = src[..cut]
+                        .iter()
+                        .rposition(|b| *b == b'\n')
+                        .map_or(0, |i| i + 1);
+                    node.location.span.end_byte = cut as u32;
+                    node.location.span.end_line =
+                        src[..cut].iter().filter(|b| **b == b'\n').count() as u32;
+                    node.location.span.end_col = (cut - line_start) as u32;
                 }
             }
         }
@@ -7992,6 +8011,85 @@ See the [docs](docs/).
             "paragraph span must extend past its header line; got {:?}",
             main_para.location.span
         );
+    }
+
+    #[test]
+    fn cobol_paragraph_spans_use_byte_derived_disjoint_line_ranges() {
+        let cards = [
+            " IDENTIFICATION DIVISION.",
+            " PROGRAM-ID. SPANS.",
+            " PROCEDURE DIVISION.",
+            " FIRST-PARA.",
+            "     DISPLAY 'FIRST'.",
+            "*Comment between paragraphs",
+            "",
+            " SECOND-PARA.",
+            "     DISPLAY 'SECOND'.",
+            "",
+            " THIRD-PARA.",
+            "     DISPLAY 'THIRD'.",
+            "     STOP RUN.",
+        ];
+        let lines: Vec<String> = cards
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                if body.is_empty() {
+                    String::new()
+                } else if i == cards.len() - 1 {
+                    // End at the final statement, independent of trailing grammar trivia.
+                    format!("{:06}{body}", i + 1)
+                } else {
+                    format!("{:06}{body:<66}{:08}", i + 1, i + 1)
+                }
+            })
+            .collect();
+        for eol in ["\n", "\r\n"] {
+            let code = format!("{}{eol}", lines.join(eol));
+            let ex = TreeSitterExtractor::for_language("cobol")
+                .unwrap()
+                .extract(&sf("spans.cob", "cobol", &code))
+                .unwrap();
+            assert_eq!(
+                ex.nodes
+                    .iter()
+                    .filter(|n| n.kind == NodeKind::Function)
+                    .count(),
+                3
+            );
+            let mut previous_end = None;
+            for (name, first, last) in [
+                ("FIRST-PARA", 3, 5),
+                ("SECOND-PARA", 7, 8),
+                ("THIRD-PARA", 10, 12),
+            ] {
+                let span = ex
+                    .nodes
+                    .iter()
+                    .find(|n| n.name == name)
+                    .unwrap_or_else(|| panic!("paragraph {name}"))
+                    .location
+                    .span;
+                // Paragraph headers begin after the sequence and indicator columns.
+                let expected = lines[first..=last].join(eol);
+                assert_eq!(
+                    &code[span.start_byte as usize..span.end_byte as usize],
+                    expected[7..].trim_end(),
+                    "{name} under {eol:?}"
+                );
+                let end = span.end_byte as usize;
+                assert_eq!(
+                    code[..end].bytes().filter(|b| *b == b'\n').count(),
+                    span.end_line as usize
+                );
+                let line_start = code[..end].rfind('\n').map_or(0, |i| i + 1);
+                assert_eq!(end - line_start, span.end_col as usize);
+                if let Some(previous) = previous_end {
+                    assert!(previous < span.start_line, "paragraph line ranges overlap");
+                }
+                previous_end = Some(span.end_line);
+            }
+        }
     }
 
     // ── W2.1 arborium batch smoke tests ──────────────────────────────────────

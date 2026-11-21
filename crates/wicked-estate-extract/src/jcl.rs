@@ -1,10 +1,10 @@
-//! JCL (Job Control Language) extractor — **line/card-oriented, NO tree-sitter grammar**.
+//! JCL (Job Control Language) extractor — **logical statements, NO tree-sitter grammar**.
 //!
 //! No tree-sitter grammar exists for JCL (or RPG / PL-I / Natural / REXX / HLASM), and authoring one
 //! would not help: JCL is a fixed *card* format, not an expression grammar — borrowing a JS/Python
 //! grammar transfers nothing. But the [`Extractor`] seam is generic (tree-sitter is just one impl;
 //! `IaCExtractor`/`TfstateCollector` already parse without a grammar), so JCL is a first-class
-//! language via a ~100-line line parser. This is the pattern for ANY grammar-less legacy format.
+//! language via a logical-statement reader. This is the pattern for grammar-less legacy formats.
 //!
 //! # What it extracts
 //! - `//NAME JOB ...`            → a [`NodeKind::Module`] node (the job).
@@ -27,7 +27,7 @@ use wicked_estate_core::{
     Result, SourceFile, Span, Symbol, SymbolId, UnresolvedRef,
 };
 
-/// Extractor for JCL job streams. Grammar-less; parses the `//` card format line by line.
+/// Extractor for JCL job streams. Grammar-less; reads logical statements from `//` cards.
 pub struct JclExtractor;
 
 impl JclExtractor {
@@ -54,29 +54,23 @@ impl Extractor for JclExtractor {
 
         let mut current_job: Option<SymbolId> = None;
         let mut current_proc: Option<SymbolId> = None;
+        let mut job_name = "";
+        let mut proc_name = None;
+        let mut step_counts = std::collections::HashMap::new();
         let mut current_step: Option<SymbolId> = None;
         let mut current_pgm: Option<String> = None;
         // The DD binding the next unnamed concatenation card adds a dataset to.
         let mut last_dd: Option<SymbolId> = None;
-        let extents = Extents::scan(&file.text);
+        let statements = read_statements(&file.text);
+        let extents = Extents::scan(&file.text, &statements);
 
-        for (i, raw) in file.text.lines().enumerate() {
-            // JCL statements begin in columns 1-2 with `//`. `//*` is a comment; `//` alone is a
-            // null/delimiter statement; `/*` is end-of-data.
-            let Some(body) = raw.strip_prefix("//") else {
-                continue;
-            };
-            if body.starts_with('*') || body.trim().is_empty() {
-                continue;
-            }
-
+        for statement in &statements {
+            let i = statement.first_line;
+            let name = statement.name;
+            let op = statement.operation;
+            let operands = statement.operands.as_str();
             // An unnamed `//         DD DSN=…` card continues the previous DD (a concatenation).
-            let concat = body.starts_with([' ', '\t']);
-            // Card form: NAME OPERATION OPERANDS  (whitespace-separated).
-            let mut toks = body.split_whitespace();
-            let Some(name) = toks.next() else { continue };
-            if concat && name == "DD" {
-                let operands = toks.next().unwrap_or("");
+            if name.is_empty() && op == "DD" {
                 let loc = Location::new(&file.path, line_span(i));
                 if let (Some(dsn), Some(step)) = (parse_dsn(operands), &current_step) {
                     let ds_sym = Symbol::synthetic("jcl-dataset", dsn.as_str()).id();
@@ -104,17 +98,6 @@ impl Extractor for JclExtractor {
                 }
                 continue;
             }
-            let Some(op) = toks.next() else {
-                // `//         PEND` — the end of an in-stream PROC.
-                if name == "PEND" {
-                    current_proc = None;
-                    current_step = None;
-                    current_pgm = None;
-                    last_dd = None;
-                }
-                continue;
-            };
-            let operands = toks.next().unwrap_or("");
             let loc = Location::new(&file.path, line_span(i));
 
             match op {
@@ -130,7 +113,9 @@ impl Extractor for JclExtractor {
                     node.signature = Some("JOB".to_string());
                     nodes.push(node);
                     current_job = Some(sym);
+                    job_name = name;
                     current_proc = None;
+                    proc_name = None;
                     current_step = None;
                     current_pgm = None;
                     last_dd = None;
@@ -162,19 +147,38 @@ impl Extractor for JclExtractor {
                         );
                     }
                     current_proc = Some(sym);
+                    proc_name = Some(name);
                     current_step = None;
                     current_pgm = None;
                     last_dd = None;
                 }
                 "PEND" => {
                     current_proc = None;
+                    proc_name = None;
                     current_step = None;
                     current_pgm = None;
                     last_dd = None;
                 }
                 "EXEC" => {
+                    let target = parse_exec_target(operands);
+                    let name = if name.is_empty() {
+                        target.as_deref().unwrap_or("EXEC")
+                    } else {
+                        name
+                    };
+                    let owner = proc_name.unwrap_or(job_name);
+                    let count = step_counts
+                        .entry((owner, name.to_string()))
+                        .or_insert(0usize);
+                    *count += 1;
+                    let suffix = if *count == 1 {
+                        String::new()
+                    } else {
+                        format!("#{count}")
+                    };
                     let step_sym =
-                        Symbol::synthetic("jcl", format!("{}::{}::{}", file.path, name, i)).id();
+                        Symbol::synthetic("jcl", format!("{}::{owner}::{name}{suffix}", file.path))
+                            .id();
                     let mut node = Node::new(
                         step_sym.clone(),
                         NodeKind::Other("step".to_string()),
@@ -185,11 +189,10 @@ impl Extractor for JclExtractor {
                     node.signature = Some(format!("EXEC {operands}"));
                     nodes.push(node);
                     current_step = Some(step_sym.clone());
-                    current_pgm = operands
-                        .split(',')
-                        .next()
-                        .and_then(|f| f.trim().strip_prefix("PGM="))
-                        .map(str::trim)
+                    let first = split_operands(operands)[0];
+                    let program = operand_value(first, &["PGM"]);
+                    current_pgm = program
+                        .as_deref()
                         .filter(|p| !p.is_empty() && !p.contains(['*', '.', '&']))
                         .map(str::to_ascii_uppercase);
 
@@ -209,8 +212,8 @@ impl Extractor for JclExtractor {
 
                     // step → invoked program (Calls by name: the cross-language link), or → the
                     // shared PROC id (a direct edge; the PROC source defines it, else a boundary).
-                    if let Some(target) = parse_exec_target(operands) {
-                        if current_pgm.is_some() || operands.starts_with("PGM=") {
+                    if let Some(target) = target {
+                        if program.is_some() {
                             refs.push(UnresolvedRef::new(
                                 step_sym.clone(),
                                 target,
@@ -335,6 +338,168 @@ impl Extractor for JclExtractor {
     }
 }
 
+/// A complete statement, excluding any following in-stream data records.
+struct Statement<'a> {
+    name: &'a str,
+    operation: &'a str,
+    operands: String,
+    first_line: usize,
+    last_line: usize,
+}
+
+#[derive(Clone, Copy)]
+enum Continuation {
+    Operands,
+    String,
+    Comment,
+}
+
+/// Statement text occupies columns 1-71; column 72 and sequence columns are separate.
+fn card_text(raw: &str) -> &str {
+    let mut end = raw.len().min(71);
+    while !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    &raw[..end]
+}
+
+fn word(text: &str) -> (&str, &str) {
+    let text = text.trim_start();
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    (&text[..end], text[end..].trim_start())
+}
+
+/// Read through the first blank outside a quoted string. Doubled apostrophes escape an apostrophe.
+fn operand_field(text: &str, mut quoted: bool) -> (&str, bool) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if quoted && bytes.get(i + 1) == Some(&b'\'') => i += 2,
+            b'\'' => {
+                quoted = !quoted;
+                i += 1;
+            }
+            b if b.is_ascii_whitespace() && !quoted => break,
+            _ => i += 1,
+        }
+    }
+    (&text[..i], quoted)
+}
+
+fn continuation(raw: &str, operand: &str, quoted: bool) -> Option<Continuation> {
+    if quoted && card_text(raw).len() == 71 {
+        Some(Continuation::String)
+    } else if !quoted && operand.ends_with(',') {
+        Some(Continuation::Operands)
+    } else if raw
+        .as_bytes()
+        .get(71)
+        .is_some_and(|b| !b.is_ascii_whitespace())
+    {
+        Some(Continuation::Comment)
+    } else {
+        None
+    }
+}
+
+/// Read logical statements for extraction and extents, excluding in-stream data records.
+/// `DD DATA` ends only at its delimiter. `DD *` ends at its delimiter or the next `//` card,
+/// even with `DLM=` (JES2); that `//` card is read as a real statement. Columns 72-80 are not
+/// statement text: column 72 can mark continuation, and columns 73-80 hold sequence numbers.
+fn read_statements(text: &str) -> Vec<Statement<'_>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut statements = Vec::new();
+    let mut in_stream: Option<(String, bool)> = None;
+    let mut i = 0;
+    while i < lines.len() {
+        let raw = lines[i];
+        if let Some((delimiter, slashes_are_data)) = &in_stream {
+            if raw.starts_with(delimiter.as_str()) {
+                in_stream = None;
+                i += 1;
+                continue;
+            }
+            if *slashes_are_data || !raw.starts_with("//") {
+                i += 1;
+                continue;
+            }
+            in_stream = None;
+        }
+        let Some(body) = card_text(raw).strip_prefix("//") else {
+            i += 1;
+            continue;
+        };
+        if body.starts_with('*') || body.trim().is_empty() {
+            i += 1;
+            continue;
+        }
+        let (name, rest) = if body.starts_with([' ', '\t']) {
+            ("", body)
+        } else {
+            word(body)
+        };
+        let (operation, rest) = word(rest);
+        let (operand, quoted) = operand_field(rest, false);
+        let mut statement = Statement {
+            name,
+            operation,
+            operands: operand.to_string(),
+            first_line: i,
+            last_line: i,
+        };
+        let mut pending = continuation(raw, operand, quoted);
+        i += 1;
+        while let Some(mode) = pending {
+            // Comments between continuation cards do not terminate the logical statement.
+            while i < lines.len() && lines[i].starts_with("//*") {
+                i += 1;
+            }
+            let Some(&next) = lines.get(i) else {
+                break;
+            };
+            let next_text = card_text(next);
+            let Some(body) = next_text.strip_prefix("//") else {
+                break;
+            };
+            if !body.starts_with([' ', '\t']) || body.trim().is_empty() {
+                break;
+            }
+            if matches!(mode, Continuation::Comment) {
+                pending = next
+                    .as_bytes()
+                    .get(71)
+                    .filter(|b| !b.is_ascii_whitespace())
+                    .map(|_| Continuation::Comment);
+            } else {
+                let field = if matches!(mode, Continuation::String) {
+                    next_text.get(15..).unwrap_or("")
+                } else {
+                    body.trim_start()
+                };
+                let (operand, quoted) = operand_field(field, matches!(mode, Continuation::String));
+                statement.operands.push_str(operand);
+                pending = continuation(next, operand, quoted);
+            }
+            statement.last_line = i;
+            i += 1;
+        }
+        if operation == "DD" {
+            let parts = split_operands(&statement.operands);
+            if let Some(&first) = parts.first() {
+                if first == "*" || first == "DATA" {
+                    in_stream = Some((
+                        parse_dlm(&statement.operands).unwrap_or_else(|| "/*".to_string()),
+                        first == "DATA",
+                    ));
+                }
+            }
+        }
+        statements.push(statement);
+    }
+    statements
+}
+
 /// The statement kinds that bound a node's extent.
 #[derive(Clone, Copy, PartialEq)]
 enum Stmt {
@@ -344,32 +509,23 @@ enum Stmt {
     Pend,
 }
 
-/// Line-start byte offsets plus the JOB/PROC/EXEC/PEND boundary lines, so a node can span its whole
-/// statement (card, continuations, DDs, in-stream data, comments) instead of a one-line anchor.
+/// Byte offsets and JOB/PROC/EXEC/PEND boundaries from the shared logical-statement reader.
+/// Nodes span their continuations, DDs, in-stream data and comments; the reader handles data
+/// delimiters before these boundaries are collected.
 struct Extents {
     line_starts: Vec<usize>,
     /// Byte offset where each line's content ends (before its terminator).
     line_ends: Vec<usize>,
     text_len: usize,
-    bounds: Vec<(usize, Stmt)>,
+    bounds: Vec<(usize, usize, Stmt)>,
 }
 
 impl Extents {
-    fn scan(text: &str) -> Self {
+    fn scan(text: &str, statements: &[Statement<'_>]) -> Self {
         let mut line_starts = Vec::new();
         let mut line_ends = Vec::new();
-        let mut bounds = Vec::new();
         let mut pos = 0;
-        // A statement whose operand field ends with a comma continues on the next `//` card; that
-        // continuation carries operands/comments only (no name, no operation), so it must never be
-        // read as a boundary.
-        let mut continued = false;
-        // In-stream data (`DD *` / `DD DATA`): every record up to the delimiter belongs to the data,
-        // not to the job stream, so no card inside it is a boundary. `(delimiter, slashes_are_data)`;
-        // `slashes_are_data` holds for `DD DATA` and whenever `DLM=` is set — then even `//` records
-        // are data (`DD *` without `DLM=` instead ends at the next `//` card).
-        let mut in_stream: Option<(String, bool)> = None;
-        for (i, raw) in text.lines().enumerate() {
+        for raw in text.lines() {
             line_starts.push(pos);
             // `lines()` strips `\n` or `\r\n`; advance past the real terminator.
             pos += raw.len();
@@ -379,69 +535,20 @@ impl Extents {
             } else if text[pos..].starts_with('\n') {
                 pos += 1;
             }
-
-            // Inside in-stream data: consume records until the delimiter (or, for `DD *` without
-            // `DLM=`, the next `//` card, which is itself a real statement to be processed below).
-            if let Some((delim, slashes_are_data)) = in_stream.clone() {
-                if raw.starts_with(delim.as_str()) {
-                    in_stream = None;
-                    continue;
-                }
-                if !slashes_are_data && raw.starts_with("//") {
-                    in_stream = None;
-                } else {
-                    continue;
-                }
-            }
-
-            let Some(body) = raw.strip_prefix("//") else {
-                continue;
-            };
-            // `//*` is a comment and `//` alone is null/delimiter; neither breaks a continuation.
-            if body.starts_with('*') || body.trim().is_empty() {
-                continue;
-            }
-
-            let was_continued = continued;
-            // The name field starts in column 3; a blank column 3 means no name, so the operation is
-            // the first token. A continuation card carries only operand/comment text.
-            let has_name = !body.starts_with([' ', '\t']);
-            let mut toks = body.split_whitespace();
-            let (op, operand) = if was_continued {
-                (None, toks.next())
-            } else if has_name {
-                let _name = toks.next();
-                (toks.next(), toks.next())
-            } else {
-                (toks.next(), toks.next())
-            };
-            // Does this card's operand field continue onto the next card?
-            continued = operand.is_some_and(|o| o.ends_with(','));
-            if was_continued {
-                continue;
-            }
-
-            if let Some(kind) = match op {
-                Some("JOB") => Some(Stmt::Job),
-                Some("PROC") => Some(Stmt::Proc),
-                Some("PEND") => Some(Stmt::Pend),
-                Some("EXEC") => Some(Stmt::Exec),
-                _ => None,
-            } {
-                bounds.push((i, kind));
-            } else if op == Some("DD") {
-                // `DD *` / `DD DATA` open in-stream data; `SYSOUT=*` and the like do not.
-                if let Some(operand) = operand {
-                    let first = operand.split(',').next().unwrap_or("");
-                    if first == "*" || first == "DATA" {
-                        let dlm = parse_dlm(operand);
-                        let slashes_are_data = first == "DATA" || dlm.is_some();
-                        in_stream =
-                            Some((dlm.unwrap_or_else(|| "/*".to_string()), slashes_are_data));
-                    }
-                }
-            }
         }
+        let bounds = statements
+            .iter()
+            .filter_map(|statement| {
+                let kind = match statement.operation {
+                    "JOB" => Stmt::Job,
+                    "PROC" => Stmt::Proc,
+                    "EXEC" => Stmt::Exec,
+                    "PEND" => Stmt::Pend,
+                    _ => return None,
+                };
+                Some((statement.first_line, statement.last_line, kind))
+            })
+            .collect();
         Self {
             line_starts,
             line_ends,
@@ -458,11 +565,11 @@ impl Extents {
         let end_line_excl = self
             .bounds
             .iter()
-            .filter(|(l, _)| *l > line)
-            .find_map(|&(l, k)| match (kind, k) {
-                (Stmt::Exec, _) => Some(l),
-                (_, Stmt::Job | Stmt::Proc) => Some(l),
-                (Stmt::Proc, Stmt::Pend) => Some(l + 1),
+            .filter(|(first, _, _)| *first > line)
+            .find_map(|&(first, last, k)| match (kind, k) {
+                (Stmt::Exec, _) => Some(first),
+                (_, Stmt::Job | Stmt::Proc) => Some(first),
+                (Stmt::Proc, Stmt::Pend) => Some(last + 1),
                 _ => None,
             })
             .unwrap_or(n)
@@ -513,59 +620,69 @@ fn is_ddname(dd: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'#' | b'$' | b'@'))
 }
 
-/// From an `EXEC` operand string, return the invoked program or PROC name.
-/// `PGM=MYCOBOL,REGION=4M` → `MYCOBOL` ; `MYPROC,PARM=…` → `MYPROC` ; `PROC=X` / keyword-only → None.
-fn parse_exec_target(operands: &str) -> Option<String> {
-    let first = operands.split(',').next()?.trim();
-    if let Some(pgm) = first.strip_prefix("PGM=") {
-        let p = pgm.trim();
-        return (!p.is_empty()).then(|| p.to_string());
-    }
-    if let Some(p) = first.strip_prefix("PROC=") {
-        let p = p.trim();
-        return (!p.is_empty()).then(|| p.to_string());
-    }
-    // A bare first operand with no `=` is a cataloged-procedure invocation (`EXEC MYPROC`).
-    if !first.is_empty() && !first.contains('=') {
-        return Some(first.to_string());
-    }
-    None
-}
-
-/// Extract the dataset name from a DD operand string.
-/// `DSN=PROD.CUST.VSAM,DISP=SHR` → `PROD.CUST.VSAM`. The value ends at the first comma that is NOT
-/// inside parentheses, so GDG (`PROD.GDG(+1)`) and PDS members (`PROD.LIB(MEMBER)`) are kept whole.
-/// Returns `None` for non-dataset DDs (`SYSOUT=A`, `DUMMY`, `*` inline data).
-fn parse_dsn(operands: &str) -> Option<String> {
-    let start = ["DSNAME=", "DSN="]
-        .iter()
-        .find_map(|k| operands.find(k).map(|p| p + k.len()))?;
-    let rest = &operands[start..];
-    let mut depth = 0i32;
-    let mut end = rest.len();
-    for (j, c) in rest.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => depth -= 1,
-            ',' if depth == 0 => {
-                end = j;
-                break;
+/// Split only at commas outside strings and parentheses, preserving quoted values verbatim.
+fn split_operands(operands: &str) -> Vec<&str> {
+    let bytes = operands.as_bytes();
+    let mut parts = Vec::new();
+    let mut quoted = false;
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if quoted && bytes.get(i + 1) == Some(&b'\'') => {
+                i += 2;
+                continue;
+            }
+            b'\'' => quoted = !quoted,
+            b'(' if !quoted => depth += 1,
+            b')' if !quoted => depth = depth.saturating_sub(1),
+            b',' if !quoted && depth == 0 => {
+                parts.push(operands[start..i].trim());
+                start = i + 1;
             }
             _ => {}
         }
+        i += 1;
     }
-    let dsn = rest[..end].trim();
-    (!dsn.is_empty()).then(|| dsn.to_string())
+    parts.push(operands[start..].trim());
+    parts
 }
 
-/// The in-stream data delimiter from a `DD *` / `DD DATA` operand: the characters after `DLM=`
-/// (default `/*` when absent). `DATA,DLM=@@` → `@@`; surrounding quotes, if any, are stripped.
-fn parse_dlm(operand: &str) -> Option<String> {
-    operand
-        .split(',')
-        .find_map(|f| f.strip_prefix("DLM="))
-        .map(|v| v.trim_matches('\'').to_string())
-        .filter(|v| !v.is_empty())
+/// Decode a whole quoted value, including JCL's doubled-apostrophe escape.
+fn operand_value(operands: &str, keys: &[&str]) -> Option<String> {
+    split_operands(operands).into_iter().find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        if !keys.contains(&key.trim()) {
+            return None;
+        }
+        let value = value.trim();
+        let quoted = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\''));
+        let value = if let Some(quoted) = quoted {
+            quoted.replace("''", "'")
+        } else {
+            value.to_string()
+        };
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+/// The EXEC target comes only from its first operand: `PGM=`, `PROC=`, or a bare PROC name.
+/// Later keyword operands are overrides and cannot select the target.
+fn parse_exec_target(operands: &str) -> Option<String> {
+    let first = *split_operands(operands).first()?;
+    operand_value(first, &["PGM", "PROC"])
+        .or_else(|| (!first.is_empty() && !first.contains('=')).then(|| first.to_string()))
+}
+
+/// A DD's dataset name, preserving parenthesized GDG generations and PDS members.
+fn parse_dsn(operands: &str) -> Option<String> {
+    operand_value(operands, &["DSN", "DSNAME"])
+}
+
+/// A DD's explicit in-stream delimiter; the reader supplies `/*` when absent.
+fn parse_dlm(operands: &str) -> Option<String> {
+    operand_value(operands, &["DLM"])
 }
 
 #[cfg(test)]
@@ -663,6 +780,220 @@ TRAN-CAT-TYPE,1,2,ZD\n\
         &text[s.start_byte as usize..s.end_byte as usize]
     }
 
+    fn assert_first_step_slice(prefix: &str, eol: &str) -> Extraction {
+        let expected = prefix.replace('\n', eol);
+        let text = format!("//J JOB{eol}{expected}//S2 EXEC PGM=B{eol}");
+        let x = extract(&text);
+        assert_eq!(slice_of(&text, &x, "S1"), expected);
+        assert_eq!(slice_of(&text, &x, "S2"), format!("//S2 EXEC PGM=B{eol}"));
+        assert_eq!(
+            x.nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Other("step".into()))
+                .count(),
+            2
+        );
+        x
+    }
+
+    #[test]
+    fn quoted_exec_operands_and_column_16_string_continuation() {
+        let first = "//S1 EXEC PGM=A,PARM='";
+        let continued = format!(
+            "{first}{}\n//* between continuation cards\n//             WORLD'\n//OUT DD SYSOUT=*\n",
+            "H".repeat(71 - first.len())
+        );
+        for eol in ["\n", "\r\n"] {
+            for (prefix, parm) in [
+                (
+                    "//S1 EXEC PGM=A,PARM='HELLO, WORLD'\n//OUT DD SYSOUT=*\n",
+                    "'HELLO, WORLD'".to_string(),
+                ),
+                (
+                    continued.as_str(),
+                    format!("'{}WORLD'", "H".repeat(71 - first.len())),
+                ),
+            ] {
+                let x = assert_first_step_slice(prefix, eol);
+                let s1 = x.nodes.iter().find(|n| n.name == "S1").unwrap();
+                assert_eq!(s1.signature, Some(format!("EXEC PGM=A,PARM={parm}")));
+            }
+        }
+    }
+
+    #[test]
+    fn column_72_comment_continuation_does_not_open_a_step() {
+        let card = format!("{:<71}X", "//S1 EXEC PGM=A  trailing comment");
+        let prefix = format!("{card}\n//         EXEC will run tomorrow\n//OUT DD SYSOUT=*\n");
+        for eol in ["\n", "\r\n"] {
+            let x = assert_first_step_slice(&prefix, eol);
+            assert!(!x.nodes.iter().any(|n| n.name == "EXEC"));
+        }
+    }
+
+    #[test]
+    fn continued_dd_data_delimiter_skips_embedded_job() {
+        let prefix = concat!(
+            "//S1 EXEC PGM=A\n//SYSIN DD DATA,\n//         DLM=@@\n",
+            "//INNER JOB\n/*\n//AFTER JOB\n@@\n"
+        );
+        for eol in ["\n", "\r\n"] {
+            let x = assert_first_step_slice(prefix, eol);
+            assert!(
+                !x.nodes
+                    .iter()
+                    .any(|n| n.name == "INNER" || n.name == "AFTER")
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_comma_dd_data_delimiter() {
+        let prefix =
+            "//S1 EXEC PGM=A\n//SYSIN DD DATA,DLM=',,'\n//INNER JOB\n/*\n//AFTER JOB\n,,\n";
+        for eol in ["\n", "\r\n"] {
+            let x = assert_first_step_slice(prefix, eol);
+            assert!(
+                !x.nodes
+                    .iter()
+                    .any(|n| n.name == "INNER" || n.name == "AFTER")
+            );
+        }
+    }
+
+    #[test]
+    fn dd_star_with_custom_delimiter_ends_at_next_statement() {
+        let prefix = "//S1 EXEC PGM=A\n//SYSIN DD *,DLM=@@\ndata\n";
+        for eol in ["\n", "\r\n"] {
+            assert_first_step_slice(prefix, eol);
+        }
+    }
+
+    #[test]
+    fn statement_reader_preserves_documented_data_and_column_boundaries() {
+        for eol in ["\n", "\r\n"] {
+            for (operands, data, expected) in [
+                ("DATA", "//INNER EXEC PGM=X\n/*\n", vec!["SYSIN", "S"]),
+                (
+                    "DATA,DLM=@@",
+                    "//INNER EXEC PGM=X\n/*\n@@\n",
+                    vec!["SYSIN", "S"],
+                ),
+                ("*", "data\n/*\n", vec!["SYSIN", "S"]),
+                ("*,DLM=@@", "data\n@@\n", vec!["SYSIN", "S"]),
+                ("*", "//INNER EXEC PGM=X\n", vec!["SYSIN", "INNER", "S"]),
+                (
+                    "*,DLM=@@",
+                    "//INNER EXEC PGM=X\n",
+                    vec!["SYSIN", "INNER", "S"],
+                ),
+            ] {
+                let prefix = "//S EXEC PGM=";
+                let program = "A".repeat(71 - prefix.len());
+                let text = format!("//SYSIN DD {operands}\n{data}{prefix}{program}X12345678\n")
+                    .replace('\n', eol);
+                let statements = read_statements(&text);
+                assert_eq!(
+                    statements.iter().map(|s| s.name).collect::<Vec<_>>(),
+                    expected,
+                    "{operands} under {eol:?}"
+                );
+                let last = statements.last().unwrap();
+                assert_eq!(last.operation, "EXEC");
+                assert_eq!(last.operands, format!("PGM={program}"));
+            }
+        }
+    }
+
+    #[test]
+    fn continued_dsn_links_step_and_dd_binding_to_dataset() {
+        let prefix = "//S1 EXEC PGM=A\n//PRIMARY DD DISP=SHR,\n//         DSN=A.B.C\n";
+        for eol in ["\n", "\r\n"] {
+            let x = assert_first_step_slice(prefix, eol);
+            let step = x.nodes.iter().find(|n| n.name == "S1").unwrap();
+            let dataset = x.nodes.iter().find(|n| n.name == "A.B.C").unwrap();
+            let binding = crate::cobol_links::dd_binding_symbol("A", "PRIMARY");
+            assert_eq!(dataset.location.span, line_span(2));
+            let dd = x.nodes.iter().find(|n| n.symbol == binding).unwrap();
+            assert_eq!(dd.location.span, line_span(2));
+            for from in [&step.symbol, &binding] {
+                let edge = x
+                    .local_edges
+                    .iter()
+                    .find(|e| {
+                        &e.source == from
+                            && e.target == dataset.symbol
+                            && e.kind == EdgeKind::Other("uses".into())
+                    })
+                    .expect("uses edge from step and binding");
+                assert_eq!(edge.location.as_ref().unwrap().span, line_span(2));
+            }
+        }
+    }
+
+    #[test]
+    fn operand_splitter_respects_quotes_escapes_and_parentheses() {
+        assert_eq!(
+            split_operands("PGM=A,PARM='HELLO, WORLD',COND=(0,NE,(1,EQ)),DLM=',,'"),
+            vec![
+                "PGM=A",
+                "PARM='HELLO, WORLD'",
+                "COND=(0,NE,(1,EQ))",
+                "DLM=',,'",
+            ]
+        );
+        assert_eq!(
+            split_operands("PARM='IT''S, HERE',DSN=A.B"),
+            vec!["PARM='IT''S, HERE'", "DSN=A.B"]
+        );
+        assert_eq!(parse_dlm("DATA,DLM=',,'"), Some(",,".into()));
+        assert_eq!(parse_dlm("DATA,DLM='''@'"), Some("'@".into()));
+        assert_eq!(parse_dsn("PARM='DSN=WRONG',DSNAME=A.B"), Some("A.B".into()));
+        assert_eq!(parse_dsn("XDSN=WRONG"), None);
+        assert_eq!(
+            parse_exec_target("PGM=A,PARM='PGM=WRONG'"),
+            Some("A".into())
+        );
+        assert_eq!(parse_exec_target("MYPROC,PGM=X"), Some("MYPROC".into()));
+        assert_eq!(
+            parse_exec_target("PROC=MYPROC,PGM=X"),
+            Some("MYPROC".into())
+        );
+        assert_eq!(parse_exec_target("MYPROC,PROC=X"), Some("MYPROC".into()));
+        assert_eq!(parse_exec_target("PARM='PGM=WRONG',PGM=A"), None);
+    }
+
+    #[test]
+    fn step_ids_survive_comment_insertion_and_disambiguate_within_owner() {
+        let original = "//J JOB\n//S EXEC PGM=A\n";
+        let commented = "//J JOB\n//* comment\n//S EXEC PGM=A\n";
+        let repeated = concat!(
+            "//S EXEC PGM=A\n//J JOB\n//S EXEC PGM=A\n//S EXEC PGM=B\n",
+            "//S EXEC PGM=C\n//P PROC\n//S EXEC PGM=A\n"
+        );
+        for eol in ["\n", "\r\n"] {
+            let ids = |text: &str| {
+                extract(&text.replace('\n', eol))
+                    .nodes
+                    .into_iter()
+                    .filter(|n| n.kind == NodeKind::Other("step".into()))
+                    .map(|n| n.symbol)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(ids(original), ids(commented));
+            assert_eq!(
+                ids(repeated),
+                ["", "J", "J", "J", "P"]
+                    .into_iter()
+                    .zip(["S", "S", "S#2", "S#3", "S"])
+                    .map(|(owner, step)| {
+                        Symbol::synthetic("jcl", format!("JOB1.jcl::{owner}::{step}")).id()
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
     #[test]
     fn pend_with_a_trailing_comment_still_ends_the_proc() {
         // P2-1: the operation field (not the first token) decides the boundary, so `PEND` followed
@@ -697,6 +1028,51 @@ TRAN-CAT-TYPE,1,2,ZD\n\
                 s1,
                 format!("//S1 EXEC PGM=A{eol}"),
                 "S1 ends before the unnamed EXEC"
+            );
+            let steps: Vec<_> = x
+                .nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Other("step".into()))
+                .collect();
+            assert_eq!(
+                steps.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+                ["S1", "B"]
+            );
+            let b = steps[1];
+            assert_eq!(b.symbol, Symbol::synthetic("jcl", "JOB1.jcl::J::B").id());
+            assert!(
+                x.refs
+                    .iter()
+                    .any(|r| r.from == b.symbol && r.raw_name == "B" && r.kind == EdgeKind::Calls)
+            );
+            assert!(x.nodes.iter().all(|n| !n.name.is_empty()));
+        }
+    }
+
+    #[test]
+    fn unnamed_exec_display_names_share_the_step_id_suffix_rule() {
+        let x = extract(concat!(
+            "//J JOB\n//B EXEC PGM=A\n//         EXEC PGM=B\n//         EXEC PGM=B\n",
+            "//         EXEC MYPROC\n//         EXEC PROC=MYPROC\n//         EXEC COND=(0,NE)\n"
+        ));
+        let steps: Vec<_> = x
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Other("step".into()))
+            .collect();
+        assert_eq!(steps.len(), 6);
+        for (step, (name, id_name)) in steps.iter().zip([
+            ("B", "B"),
+            ("B", "B#2"),
+            ("B", "B#3"),
+            ("MYPROC", "MYPROC"),
+            ("MYPROC", "MYPROC#2"),
+            ("EXEC", "EXEC"),
+        ]) {
+            assert_eq!(step.name, name);
+            assert_eq!(
+                step.symbol,
+                Symbol::synthetic("jcl", format!("JOB1.jcl::J::{id_name}")).id()
             );
         }
     }
@@ -869,6 +1245,23 @@ TRAN-CAT-TYPE,1,2,ZD\n\
             .find(|n| n.symbol == proc_symbol("MYPROC"))
             .expect("boundary PROC node");
         assert!(node.is_declaration());
+    }
+
+    #[test]
+    fn proc_symbolic_overrides_do_not_select_the_exec_target_or_dd_program() {
+        for operands in ["MYPROC,PGM=X", "PROC=MYPROC,PGM=X", "MYPROC,PROC=X"] {
+            let ex = extract(&format!("//J JOB\n//S EXEC {operands}\n//IN DD DSN=A.B\n"));
+            let step = ex.nodes.iter().find(|n| n.name == "S").unwrap();
+            assert!(ex.local_edges.iter().any(|e| e.source == step.symbol
+                && e.target == proc_symbol("MYPROC")
+                && e.kind == EdgeKind::Calls));
+            assert!(!ex.refs.iter().any(|r| r.kind == EdgeKind::Calls));
+            assert!(
+                !ex.nodes
+                    .iter()
+                    .any(|n| n.kind == NodeKind::Other("dd_binding".into()))
+            );
+        }
     }
 
     #[test]
