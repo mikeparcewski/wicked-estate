@@ -15,7 +15,7 @@ SEMVER = r"\d+\.\d+\.\d+"
 SECTION = re.compile(r"^\[([^\]]+)\]\s*(?:#.*)?$")
 WORKSPACE_VERSION = re.compile(rf'^(version\s*=\s*)"{SEMVER}"')
 INTERNAL_PIN = re.compile(
-    rf'^(wicked-estate-(?!tree-sitter-)[\w-]+\s*=\s*\{{[^}}\n]*\bversion\s*=\s*)"{SEMVER}"'
+    rf'^(wicked-estate-(?!tree-sitter-)[\w-]+\s*=\s*\{{(?=[^}}\n]*\bpath\s*=)[^}}\n]*\bversion\s*=\s*)"{SEMVER}"'
 )
 
 

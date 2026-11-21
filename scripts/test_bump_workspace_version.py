@@ -23,6 +23,7 @@ wicked-estate-store = { path = "crates/wicked-estate-store", version = "0.35.8" 
 wicked-estate-tree-sitter-foo = { path = "vendor/foo", version = "1.2.3" }
 zip = { version = "9.0.5", default-features = false }
 calamine = "0.38.1"
+wicked-estate-registry-only = { version = "0.35.8" }
 
 [profile.release]
 version = "1.2.3"
@@ -49,6 +50,7 @@ class BumpWorkspaceVersionTests(unittest.TestCase):
         for kept in (
             'zip = { version = "9.0.5", default-features = false }',
             'calamine = "0.38.1"',
+            'wicked-estate-registry-only = { version = "0.35.8" }',
             'wicked-estate-tree-sitter-foo = { path = "vendor/foo", version = "1.2.3" }',
         ):
             self.assertIn(kept, new)
