@@ -181,8 +181,11 @@ fn retire_and_unretire_require_a_nonempty_string_id_and_list_requires_boolean() 
             assert_eq!(resp["error"]["code"], -32602, "{resp}");
         }
     }
-    for retired in [json!("true"), json!(1), Value::Null] {
+    for retired in [json!("true"), json!(1)] {
         let resp = rig.call("memory.list", json!({"retired": retired}));
         assert_eq!(resp["error"]["code"], -32602, "{resp}");
     }
+    // A null `retired` is treated as omitted: the live list, not an error.
+    let resp = rig.call("memory.list", json!({"retired": Value::Null}));
+    assert!(resp["error"].is_null(), "{resp}");
 }
