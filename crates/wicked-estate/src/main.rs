@@ -65,9 +65,13 @@ use notify::RecursiveMode;
 use notify_debouncer_full::new_debouncer;
 use std::path::Path;
 use std::time::Duration;
+use wicked_estate_extract::doc_convert::{self, BudgetAlloc};
 use wicked_estate_store::{
     GraphStoreMutExt, SqliteStore, open_store, open_store_ext, open_store_read,
 };
+
+#[global_allocator]
+static ALLOC: BudgetAlloc = BudgetAlloc::new();
 
 fn to_any(e: wicked_estate_core::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
@@ -166,6 +170,12 @@ fn stats_json(
     s: &wicked_estate_core::GraphStats,
 ) -> serde_json::Value {
     let report = staleness_report(store, db);
+    let skipped = wicked_estate::skipped_documents(store);
+    let skipped_files: Vec<_> = skipped
+        .iter()
+        .take(50)
+        .map(|(path, reason)| serde_json::json!({"path": path, "reason": reason}))
+        .collect();
     let mut probe = wicked_estate::freshness::FreshnessProbe::open(db);
     let meta = |k: &str| store.meta_get_key(k);
     let indexed = store.indexed_files().unwrap_or_default();
@@ -202,6 +212,7 @@ fn stats_json(
         "files": s.file_count,
         "unresolved": s.unresolved_ref_count,
         "db_size_bytes": s.db_size_bytes,
+        "skipped_documents": {"count": skipped.len(), "files": skipped_files},
         "nodes_by_kind": s.nodes_by_kind,
         "edges_by_kind": s.edges_by_kind,
         "provenance": {
@@ -818,6 +829,10 @@ fn matches_ignore_pattern(file: &str, pattern: &str) -> bool {
 }
 
 fn main() -> Result<()> {
+    if let Some(code) = doc_convert::run_child_if_requested(&ALLOC) {
+        std::process::exit(code);
+    }
+    doc_convert::isolate_conversions();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (cmd, rest) = match args.split_first() {
         Some((c, r)) => (c.as_str(), r),
@@ -1781,6 +1796,13 @@ fn main() -> Result<()> {
                 "nodes={} edges={} files={} unresolved={} db={:.1}MB",
                 s.node_count, s.edge_count, s.file_count, s.unresolved_ref_count, db_mb
             );
+            let skipped = wicked_estate::skipped_documents(store.as_ref());
+            if let Some((path, reason)) = skipped.first() {
+                println!(
+                    "skipped documents: {} (not in the index; e.g. {path}: {reason})",
+                    skipped.len()
+                );
+            }
             for (k, v) in &s.edges_by_kind {
                 println!("  edge {k} = {v}");
             }

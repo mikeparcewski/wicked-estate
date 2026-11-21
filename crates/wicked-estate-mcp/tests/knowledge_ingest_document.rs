@@ -1,8 +1,7 @@
 //! `knowledge.ingest {path}` over the REAL binary: a binary document (docx, pptx, text PDF) is
-//! converted to Markdown in-process, redacted like any `.md`, chunked, and recalled with its path as
-//! the cited source. A scanned PDF is refused as needing OCR (nothing is uploaded: the converter has
-//! no network code); a secret-named file, or one outside the server's working directory, is never
-//! read.
+//! converted to Markdown in a supervised child, redacted like any `.md`, chunked, and cited by
+//! path. A scanned PDF is refused as needing OCR (nothing is uploaded: the converter has no network
+//! code); a secret-named file, or one outside the server's working directory, is never read.
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -91,6 +90,57 @@ fn fixture(tmp: &tempfile::TempDir, name: &str, as_name: &str) -> String {
     let to = tmp.path().join(as_name);
     std::fs::copy(from, &to).unwrap();
     to.to_str().unwrap().to_string()
+}
+
+fn crafted_pdf() -> Vec<u8> {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>",
+        concat!(
+            "<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /DecodeParms ",
+            "<< /Predictor 12 /Columns 4294967295 >> /Length 0 >>\n",
+            "stream\nendstream"
+        ),
+    ];
+    let mut pdf = b"%PDF-1.5\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        writeln!(pdf, "{} 0 obj\n{object}\nendobj", i + 1).unwrap();
+    }
+    let xref = pdf.len();
+    writeln!(pdf, "xref\n0 5\n0000000000 65535 f ").unwrap();
+    for offset in offsets {
+        writeln!(pdf, "{offset:010} 00000 n ").unwrap();
+    }
+    writeln!(
+        pdf,
+        "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF"
+    )
+    .unwrap();
+    pdf
+}
+
+#[test]
+fn knowledge_ingest_memory_skip_keeps_the_server_alive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("crafted.pdf");
+    std::fs::write(&path, crafted_pdf()).unwrap();
+    let mut mcp = Mcp::spawn(&tmp);
+    let (err, text) = mcp.call(
+        "knowledge.ingest",
+        json!({"title": "Crafted", "path": path.to_str().unwrap()}),
+    );
+    assert!(err, "the hostile PDF must be refused: {text}");
+    assert!(
+        text.contains("over the 1 GiB conversion memory budget"),
+        "{text}"
+    );
+
+    let pdf = fixture(&tmp, "runbook.pdf", "runbook.pdf");
+    let (err, text) = mcp.call("knowledge.ingest", json!({"title": "Runbook", "path": pdf}));
+    assert!(!err, "the same server still ingests a text PDF: {text}");
 }
 
 #[test]
