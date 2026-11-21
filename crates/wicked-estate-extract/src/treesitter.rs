@@ -2023,6 +2023,42 @@ fn js_var_boundary(kind: &str) -> bool {
         )
 }
 
+/// Definitions hidden from module name lookup must bind through the local walk (#495).
+/// Top-level sloppy-script block functions follow the ESM/TS block rule here.
+fn js_definition_is_local(anchor: tree_sitter::Node, kind: &str) -> bool {
+    if !matches!(kind, "function" | "class" | "variable" | "constant") {
+        return false;
+    }
+    let is_var = anchor.kind() == "variable_declarator"
+        && anchor
+            .parent()
+            .is_some_and(|p| p.kind() == "variable_declaration");
+    let mut block = false;
+    let mut up = anchor.parent();
+    while let Some(n) = up {
+        if JS_FUNCTION_KINDS.contains(&n.kind()) || n.kind() == "class_static_block" {
+            return true;
+        }
+        match n.kind() {
+            "program" => break,
+            "statement_block" => {
+                if n.parent()
+                    .is_some_and(|p| matches!(p.kind(), "internal_module" | "module"))
+                {
+                    return block && !is_var;
+                }
+                block = true;
+            }
+            "switch_body" | "for_statement" | "for_in_statement" | "catch_clause" => {
+                block = true;
+            }
+            _ => {}
+        }
+        up = n.parent();
+    }
+    block && !is_var
+}
+
 /// Every name a binding pattern binds (a parameter list, a destructuring, a declarator name):
 /// a pair's value, a default's left side, a rest's target — never a property key, a default value
 /// or a type annotation (wicked-estate#486).
@@ -2196,34 +2232,32 @@ fn js_var_names(root: tree_sitter::Node, src: &[u8]) -> HashSet<String> {
 }
 
 /// One write to a name (wicked-estate#492, #497, #498).
-#[derive(Clone, Copy)]
 struct JsWrite {
     /// Where the value becomes visible in source order: the end of the assigned name's element
     /// in its pattern (#501); a read inside [`JsWrite::blind`] still does not see it.
     visible: usize,
     /// The node a definition can be anchored at (a `var` declarator).
     anchor: usize,
-    /// The source the write's value comes from (a right-hand side, an iterable): evaluated
-    /// before the write though it follows it, so a read inside it does not see the write (#501).
-    blind: Option<(usize, usize)>,
+    /// Sources evaluated before the write: its RHS/iterable and enclosing defaults (#501, #504).
+    blind: Vec<(usize, usize)>,
     /// False for a write through a destructuring pattern: which element it stores is not tracked.
     known: bool,
     /// The outermost plain block the write runs in unconditionally (a straight-line statement of
     /// it, or of plain `{}` blocks nested in it); `None` for a conditional write (`if (c) x = …`,
-    /// `c && (x = …)`, a loop initializer). A call inside that block, after the write, always sees
-    /// it. A `for (x of …)` binding covers its own body.
+    /// `c && (x = …)`). A call inside that block, after the write, always sees it. A loop
+    /// initializer covers the enclosing block; a `for (x of …)` binding covers its own body.
     covers: Option<usize>,
 }
 
-/// The writes to one name in one function body or static block, in the order they take effect.
+/// One binding's writes, in the order they take effect.
 #[derive(Default)]
 struct JsWrites {
     events: Vec<JsWrite>,
     /// `x ||= …` / `x ??= …`: kept out of `events`, as each keeps a callable value; counted for a
     /// call from a nested function, which cannot know whether one ran first.
     keeps: usize,
-    /// Every known write's anchor: the values a call may see when the lookup stops early.
-    known: Option<std::rc::Rc<[usize]>>,
+    /// Covering event indices, in event order, by the block each write covers (#504).
+    covering: HashMap<usize, Vec<usize>>,
 }
 
 /// The outermost plain block `stmt` runs in unconditionally: its parent block, widened through
@@ -2241,8 +2275,19 @@ fn js_straight_block(stmt: tree_sitter::Node) -> Option<usize> {
         _ => stmt,
     };
     let mut block = stmt.parent().filter(|b| b.kind() == "statement_block")?;
-    while let Some(up) = block.parent().filter(|p| p.kind() == "statement_block") {
-        block = up;
+    while let Some(parent) = block.parent() {
+        let up = if parent.kind() == "finally_clause" {
+            parent
+                .parent()
+                .filter(|p| p.kind() == "try_statement")
+                .and_then(|p| p.parent())
+        } else {
+            Some(parent)
+        };
+        match up.filter(|p| p.kind() == "statement_block") {
+            Some(up) => block = up,
+            None => break,
+        }
     }
     Some(block.id())
 }
@@ -2264,6 +2309,12 @@ fn js_write_target(mut n: tree_sitter::Node) -> tree_sitter::Node {
     n
 }
 
+struct JsPatternWrite {
+    name: String,
+    visible: usize,
+    blind: Vec<(usize, usize)>,
+}
+
 /// The names a write target assigns, each with where its value takes effect (wicked-estate#501):
 /// destructuring assigns left to right, an element with a default after that default is
 /// evaluated, so a read later in the same pattern sees the element, and one in its own default
@@ -2272,29 +2323,38 @@ fn js_write_pattern_names(
     n: tree_sitter::Node,
     src: &[u8],
     effect: Option<usize>,
-    out: &mut Vec<(String, usize)>,
+    defaults: &[(usize, usize)],
+    out: &mut Vec<JsPatternWrite>,
 ) {
     let n = js_write_target(n);
     match n.kind() {
         "identifier" | "shorthand_property_identifier_pattern" => {
             if let Ok(t) = n.utf8_text(src) {
-                out.push((t.to_string(), effect.unwrap_or(n.end_byte())));
+                out.push(JsPatternWrite {
+                    name: t.to_string(),
+                    visible: effect.unwrap_or(n.end_byte()),
+                    blind: defaults.to_vec(),
+                });
             }
         }
         "pair_pattern" => {
             if let Some(v) = n.child_by_field_name("value") {
-                js_write_pattern_names(v, src, effect, out);
+                js_write_pattern_names(v, src, effect, defaults, out);
             }
         }
         "assignment_pattern" | "object_assignment_pattern" => {
             if let Some(l) = n.child_by_field_name("left") {
-                js_write_pattern_names(l, src, effect.or(Some(n.end_byte())), out);
+                let mut defaults = defaults.to_vec();
+                if let Some(value) = n.child_by_field_name("right") {
+                    defaults.push((value.start_byte(), value.end_byte()));
+                }
+                js_write_pattern_names(l, src, Some(n.end_byte()), &defaults, out);
             }
         }
         "object_pattern" | "array_pattern" | "rest_pattern" => {
             let mut walk = n.walk();
             for c in n.named_children(&mut walk) {
-                js_write_pattern_names(c, src, effect, out);
+                js_write_pattern_names(c, src, None, defaults, out);
             }
         }
         _ => {}
@@ -2352,30 +2412,33 @@ fn js_block_lexical_names(n: tree_sitter::Node, src: &[u8]) -> Vec<String> {
 /// One scope's names that hide the enclosing function's binding, chained to the enclosing ones:
 /// shared by every node below, so entering a scope costs its own names only.
 struct JsShadow {
+    scope: usize,
     names: HashSet<String>,
     up: Option<std::rc::Rc<JsShadow>>,
 }
 
-fn js_shadowed(mut frame: Option<&std::rc::Rc<JsShadow>>, name: &str) -> bool {
+fn js_write_owner(mut frame: Option<&std::rc::Rc<JsShadow>>, name: &str, root: usize) -> usize {
     while let Some(f) = frame {
         if f.names.contains(name) {
-            return true;
+            return f.scope;
         }
         frame = f.up.as_ref();
     }
-    false
+    root
 }
 
-/// The WRITES of a function body or static block, by name (wicked-estate#492, #497), outside
+/// Writes indexed by the scope that owns the binding, then by name (#504).
+type JsWritesByScope = HashMap<usize, HashMap<String, JsWrites>>;
+
+/// The writes of a function body, static block or program (wicked-estate#492, #497), outside
 /// nested functions, classes and static blocks. A known write is an initialized `var x = …`, a
 /// `for (var x of …)` or bare `for (x of …)` binding, an `x = …` / `x += …` assignment or an
 /// `x++`; `x ||= …` and `x ??= …` keep a callable value (see [`JsWrites::keeps`]). A
-/// destructuring write is an unknown one. A write inside a nested scope that binds the name itself
-/// (`catch (x)`, a block's `let x`) is that binding's, so it is left out. An uninitialized
-/// `var x;` writes nothing.
-fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrites> {
+/// destructuring write is an unknown one. Each nested lexical binding owns its writes in the
+/// same root walk (#504). An uninitialized `var x;` writes nothing.
+fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> JsWritesByScope {
     use std::rc::Rc;
-    let mut out: HashMap<String, JsWrites> = HashMap::new();
+    let mut out = JsWritesByScope::new();
     // A write to `target` from the value in `from`, anchored at `anchor`, covering `covers`;
     // `keep` = `||=` / `??=`.
     let mut write = |target: tree_sitter::Node,
@@ -2386,17 +2449,22 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrite
                      shadow: Option<&Rc<JsShadow>>| {
         let target = js_write_target(target);
         let known = target.kind() == "identifier";
-        let blind = from.map(|f| (f.start_byte(), f.end_byte()));
         let from_reads = |name: &str| from.is_some_and(|f| js_reads_name(f, name, src));
         let mut names = Vec::new();
-        js_write_pattern_names(target, src, None, &mut names);
-        for (name, visible) in names {
-            if js_shadowed(shadow, &name) {
-                continue;
+        js_write_pattern_names(target, src, None, &[], &mut names);
+        for JsPatternWrite {
+            name,
+            visible,
+            mut blind,
+        } in names
+        {
+            let owner = js_write_owner(shadow, &name, body.id());
+            if let Some(from) = from {
+                blind.push((from.start_byte(), from.end_byte()));
             }
             // `x = c ? x : y` may keep the old value: it cuts nothing off (#498).
             let covers = covers.filter(|_| keep || !from_reads(&name));
-            let w = out.entry(name).or_default();
+            let w = out.entry(owner).or_default().entry(name).or_default();
             if keep {
                 w.keeps += 1;
             } else {
@@ -2416,8 +2484,22 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrite
         if n.id() != body.id() {
             names.extend(js_block_lexical_names(n, src));
         }
+        if n.kind() == "catch_clause" {
+            if let Some(p) = n.child_by_field_name("parameter") {
+                let mut params = Vec::new();
+                js_pattern_names(p, src, &mut params);
+                names.extend(params);
+            }
+        }
+        if !names.is_empty() {
+            shadow = Some(Rc::new(JsShadow {
+                scope: n.id(),
+                names,
+                up: shadow,
+            }));
+        }
         match n.kind() {
-            // `var` and, for a `let` binding's own block, `let` declarators (#498).
+            // Each declarator writes to its innermost lexical owner, else the root.
             "variable_declaration" | "lexical_declaration" => {
                 let covers = js_straight_block(n);
                 let mut walk = n.walk();
@@ -2478,17 +2560,7 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrite
                     write(arg, None, n.start_byte(), covers, false, shadow.as_ref());
                 }
             }
-            "catch_clause" => {
-                if let Some(p) = n.child_by_field_name("parameter") {
-                    let mut params = Vec::new();
-                    js_pattern_names(p, src, &mut params);
-                    names.extend(params);
-                }
-            }
             _ => {}
-        }
-        if !names.is_empty() {
-            shadow = Some(Rc::new(JsShadow { names, up: shadow }));
         }
         let mut walk = n.walk();
         for c in n.named_children(&mut walk) {
@@ -2497,15 +2569,15 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrite
             }
         }
     }
-    for w in out.values_mut() {
-        w.events.sort_unstable_by_key(|e| e.visible);
-        w.known = Some(
-            w.events
-                .iter()
-                .filter(|e| e.known)
-                .map(|e| e.anchor)
-                .collect(),
-        );
+    for scope in out.values_mut() {
+        for w in scope.values_mut() {
+            w.events.sort_unstable_by_key(|e| e.visible);
+            for (i, e) in w.events.iter().enumerate() {
+                if let Some(block) = e.covers {
+                    w.covering.entry(block).or_default().push(i);
+                }
+            }
+        }
     }
     out
 }
@@ -2561,22 +2633,19 @@ fn js_statement_of(expr: tree_sitter::Node) -> Option<tree_sitter::Node> {
     }
 }
 
-/// At most this many writes are read back from a call: past it, every known write stays possible.
-const JS_MAY_WRITES: usize = 32;
+/// Whether a read is evaluated before this write, inside its source or an enclosing default.
+fn js_write_blind(write: &JsWrite, pos: usize) -> bool {
+    write.blind.iter().any(|&(a, b)| a <= pos && pos < b)
+}
 
-/// The values a call at `pos` may see, as write anchors (wicked-estate#492, #497, #498, #501);
-/// none = the binding's incoming value or an unknown one. A write is seen from its
-/// [`JsWrite::visible`] on, except inside its own [`JsWrite::blind`] source. In the call's own
-/// function or static block: the last write that always runs before it (one in a block containing
-/// the call, `ancestors`),
-/// plus every conditional write after that one and before the call; a destructuring write adds
-/// no anchor. From a nested function, which runs at an unknown time: the only write when it is
-/// known and nothing else may have run, else none.
+/// The values visible at a call: the latest covering write and subsequent possible writes.
+/// A containing loop also contributes later writes unless a write within it killed them (#504).
 fn js_assignment_seen(
     writes: Option<&JsWrites>,
     pos: usize,
     crossed: bool,
     ancestors: &[usize],
+    loops: &[(usize, usize, usize)],
 ) -> std::rc::Rc<[usize]> {
     let Some(w) = writes else {
         return std::rc::Rc::from([]);
@@ -2588,21 +2657,50 @@ fn js_assignment_seen(
         };
     }
     let before = w.events.partition_point(|e| e.visible <= pos);
-    let mut out = Vec::new();
-    for (read, e) in w.events[..before].iter().rev().enumerate() {
-        if read == JS_MAY_WRITES {
-            // Too many writes to order: every known write stays possible.
-            return w.known.clone().unwrap_or_else(|| std::rc::Rc::from([]));
-        }
-        if e.blind.is_some_and(|(a, b)| a <= pos && pos < b) {
-            continue;
-        }
-        if e.known {
-            out.push(e.anchor);
-        }
-        if e.covers.is_some_and(|b| ancestors.contains(&b)) {
+    let kill = ancestors
+        .iter()
+        .filter_map(|block| {
+            let covering = w.covering.get(block)?;
+            let end = covering.partition_point(|&i| i < before);
+            covering[..end]
+                .iter()
+                .rev()
+                .copied()
+                .find(|&i| !js_write_blind(&w.events[i], pos))
+        })
+        .max();
+    let mut out: Vec<_> = w.events[kill.unwrap_or(0)..before]
+        .iter()
+        .rev()
+        .filter(|e| e.known && !js_write_blind(e, pos))
+        .map(|e| e.anchor)
+        .collect();
+    for &(id, start, end) in loops {
+        let killed_inside = kill.is_some_and(|i| {
+            let event = &w.events[i];
+            event.anchor >= start
+                && event.anchor < end
+                && event.covers.is_some_and(|block| {
+                    let loop_at = ancestors.iter().position(|&a| a == id);
+                    let block_at = ancestors.iter().position(|&a| a == block);
+                    matches!((block_at, loop_at), (Some(b), Some(l)) if b <= l)
+                })
+        });
+        if killed_inside {
             break;
         }
+        let after = w.events[before..].partition_point(|e| e.visible < end) + before;
+        out.extend(
+            w.events[before..after]
+                .iter()
+                .rev()
+                .filter(|e| e.known && e.anchor >= start && e.anchor < end)
+                .map(|e| e.anchor),
+        );
+    }
+    if out.len() > 1 {
+        let mut seen = HashSet::new();
+        out.retain(|at| seen.insert(*at));
     }
     out.into()
 }
@@ -2624,8 +2722,8 @@ type JsDeclsByName = HashMap<String, std::rc::Rc<[usize]>>;
 struct JsScopeMemo<'t> {
     /// Shared, not copied, by every call that binds to them (wicked-estate#501).
     decls: HashMap<(usize, JsScopeRead), JsDeclsByName>,
-    /// A function body's or static block's writes ([`js_var_writes`]), by scope node id.
-    writes: HashMap<usize, HashMap<String, JsWrites>>,
+    /// One write walk per function body, static block or program, partitioned by owner (#504).
+    writes: HashMap<usize, JsWritesByScope>,
     /// A block-found binding's mutable scope, including `None`, read once per name (#505).
     mutable_scopes: HashMap<(usize, String), Option<tree_sitter::Node<'t>>>,
 }
@@ -2668,17 +2766,53 @@ fn js_scope_write_seen(
     call: tree_sitter::Node,
     crossed: bool,
 ) -> std::rc::Rc<[usize]> {
+    let mut root = n;
+    while root.kind() != "program" && root.kind() != "class_static_block" {
+        if root.kind() == "statement_block"
+            && root
+                .parent()
+                .is_some_and(|p| JS_FUNCTION_KINDS.contains(&p.kind()))
+        {
+            break;
+        }
+        match root.parent() {
+            Some(parent) => root = parent,
+            None => break,
+        }
+    }
     let writes = memo
         .writes
-        .entry(n.id())
-        .or_insert_with(|| js_var_writes(n, src));
+        .entry(root.id())
+        .or_insert_with(|| js_var_writes(root, src));
     let mut ancestors = Vec::new();
+    let mut loops = Vec::new();
+    let mut within_owner = true;
     let mut up = call.parent();
     while let Some(a) = up {
         ancestors.push(a.id());
+        if within_owner
+            && matches!(
+                a.kind(),
+                "for_statement" | "for_in_statement" | "while_statement" | "do_statement"
+            )
+        {
+            loops.push((a.id(), a.start_byte(), a.end_byte()));
+        }
+        if a.id() == n.id() {
+            within_owner = false;
+        }
+        if a.id() == root.id() {
+            break;
+        }
         up = a.parent();
     }
-    js_assignment_seen(writes.get(name), call.start_byte(), crossed, &ancestors)
+    js_assignment_seen(
+        writes.get(&n.id()).and_then(|scope| scope.get(name)),
+        call.start_byte(),
+        crossed,
+        &ancestors,
+        &loops,
+    )
 }
 
 /// The scope whose writes decide a block-found binding's value (wicked-estate#498): when every
@@ -2852,6 +2986,75 @@ fn js_local_binding<'t>(
         current = n.parent();
     }
     None
+}
+
+#[derive(Clone)]
+enum JsBindingTarget {
+    Definition(usize),
+    Module(String),
+    Unknown,
+}
+
+/// Joins a local write to its definition, following at most four identifier aliases (#494).
+struct JsBindingJoin<'a, 't> {
+    defs: &'a [DefRec],
+    defs_at: &'a HashMap<usize, Vec<usize>>,
+    root: tree_sitter::Node<'t>,
+    src: &'a [u8],
+    var_names: &'a HashSet<String>,
+    memo: &'a mut JsScopeMemo<'t>,
+    visiting: HashSet<usize>,
+}
+
+impl<'t> JsBindingJoin<'_, 't> {
+    fn resolve(&mut self, starts: &[usize], name: &str, depth: usize) -> JsBindingTarget {
+        if let Some(i) = starts.iter().find_map(|at| {
+            self.defs_at
+                .get(at)?
+                .iter()
+                .copied()
+                .find(|&i| self.defs[i].name == name)
+        }) {
+            return JsBindingTarget::Definition(i);
+        }
+        let [at] = starts else {
+            return JsBindingTarget::Unknown;
+        };
+        if depth == 4 || !self.visiting.insert(*at) {
+            return JsBindingTarget::Unknown;
+        }
+        let result = self.alias(*at).map(|value| {
+            let Ok(name) = value.utf8_text(self.src) else {
+                return JsBindingTarget::Unknown;
+            };
+            match js_local_binding(value, name, self.src, self.var_names, self.memo) {
+                Some(starts) => self.resolve(&starts, name, depth + 1),
+                None => JsBindingTarget::Module(name.to_string()),
+            }
+        });
+        self.visiting.remove(at);
+        result.unwrap_or(JsBindingTarget::Unknown)
+    }
+
+    fn alias(&self, at: usize) -> Option<tree_sitter::Node<'t>> {
+        let mut n = self.root.descendant_for_byte_range(at, at)?;
+        while n.start_byte() == at {
+            let fields = match n.kind() {
+                "variable_declarator" => Some(("name", "value")),
+                "assignment_expression" => Some(("left", "right")),
+                _ => None,
+            };
+            if let Some((target, value)) = fields {
+                if js_write_target(n.child_by_field_name(target)?).kind() != "identifier" {
+                    return None;
+                }
+                let value = js_write_target(n.child_by_field_name(value)?);
+                return (value.kind() == "identifier").then_some(value);
+            }
+            n = n.parent()?;
+        }
+        None
+    }
 }
 
 /// Extract local-name→module and alias→original-name maps from a single import match given the
@@ -4575,6 +4778,15 @@ impl Extractor for TreeSitterExtractor {
                     Location::new(&file.path, p.span),
                 );
                 node.signature = p.signature.clone();
+                if js_family
+                    && tree
+                        .root_node()
+                        .descendant_for_byte_range(p.start, p.end)
+                        .is_some_and(|anchor| js_definition_is_local(anchor, &p.kind))
+                {
+                    node.metadata
+                        .insert("js_scope".to_string(), serde_json::json!("local"));
+                }
                 // Is this unit real behaviour, or a stub, a data shape or test support? Read by
                 // wicked-core's requirements denominator (core#1375, #1235).
                 if let Some(b) = crate::behaviour::classify(
@@ -4891,7 +5103,7 @@ impl Extractor for TreeSitterExtractor {
                 defs_at.entry(d.start).or_default().push(i);
             }
         }
-        let mut joined: HashMap<(usize, usize, String), Option<usize>> = HashMap::new();
+        let mut joined: HashMap<(usize, usize, String), JsBindingTarget> = HashMap::new();
         for (name, ek, pos, span) in raw_refs {
             // Import refs don't need enclosing attribution — attributed to file.
             // Heritage refs: attributed to the enclosing type (or file if none).
@@ -4909,32 +5121,43 @@ impl Extractor for TreeSitterExtractor {
             } else {
                 None
             };
-            let name = if let Some(starts) = local_binding {
-                // The definition the binding IS: anchored exactly at a declaring node.
+            let target = local_binding.map(|starts| {
                 let key = (starts.as_ptr() as usize, starts.len(), name.clone());
-                let bound = *joined.entry(key).or_insert_with(|| {
-                    starts.iter().find_map(|at| {
-                        defs_at
-                            .get(at)?
-                            .iter()
-                            .copied()
-                            .find(|&i| defs[i].name == name)
+                joined
+                    .entry(key)
+                    .or_insert_with(|| {
+                        JsBindingJoin {
+                            defs: &defs,
+                            defs_at: &defs_at,
+                            root: tree.root_node(),
+                            src,
+                            var_names: &js_vars,
+                            memo: &mut js_scopes,
+                            visiting: HashSet::new(),
+                        }
+                        .resolve(starts, &name, 0)
                     })
-                });
-                let bound = bound.map(|i| &defs[i]);
-                match bound {
-                    Some(d) => format!("{LOCAL_BINDING_PREFIX}{name}:{}", d.symbol.as_str()),
-                    None => format!("{LOCAL_BINDING_PREFIX}{name}"),
+                    .clone()
+            });
+            let name = match target {
+                Some(JsBindingTarget::Definition(i)) => {
+                    format!("{LOCAL_BINDING_PREFIX}{name}:{}", defs[i].symbol.as_str())
                 }
-            } else if let Some(original) = file_import_aliases
-                .get(&name)
-                .filter(|_| ek == EdgeKind::Calls)
-            {
-                // Preserve both names without letting name-only tiers (including back-fill,
-                // which loses the module hint) bind either to a global homonym (#486).
-                format!("{IMPORT_ALIAS_PREFIX}{name}:{original}")
-            } else {
-                name
+                Some(JsBindingTarget::Unknown) => format!("{LOCAL_BINDING_PREFIX}{name}"),
+                target => {
+                    let name = match target {
+                        Some(JsBindingTarget::Module(name)) => name,
+                        _ => name,
+                    };
+                    if let Some(original) = file_import_aliases
+                        .get(&name)
+                        .filter(|_| ek == EdgeKind::Calls)
+                    {
+                        format!("{IMPORT_ALIAS_PREFIX}{name}:{original}")
+                    } else {
+                        name
+                    }
+                }
             };
             let mut r = UnresolvedRef::new(from, name, ek.clone(), Location::new(&file.path, span));
             // Attach import hints to Calls refs so the ImportMapResolver can use them.
@@ -5665,6 +5888,95 @@ mod tests {
             path: path.into(),
             language: Language::new(lang),
             text: text.into(),
+        }
+    }
+
+    /// #504: nested mutable bindings share one root walk and retain their own writes.
+    #[test]
+    fn nested_mutable_scopes_share_one_write_walk() {
+        let code = b"function F() { let Card = () => null; Card(); \
+                     { let Card = null; Card(); \
+                     { let Card = () => null; Card(); } } }";
+        let ex = TreeSitterExtractor::for_language("tsx").unwrap();
+        let mut parser = Parser::new();
+        parser.set_language(&ex.language).unwrap();
+        let tree = parser.parse(code, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let mut stack = vec![tree.root_node()];
+        let mut calls = Vec::new();
+        while let Some(n) = stack.pop() {
+            if n.kind() == "call_expression" {
+                calls.push(n.child_by_field_name("function").unwrap());
+            }
+            let mut walk = n.walk();
+            stack.extend(n.named_children(&mut walk));
+        }
+        calls.sort_by_key(|n| n.start_byte());
+        assert_eq!(calls.len(), 3);
+        let mut memo = JsScopeMemo::default();
+        let vars = HashSet::new();
+        let bindings: Vec<_> = calls
+            .into_iter()
+            .map(|n| js_local_binding(n, "Card", code, &vars, &mut memo).unwrap())
+            .collect();
+        assert_eq!(memo.writes.len(), 1, "one walk for the function root");
+        for (starts, value) in bindings.iter().zip(["() => null", "null", "() => null"]) {
+            assert_eq!(starts.len(), 1);
+            let mut n = tree
+                .root_node()
+                .descendant_for_byte_range(starts[0], starts[0])
+                .unwrap();
+            while n.kind() != "variable_declarator" {
+                n = n.parent().unwrap();
+            }
+            assert_eq!(
+                n.child_by_field_name("value")
+                    .unwrap()
+                    .utf8_text(code)
+                    .unwrap(),
+                value,
+            );
+        }
+    }
+
+    /// #495: only definitions hidden from module lookup carry js_scope.
+    #[test]
+    fn js_local_definition_metadata_excludes_module_and_member_definitions() {
+        for lang in ["javascript", "typescript", "tsx"] {
+            let code = "function Top() {} \
+                        { var Hoisted = () => null; let Block = () => null; } \
+                        function Outer() { function Inner() {} class Local {} \
+                        var Body = () => null; } \
+                        class C { method() {} field = () => null; \
+                        static { var Static = () => null; } }";
+            let ex = TreeSitterExtractor::for_language(lang)
+                .unwrap()
+                .extract(&sf("src/p.tsx", lang, code))
+                .unwrap();
+            for name in ["Block", "Inner", "Local", "Body", "Static"] {
+                let n = ex.nodes.iter().find(|n| n.name == name).unwrap();
+                assert_eq!(
+                    n.metadata["js_scope"].as_str(),
+                    Some("local"),
+                    "{lang}: {name}"
+                );
+            }
+            for name in ["Top", "Hoisted", "Outer", "C", "method", "field"] {
+                let n = ex.nodes.iter().find(|n| n.name == name).unwrap();
+                assert!(!n.metadata.contains_key("js_scope"), "{lang}: {name}");
+            }
+        }
+        let ex = TreeSitterExtractor::for_language("typescript")
+            .unwrap()
+            .extract(&sf(
+                "src/p.ts",
+                "typescript",
+                "namespace N { export function Member() {} export const Value = () => null; }",
+            ))
+            .unwrap();
+        for name in ["Member", "Value"] {
+            let n = ex.nodes.iter().find(|n| n.name == name).unwrap();
+            assert!(!n.metadata.contains_key("js_scope"), "{name}");
         }
     }
 
@@ -7371,8 +7683,7 @@ export function N9() { return Card(); }
                 .collect()
         };
         for p in [
-            "/P1(", "/P2(", "/P3(", "/P4(", "/P5(", "/P6(", "/P7(", "/P8(", "/P9(", "/PA(", "/PB(",
-            "/PC(", "/PD(",
+            "/P1(", "/P2(", "/P3(", "/P4(", "/P5(", "/P7(", "/P8(", "/P9(", "/PB(", "/PC(", "/PD(",
         ] {
             let got = names(p);
             assert!(
@@ -7380,12 +7691,13 @@ export function N9() { return Card(); }
                 "{p}: the callee is a local value binding: {got:?}"
             );
         }
-        // A class static block is a `var` scope of its own (#492).
-        let got = names("/PE");
-        assert!(
-            got.iter().any(|n| n == "local-binding:Card"),
-            "a static-block var is local to the block: {got:?}"
-        );
+        for p in ["/P6(", "/PA(", "/PE"] {
+            assert_eq!(
+                names(p),
+                vec!["Top"],
+                "{p}: identifier aliases follow Top (#494)",
+            );
+        }
         for n in [
             "/N1(", "/N2(", "/N3(", "/N4(", "/N5(", "/N6(", "/N7(", "/N9(",
         ] {
