@@ -81,7 +81,7 @@ impl Resolver for NameResolver {
             // Kind admissibility (D1) runs PRE-uniqueness — deliberately recall-widening:
             // dropping a deny-listed homonym (e.g. an html type_alias) can make a legitimate
             // same-family callable unique. Every edge this mints is measured (Q4b).
-            candidates.retain(|n| admissible_target(&r.kind, n));
+            candidates.retain(|n| admissible_target(&r.kind, n) && visible_by_name(&r.kind, n));
             // Unique resolution only — ambiguity is deferred to a precise tier (W2.2+).
             if let [only] = candidates.as_slice() {
                 if only.symbol != r.from {
@@ -137,6 +137,14 @@ fn bind_local(r: &UnresolvedRef, index: &dyn SymbolIndex) -> Option<wicked_estat
     let (_, symbol) = rest.split_once(':')?;
     let target = index.get(&wicked_estate_core::SymbolId(symbol.to_string()))?;
     (target.symbol != r.from && admissible_target(&r.kind, &target)).then_some(target)
+}
+
+/// A nested JS definition is reachable only through its local binding (wicked-estate#495): the
+/// extractor's scope walk runs for calls, so a call that names one by name is out of its scope.
+/// Other ref kinds (a local class's `extends Local`) are not walked and keep name resolution.
+fn visible_by_name(kind: &EdgeKind, cand: &wicked_estate_core::Node) -> bool {
+    !matches!(kind, EdgeKind::Calls)
+        || cand.metadata.get("js_scope").and_then(|v| v.as_str()) != Some("local")
 }
 
 /// Parent directory of a file path, or `""` when the path has no separator (a root-level file).
@@ -363,7 +371,7 @@ impl Resolver for ScopedNameResolver {
             let mut candidates = index.by_name(&r.raw_name);
 
             // Kind admissibility (D1): Import nodes are never targets, for any ref kind.
-            candidates.retain(|n| admissible_target(&r.kind, n));
+            candidates.retain(|n| admissible_target(&r.kind, n) && visible_by_name(&r.kind, n));
 
             // For method-like edge kinds, narrow the pool to callable nodes.
             if matches!(r.kind, EdgeKind::Calls) {
@@ -606,7 +614,7 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
             let ref_dir = dir_of(r.location.file.as_str());
             let module_candidates = |name: &str| {
                 let mut candidates = index.by_name(name);
-                candidates.retain(|n| admissible_target(&r.kind, n));
+                candidates.retain(|n| admissible_target(&r.kind, n) && visible_by_name(&r.kind, n));
                 candidates.retain(|n| is_callable(&n.kind));
                 candidates.retain(|n| n.symbol != r.from); // no self-edges
                 candidates.retain(|n| family_compatible(index, from_fam.as_deref(), n));
@@ -1629,6 +1637,101 @@ mod tests {
             Language::new("typescript"),
             Location::new(file, Span::ZERO),
         )
+    }
+
+    #[test]
+    fn name_tiers_skip_local_js_definitions_but_exact_binding_reaches_them() {
+        let mut local = fn_node_at("Card", "src/caller.tsx");
+        local
+            .metadata
+            .insert("js_scope".to_string(), serde_json::json!("local"));
+        let index = VecIndex(vec![local.clone()]);
+        let mut r = import_ref("Page", "src/caller.tsx", "Card", "./caller");
+        for resolver in [
+            &NameResolver as &dyn Resolver,
+            &ScopedNameResolver,
+            &ImportMapResolver,
+        ] {
+            assert!(
+                resolver
+                    .resolve(std::slice::from_ref(&r), &index)
+                    .unwrap()
+                    .is_empty(),
+                "{} must exclude a local JS definition by name",
+                resolver.id(),
+            );
+        }
+        r.raw_name = format!("local-binding:Card:{}", local.symbol);
+        let edges = ScopedNameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, local.symbol);
+        assert_eq!(edges[0].metadata["scope"], "local-binding");
+    }
+
+    #[test]
+    fn local_js_definitions_stay_reachable_for_non_call_refs() {
+        // The scope walk runs for calls only: a local class's `extends Local` keeps name
+        // resolution (#495).
+        let mut local = node_kind_lang("Local", "Local", "src/p.ts", "typescript", NodeKind::Class);
+        local
+            .metadata
+            .insert("js_scope".to_string(), serde_json::json!("local"));
+        let index = VecIndex(vec![local.clone()]);
+        let mut r = import_ref("Child", "src/p.ts", "Local", "./p");
+        r.kind = EdgeKind::Extends;
+        let edges = ScopedNameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, local.symbol);
+    }
+
+    #[test]
+    fn name_tiers_filter_local_js_definitions_before_uniqueness() {
+        let global = fn_node_at("Card", "src/caller.tsx");
+        let mut local = global.clone();
+        local.symbol =
+            Symbol::global("test", None, vec![Descriptor::method("nested_Card", None)]).id();
+        local
+            .metadata
+            .insert("js_scope".to_string(), serde_json::json!("local"));
+        let index = VecIndex(vec![global.clone(), local]);
+        let r = import_ref("Page", "src/caller.tsx", "Card", "./caller");
+        for resolver in [
+            &NameResolver as &dyn Resolver,
+            &ScopedNameResolver,
+            &ImportMapResolver,
+        ] {
+            let edges = resolver.resolve(std::slice::from_ref(&r), &index).unwrap();
+            assert_eq!(
+                edges.len(),
+                1,
+                "{} must filter before uniqueness",
+                resolver.id(),
+            );
+            assert_eq!(edges[0].target, global.symbol);
+        }
+    }
+
+    #[test]
+    fn import_alias_excludes_local_js_for_original_and_export_alias() {
+        let mut original = fn_node_at("Actual", "src/a.tsx");
+        original
+            .metadata
+            .insert("js_scope".to_string(), serde_json::json!("local"));
+        let mut fallback = fn_node_at("Card", "src/a.tsx");
+        let mut r = import_ref("Page", "src/caller.tsx", "Card", "./a");
+        r.raw_name = "import-alias:Card:Actual".to_string();
+        let index = VecIndex(vec![original.clone(), fallback.clone()]);
+        let edges = ImportMapResolver
+            .resolve(std::slice::from_ref(&r), &index)
+            .unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, fallback.symbol);
+
+        fallback
+            .metadata
+            .insert("js_scope".to_string(), serde_json::json!("local"));
+        let index = VecIndex(vec![original, fallback]);
+        assert!(ImportMapResolver.resolve(&[r], &index).unwrap().is_empty());
     }
 
     #[test]
