@@ -88,16 +88,24 @@ impl BudgetAlloc {
     }
 
     fn charge(&self, delta: isize, limit: usize) -> bool {
-        let charged = self
-            .live
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
-                live.checked_add(delta)
-                    .filter(|&next| delta <= 0 || next <= limit as isize)
-            });
-        if charged.is_err() {
-            self.refused.store(true, Ordering::Relaxed);
+        // A compare-exchange loop (not `fetch_update`, deprecated on current stable).
+        let mut live = self.live.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = live
+                .checked_add(delta)
+                .filter(|&next| delta <= 0 || next <= limit as isize)
+            else {
+                self.refused.store(true, Ordering::Relaxed);
+                return false;
+            };
+            match self
+                .live
+                .compare_exchange_weak(live, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return true,
+                Err(actual) => live = actual,
+            }
         }
-        charged.is_ok()
     }
 }
 
