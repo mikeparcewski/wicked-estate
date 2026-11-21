@@ -7357,8 +7357,17 @@ mod semantics_survive_reindex_tests {
         let src = tempfile::tempdir().unwrap();
         let dbdir = tempfile::tempdir().unwrap();
         let db = dbdir.path().join("graph.db");
-        write_pipeline_fixture(src.path(), "first/a.rs", "fn a(value: u32) {}\n");
-        write_pipeline_fixture(src.path(), "caller/c.rs", "fn caller() { a(1); }\n");
+        // Value-flow parameter nodes are minted for JS/TS (the flow.parameter captures).
+        write_pipeline_fixture(
+            src.path(),
+            "first/a.ts",
+            "export function a(value: number) { return value; }\n",
+        );
+        write_pipeline_fixture(
+            src.path(),
+            "caller/c.ts",
+            "export function caller() { return a(1); }\n",
+        );
         let mut store = SqliteStore::open(&db).unwrap();
         index_path(&mut store, src.path()).unwrap();
         assert!(
@@ -7368,7 +7377,11 @@ mod semantics_survive_reindex_tests {
                 .any(|node| node.name == "value" && node.is_value_flow_node())
         );
 
-        write_pipeline_fixture(src.path(), "second/b.rs", "fn b(value: u32) {}\n");
+        write_pipeline_fixture(
+            src.path(),
+            "second/b.ts",
+            "export function b(value: number) { return value; }\n",
+        );
         TEST_REBIND_FILES.with(|count| count.set(0));
         index_path(&mut store, src.path()).unwrap();
         TEST_REBIND_FILES.with(|count| assert_eq!(count.get(), 0));
