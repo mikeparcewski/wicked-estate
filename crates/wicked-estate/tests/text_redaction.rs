@@ -85,7 +85,7 @@ fn ensure_redacted_cleans_text_even_with_current_code_epoch() {
     let path = dir.path().join("memory.db");
     old_store(&path);
     let mut store = SqliteStore::open(path.to_str().unwrap()).unwrap();
-    let RedactionOutcome::TextMigrated(report) = ensure_redacted(&mut store).unwrap() else {
+    let RedactionOutcome::Migrated(report) = ensure_redacted(&mut store).unwrap() else {
         panic!("legacy text must migrate despite the fresh code epoch");
     };
     assert!(report.nodes_rewritten > 0);

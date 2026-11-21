@@ -1055,10 +1055,9 @@ pub enum RedactionOutcome {
     Current,
     /// A store with no code graph yet: the policy epoch was recorded.
     Fresh,
-    /// Text written before the policy was cleaned in place.
+    /// Text written before the policy was cleaned in place: a code graph's file texts and
+    /// columns, or a memory/knowledge store's node text (#406; `files_marked` is 0 there).
     Migrated(wicked_estate_store::RedactionReport),
-    /// Memory/knowledge text written before the free-text policy was cleaned in place.
-    TextMigrated(wicked_estate_store::RedactionReport),
     /// Already migrated; the leftover physical cleanup (WAL truncate + VACUUM) was retried.
     /// `true` when it completed.
     CleanupRetried(bool),
@@ -1097,7 +1096,7 @@ pub fn ensure_redacted(store: &mut dyn GraphStoreMutExt) -> Result<RedactionOutc
                  rewritten; WAL truncated: {}",
                 rep.nodes_rewritten, rep.rows_scrubbed, rep.wal_truncated,
             );
-            return Ok(RedactionOutcome::TextMigrated(rep));
+            return Ok(RedactionOutcome::Migrated(rep));
         }
         store.meta_put(TEXT_REDACTION_EPOCH_KEY, &TEXT_REDACTION_EPOCH.to_string())?;
     }
