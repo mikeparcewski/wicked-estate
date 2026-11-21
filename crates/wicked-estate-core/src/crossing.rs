@@ -7,7 +7,7 @@
 //! (`via_crossing`), derived from ONE predecessor chain per dependent (smallest depth, then edge
 //! kind, then symbol id: deterministic).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,62 @@ use crate::{Edge, query::Subgraph};
 
 /// `resolved_by` of every edge the project linker writes.
 pub const LINK_RESOLVED_BY: &str = "wicked-link";
+
+/// Maximum predecessor edges listed on one blast-radius row.
+pub const VIA_CAP: usize = 3;
+
+/// A real dependency edge from a blast-radius row to the immediately inner ring.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViaEdge {
+    pub id: String,
+    /// The edge kind in its wire form (`"calls"`, `{"other": "<tag>"}`), as `path --json` hops.
+    pub kind: crate::EdgeKind,
+}
+
+/// Project walked edges onto the answer's union depths. Only targets a client can place (a
+/// returned row or a start) qualify. Deduplicate across walks, order by edge kind (its declaration
+/// order: total and stable) then target id, and count every edge omitted by the per-row cap.
+/// Structural edges participate too: `contains` is how a File row entered the answer.
+pub fn predecessor_edges(
+    edges: &[Edge],
+    depth_of_row: &BTreeMap<String, u32>,
+    starts: &BTreeSet<String>,
+    cap: usize,
+) -> BTreeMap<String, (Vec<ViaEdge>, usize)> {
+    let mut by_row: BTreeMap<String, BTreeSet<(crate::EdgeKind, String)>> = BTreeMap::new();
+    for e in edges {
+        let Some(&depth) = depth_of_row.get(e.source.as_str()) else {
+            continue;
+        };
+        let Some(target_depth) = (if starts.contains(e.target.as_str()) {
+            Some(0)
+        } else {
+            depth_of_row.get(e.target.as_str()).copied()
+        }) else {
+            continue;
+        };
+        if depth.checked_sub(1) != Some(target_depth) {
+            continue;
+        }
+        by_row
+            .entry(e.source.0.clone())
+            .or_default()
+            .insert((e.kind.clone(), e.target.0.clone()));
+    }
+    depth_of_row
+        .keys()
+        .map(|id| {
+            let edges = by_row.remove(id).unwrap_or_default();
+            let omitted = edges.len().saturating_sub(cap);
+            let via = edges
+                .into_iter()
+                .take(cap)
+                .map(|(kind, id)| ViaEdge { id, kind })
+                .collect();
+            (id.clone(), (via, omitted))
+        })
+        .collect()
+}
 
 /// One end of a crossing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +316,69 @@ mod tests {
                 .insert("link.identity".into(), "registry-source".into());
         }
         e
+    }
+
+    #[test]
+    fn predecessor_edges_keep_only_inner_rows_dedup_sort_and_cap() {
+        let depths = BTreeMap::from([
+            ("a".into(), 1),
+            ("b".into(), 1),
+            ("c".into(), 2),
+            ("file".into(), 2),
+        ]);
+        let starts = std::collections::BTreeSet::from(["t".to_string()]);
+        let mut edges = vec![
+            edge("a", "t", false),
+            edge("b", "t", false),
+            edge("c", "b", false),
+            edge("c", "a", false),
+            edge("c", "a", false), // the same edge returned by another walk
+            edge("a", "c", false), // cycle: points outwards
+            edge("a", "b", false), // same ring
+            edge("c", "transit", false), // dropped import-transit File
+        ];
+        let mut contains = edge("file", "a", false);
+        contains.kind = EdgeKind::Contains;
+        edges.push(contains);
+        let via = predecessor_edges(&edges, &depths, &starts, VIA_CAP);
+        assert_eq!(
+            serde_json::to_value(&via["c"].0).unwrap(),
+            serde_json::json!([
+                {"id": "a", "kind": "imports"},
+                {"id": "b", "kind": "imports"},
+            ])
+        );
+        assert_eq!(via["c"].1, 0);
+        for id in ["a", "b"] {
+            assert_eq!(
+                serde_json::to_value(&via[id].0).unwrap(),
+                serde_json::json!([{"id": "t", "kind": "imports"}])
+            );
+        }
+        assert_eq!(via["file"].0[0].kind, EdgeKind::Contains);
+
+        let mut depths = depths;
+        for id in ["d", "e", "f"] {
+            depths.insert(id.into(), 1);
+            edges.push(edge("c", id, false));
+        }
+        // Kind order wins before target id order; the different kind is not a duplicate.
+        let mut call = edge("c", "b", false);
+        call.kind = EdgeKind::Calls;
+        edges.push(call);
+        let via = predecessor_edges(&edges, &depths, &starts, VIA_CAP);
+        assert_eq!(
+            serde_json::to_value(&via["c"].0).unwrap(),
+            serde_json::json!([
+                {"id": "b", "kind": "calls"},
+                {"id": "a", "kind": "imports"},
+                {"id": "b", "kind": "imports"},
+            ])
+        );
+        assert_eq!(via["c"].1, 3);
+        let none = predecessor_edges(&edges, &depths, &starts, 0);
+        assert!(none["c"].0.is_empty());
+        assert_eq!(none["c"].1, 6);
     }
 
     /// G1.7 / G2.1: the crossing names the link edge and its evidence; dependents past it carry

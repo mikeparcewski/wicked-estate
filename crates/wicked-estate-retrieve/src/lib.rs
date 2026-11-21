@@ -1225,7 +1225,8 @@ impl RetrievalTool for Path {
 /// **Response `content` shape**
 /// ```json
 /// { "dependents": [ { "symbol": "…", "name": "…", "kind": "…", "file": "…",
-///                     "line": 11, "line_1based": 12, "depth": 1 }, … ],
+///                     "line": 11, "line_1based": 12, "depth": 1,
+///                     "via": [{"id": "…", "kind": "calls"}], "via_omitted": 0 }, … ],
 ///   "total": 5, "truncated": false, "next_cursor": null,
 ///   "page": { "from": 0, "count": 5, "total": 5 },
 ///   "unresolved_callers": 2,
@@ -1321,13 +1322,14 @@ impl RetrievalTool for BlastRadius {
         let mut subgraph = wicked_estate_core::Subgraph::default();
         let mut start_nodes: Vec<Node> = Vec::new();
         let mut dependent_nodes: Vec<Node> = Vec::new();
-        let mut dependent_depths: HashMap<String, u32> = HashMap::new();
+        let mut dependent_depths: BTreeMap<String, u32> = BTreeMap::new();
         let mut seen_nodes: HashSet<SymbolId> = HashSet::new();
         let mut crossing_set = wicked_estate_core::crossing::CrossingSet::default();
         // The dependency evidence behind the answer, deduped across walks (two same-named
         // starts can share a caller) — the CLI's `blast_radius_by_name` rule, so both surfaces
         // state one confidence for one answer.
         let mut evidence: HashMap<(SymbolId, SymbolId, EdgeKind), f32> = HashMap::new();
+        let mut row_edges = HashMap::new();
         for start in &starts {
             let mut sub = store.traverse(start, &spec)?;
             let start_node = store.get_node(start)?;
@@ -1355,6 +1357,11 @@ impl RetrievalTool for BlastRadius {
                 .chain(std::iter::once(start))
                 .collect();
             for e in &sub.edges {
+                if rows.contains(&e.source) {
+                    row_edges
+                        .entry((e.source.clone(), e.target.clone(), e.kind.clone()))
+                        .or_insert_with(|| e.clone());
+                }
                 if !matches!(e.kind, EdgeKind::Contains | EdgeKind::Defines)
                     && rows.contains(&e.source)
                     && reached.contains(&e.target)
@@ -1426,6 +1433,13 @@ impl RetrievalTool for BlastRadius {
         // envelope and each row carries its own `via_crossing`.
         let (crossings, crossings_total, via) =
             crossing_set.finish(wicked_estate_core::crossing::CROSSINGS_CAP);
+        let start_ids = starts.iter().map(|s| s.0.clone()).collect();
+        let predecessor_edges = wicked_estate_core::crossing::predecessor_edges(
+            &row_edges.into_values().collect::<Vec<_>>(),
+            &dependent_depths,
+            &start_ids,
+            wicked_estate_core::crossing::VIA_CAP,
+        );
         let mut dependents: Vec<Value> = dependent_nodes
             .iter()
             .map(|n| {
@@ -1441,6 +1455,10 @@ impl RetrievalTool for BlastRadius {
                     "line": n.location.span.start_line,
                     "line_1based": line_1based(n),
                     "depth": depth,
+                    "via": predecessor_edges.get(n.symbol.as_str())
+                        .map(|(edges, _)| edges.as_slice()).unwrap_or(&[]),
+                    "via_omitted": predecessor_edges.get(n.symbol.as_str())
+                        .map_or(0, |(_, omitted)| *omitted),
                 });
                 if let Some(c) = via.get(n.symbol.as_str()) {
                     row["via_crossing"] = json!(c);
@@ -1520,6 +1538,7 @@ impl RetrievalTool for BlastRadius {
         let diag_len: usize = diag.iter().map(|d| d.len() + 1).sum::<usize>() + coverage_note.len();
         let envelope_overhead = 640
             + DIAGNOSTICS_RESERVE
+            + LINK_RESERVE
             + diag_len
             + crossings_json.to_string().len()
             + serde_json::to_string(&summary)
@@ -2153,6 +2172,9 @@ pub const R4_CHAR_BUDGET: usize = 25_000;
 /// Every capped tool reserves it (`cap_rows_to_budget`); a transport that sizes its own reply
 /// (the CLI's `blast-radius`) reserves it too.
 pub const TRANSPORT_RESERVE: usize = 700;
+
+/// Room BlastRadius leaves for the live project-link block added by the transport after caching.
+pub const LINK_RESERVE: usize = 1_500;
 
 /// Headroom for Lineage's non-array keys: `total`, `truncated`, the three #222 horizon keys,
 /// `confidence` (two f32s rendered at full precision plus `edge_count`), the `flows` key, and the
@@ -5127,6 +5149,39 @@ mod tests {
         store.upsert_edges(&edges).unwrap();
         store.commit_batch().unwrap();
         store
+    }
+
+    #[test]
+    fn blast_radius_diamond_rows_carry_all_predecessor_edges() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let nodes: Vec<Node> = ["t", "a", "b", "c"]
+            .iter()
+            .map(|id| make_node(id, id, NodeKind::Function, "diamond.rs", 0))
+            .collect();
+        store.upsert_nodes(&nodes).unwrap();
+        store
+            .upsert_edges(&[
+                make_call_edge("a", "t"),
+                make_call_edge("b", "t"),
+                make_call_edge("c", "a"),
+                make_call_edge("c", "b"),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+        let r = BlastRadius.invoke(&store, &json!({"symbol": "t"})).unwrap();
+        let rows = r.content["dependents"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        for id in ["a", "b", "c"] {
+            let row = rows.iter().find(|row| row["symbol"] == id).unwrap();
+            let expected = if id == "c" {
+                json!([{"id": "a", "kind": "calls"}, {"id": "b", "kind": "calls"}])
+            } else {
+                json!([{"id": "t", "kind": "calls"}])
+            };
+            assert_eq!(row["via"], expected, "{row}");
+            assert_eq!(row["via_omitted"], 0, "{row}");
+        }
     }
 
     /// X1 review K1: the MCP answer carries the crossing a walk traversed and names it on the

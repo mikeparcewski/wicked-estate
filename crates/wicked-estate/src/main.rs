@@ -1419,12 +1419,7 @@ fn main() -> Result<()> {
             // X1 (DES-S2 §5, §6): the state of every project link in this store — generation,
             // staleness and a per-member coverage summary (`link --status` lists the packages).
             // Built first so the row budget counts it (crew's capped read must stay parseable).
-            let links: Vec<wicked_estate::link::LinkStatus> =
-                wicked_estate::link::projects(store.as_ref())
-                    .iter()
-                    .filter_map(|p| wicked_estate::link::status(store.as_ref(), p))
-                    .map(wicked_estate::link::LinkStatus::compact)
-                    .collect();
+            let links = wicked_estate::link::answer_statuses(store.as_ref());
             let links_json = serde_json::json!(links);
             let links_len = links_json.to_string().len() + 10;
             let (mut kept, _) = cap_blast_radius_rows(name, unresolved, &br, depth, links_len);
@@ -1638,6 +1633,8 @@ fn main() -> Result<()> {
             });
             if json_out {
                 let mut doc = path_json(from, to, &result);
+                doc["link"] =
+                    serde_json::json!(wicked_estate::link::answer_statuses(store.as_ref()));
                 doc["resolved"] = serde_json::json!(miss.is_none());
                 if let Some((operand, (found, truncated))) = &miss {
                     wicked_estate_retrieve::suggest::mark_miss(
@@ -4594,6 +4591,9 @@ fn blast_radius_row(
         // (#191) Hops from the target along the walk that admitted the row — `1` is a direct
         // dependent. The MCP `BlastRadius` tool has always returned it; the CLI row now does too.
         "depth": br.depths.get(n.symbol.as_str()).copied().unwrap_or(0),
+        "via": br.via.get(n.symbol.as_str())
+            .map(|(edges, _)| edges.as_slice()).unwrap_or(&[]),
+        "via_omitted": br.via.get(n.symbol.as_str()).map_or(0, |(_, omitted)| *omitted),
         // X1: the crossing (another repo, through a package link) this dependent was reached by;
         // `via_crossing_omitted` when that crossing is past the listed cap.
         "via_crossing": br.via_crossing.get(n.symbol.as_str()),
