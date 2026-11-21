@@ -212,10 +212,9 @@ fn dispatch_ingest(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, n
         .unwrap_or("");
     if replace_source {
         return match knowledge.ingest_replacing(&title, &chunks, scope, source, now) {
-            Ok((doc_id, report)) => mcp_result(
-                id,
-                json!({"doc_id": doc_id, "replaced": report.forgotten}),
-            ),
+            Ok((doc_id, report)) => {
+                mcp_result(id, json!({"doc_id": doc_id, "replaced": report.forgotten}))
+            }
             Err(error) => json_rpc_error(id, -32603, &error.to_string()),
         };
     }

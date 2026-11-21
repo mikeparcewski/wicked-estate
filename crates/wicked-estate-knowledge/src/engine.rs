@@ -510,7 +510,9 @@ impl KnowledgeEngine {
                         || Symbol::synthetic(kn.class.as_kind(), id.as_str()).id() == node.symbol
                 }
                 ForgetTarget::Source(source) => {
-                    node.metadata.get(meta_keys::SOURCE).and_then(|value| value.as_str())
+                    node.metadata
+                        .get(meta_keys::SOURCE)
+                        .and_then(|value| value.as_str())
                         == Some(source.as_str())
                 }
                 ForgetTarget::ScopePrefix(prefix) => scope_in_prefix(&kn.scope, prefix),
@@ -1028,13 +1030,23 @@ mod tests {
     fn forget_id_cascades_chunks_and_is_idempotent() {
         let mut eng = KnowledgeEngine::in_memory().unwrap();
         let (doc, chunks) = eng
-            .ingest("old document", &["obsolete quasar".into()], "topic:sqlite", "s", 1)
+            .ingest(
+                "old document",
+                &["obsolete quasar".into()],
+                "topic:sqlite",
+                "s",
+                1,
+            )
             .unwrap();
         let report = eng.forget(&ForgetTarget::Id(doc.0.clone())).unwrap();
         assert_eq!(report.forgotten, 2);
         assert!(eng.node(&doc).unwrap().is_none());
         assert!(eng.node(&chunks[0]).unwrap().is_none());
-        assert!(eng.recall("obsolete quasar", 1000, None, 2).unwrap().is_empty());
+        assert!(
+            eng.recall("obsolete quasar", 1000, None, 2)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(eng.forget(&ForgetTarget::Id(doc.0)).unwrap().forgotten, 0);
 
         let kn = KNode::new(KClass::Concept, "uuid target", "", "", 1);
@@ -1048,10 +1060,22 @@ mod tests {
         let mut eng = KnowledgeEngine::in_memory().unwrap();
         let citation = "repo:packages/crew/src/core/adapter.ts";
         let first = eng
-            .write(&KNode::new(KClass::Chunk, "first", "topic:sqlite", citation, 1))
+            .write(&KNode::new(
+                KClass::Chunk,
+                "first",
+                "topic:sqlite",
+                citation,
+                1,
+            ))
             .unwrap();
         let sibling = eng
-            .write(&KNode::new(KClass::Chunk, "sibling", "topic:sqlite-wal", "other", 1))
+            .write(&KNode::new(
+                KClass::Chunk,
+                "sibling",
+                "topic:sqlite-wal",
+                "other",
+                1,
+            ))
             .unwrap();
         let child = eng
             .write(&KNode::new(
@@ -1069,8 +1093,8 @@ mod tests {
             NodeKind::Other(crate::source::SOURCE_MANIFEST_KIND.into()),
             NodeKind::Other(crate::shape::APPLY_JOURNAL_KIND.into()),
         ] {
-            let mut node = KNode::new(KClass::Chunk, "protected", "topic:sqlite", citation, 1)
-                .to_node();
+            let mut node =
+                KNode::new(KClass::Chunk, "protected", "topic:sqlite", citation, 1).to_node();
             node.kind = kind;
             protected.push(node.symbol.clone());
             eng.store.upsert_nodes(&[node]).unwrap();
@@ -1096,7 +1120,10 @@ mod tests {
         let mut eng = KnowledgeEngine::in_memory().unwrap();
         let node = KNode::new(KClass::Section, "live catalog", "source:s1/doc:t", "s1", 1);
         let id = eng.write(&node).unwrap();
-        let error = eng.forget(&ForgetTarget::Id(id.0.clone())).unwrap_err().to_string();
+        let error = eng
+            .forget(&ForgetTarget::Id(id.0.clone()))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("knowledge.replace_source"), "{error}");
         for target in [
             ForgetTarget::Source("s1".into()),
@@ -1117,9 +1144,13 @@ mod tests {
         let mut eng = KnowledgeEngine::in_memory()
             .unwrap()
             .with_xedge_store(std::sync::Arc::clone(&xedge));
-        let id = eng.write(&KNode::new(KClass::Chunk, "old", "", "s", 1)).unwrap();
+        let id = eng
+            .write(&KNode::new(KClass::Chunk, "old", "", "s", 1))
+            .unwrap();
         // Match the legacy about-link writer's memory engine spelling.
-        xedge.put_edge(&XEdge::about(id.0.as_str(), "code", 0)).unwrap();
+        xedge
+            .put_edge(&XEdge::about(id.0.as_str(), "code", 0))
+            .unwrap();
         xedge
             .put_edge(&XEdge {
                 source: Endpoint::new("knowledge", id.0.as_str(), 0),
@@ -1143,10 +1174,23 @@ mod tests {
         }
         eng.forget(&ForgetTarget::Id(id.0.clone())).unwrap();
         for engine in ["memory", "knowledge"] {
-            assert!(xedge.reader().out_edges(engine, &id.0, &[]).unwrap().is_empty());
+            assert!(
+                xedge
+                    .reader()
+                    .out_edges(engine, &id.0, &[])
+                    .unwrap()
+                    .is_empty()
+            );
         }
-        assert!(xedge.typed_by_owner(&id.0).unwrap().is_empty());
-        assert_eq!(xedge.typed_by_owner("surviving-owner").unwrap().len(), 1);
+        assert!(xedge.reader().typed_by_owner(&id.0).unwrap().is_empty());
+        assert_eq!(
+            xedge
+                .reader()
+                .typed_by_owner("surviving-owner")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1189,7 +1233,9 @@ mod tests {
         assert!(hits.iter().any(|h| h.id == b));
         // C costs 3 tokens; A and B each cost 5. At 5 tokens, an unfiltered C would leave
         // no room for either required-source item. Filtering only after packing returns empty.
-        let tight = eng.recall_visible("quasar needle", 5, None, &required, 2).unwrap();
+        let tight = eng
+            .recall_visible("quasar needle", 5, None, &required, 2)
+            .unwrap();
         assert_eq!(tight.len(), 1);
         assert!(tight.iter().all(|h| h.id == a || h.id == b));
     }

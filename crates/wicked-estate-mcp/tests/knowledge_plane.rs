@@ -606,11 +606,19 @@ fn forget_source_over_jsonrpc_and_validate_targets() {
         json!({"scope_prefix": "", "confirm_erase_all": true}),
     );
     assert_eq!(report["forgotten"], 1);
-    let response = r.call("knowledge.replace_source", json!({
-        "sourceId": source, "generation": 1, "docs": []
-    }));
+    let response = r.call(
+        "knowledge.replace_source",
+        json!({
+            "sourceId": source, "generation": 1, "docs": []
+        }),
+    );
     assert_eq!(response["error"]["code"], -32602, "{response}");
-    assert!(response["error"]["message"].as_str().unwrap().contains("knowledge.forget"));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("knowledge.forget")
+    );
 }
 
 #[test]
@@ -618,7 +626,12 @@ fn forget_readonly_is_refused_and_hidden() {
     let mut r = rig();
     let response = r.call_ro("knowledge.forget", json!({"source": "s"}), true);
     assert_eq!(response["error"]["code"], -32601, "{response}");
-    assert!(response["error"]["message"].as_str().unwrap().contains("--readonly"));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--readonly")
+    );
     let mut handles = DomainHandles {
         memory: &mut r.mem,
         knowledge: &mut r.know,
@@ -644,24 +657,38 @@ fn forget_readonly_is_refused_and_hidden() {
 fn ingest_replace_source_removes_old_doc_and_chunk() {
     let mut r = rig();
     let source = "topic:sqlite/notes.md";
-    r.ok("knowledge.ingest", json!({
-        "title": "old", "chunks": ["obsoletequasar"], "source": source,
-        "scope": "topic:sqlite"
-    }));
-    let result = r.ok("knowledge.ingest", json!({
-        "title": "new", "chunks": ["currentpulsar"], "source": source,
-        "scope": "topic:sqlite", "replace_source": true,
-        "source_rev": "revision", "observed_at": "2026-11-20"
-    }));
+    r.ok(
+        "knowledge.ingest",
+        json!({
+            "title": "old", "chunks": ["obsoletequasar"], "source": source,
+            "scope": "topic:sqlite"
+        }),
+    );
+    let result = r.ok(
+        "knowledge.ingest",
+        json!({
+            "title": "new", "chunks": ["currentpulsar"], "source": source,
+            "scope": "topic:sqlite", "replace_source": true,
+            "source_rev": "revision", "observed_at": "2026-11-20"
+        }),
+    );
     assert_eq!(result["replaced"], 2);
     assert_eq!(
-        r.know.count(Some(wicked_estate_knowledge::KClass::Doc), None).unwrap(),
+        r.know
+            .count(Some(wicked_estate_knowledge::KClass::Doc), None)
+            .unwrap(),
         1
     );
     let recalled = r.ok("knowledge.recall", json!({"query": "obsoletequasar"}));
     assert!(
-        recalled["items"].as_array().unwrap().iter()
-            .all(|item| !item["body_snippet"].as_str().unwrap().contains("obsoletequasar")),
+        recalled["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| !item["body_snippet"]
+                .as_str()
+                .unwrap()
+                .contains("obsoletequasar")),
         "{recalled}"
     );
     for args in [
@@ -681,35 +708,62 @@ fn recall_require_filters_before_budget_and_rejects_invalid_deps() {
     let mut r = rig();
     for (content, source, deps) in [
         ("quasar distant needle", "A", vec!["source:s1".into()]),
-        ("needle distant quasar", "B", vec!["source:s1".into(), "source:s2".into()]),
+        (
+            "needle distant quasar",
+            "B",
+            vec!["source:s1".into(), "source:s2".into()],
+        ),
         ("quasar needle", "C", vec!["source:s2".into()]),
     ] {
         r.know
-            .write_with_deps(&KNode::new(KClass::Chunk, content, "", source, 1), &deps, false)
+            .write_with_deps(
+                &KNode::new(KClass::Chunk, content, "", source, 1),
+                &deps,
+                false,
+            )
             .unwrap();
     }
     for budget in [1000, 5] {
-        let result = r.ok("knowledge.recall", json!({
-            "query": "quasar needle", "visible": ["source:s1", "source:s2"],
-            "require": ["source:s1"], "token_budget": budget
-        }));
+        let result = r.ok(
+            "knowledge.recall",
+            json!({
+                "query": "quasar needle", "visible": ["source:s1", "source:s2"],
+                "require": ["source:s1"], "token_budget": budget
+            }),
+        );
         let items = result["items"].as_array().unwrap();
         assert!(!items.is_empty(), "{result}");
-        assert!(items.iter().all(|i| i["source"] == "A" || i["source"] == "B"), "{result}");
+        assert!(
+            items
+                .iter()
+                .all(|i| i["source"] == "A" || i["source"] == "B"),
+            "{result}"
+        );
         if budget == 1000 {
             assert_eq!(items.len(), 2);
         }
     }
-    let both = r.ok("knowledge.recall", json!({
-        "query": "quasar needle", "visible": ["source:s1", "source:s2"],
-        "require": ["source:s1", "source:s2"]
-    }));
+    let both = r.ok(
+        "knowledge.recall",
+        json!({
+            "query": "quasar needle", "visible": ["source:s1", "source:s2"],
+            "require": ["source:s1", "source:s2"]
+        }),
+    );
     assert_eq!(both["items"].as_array().unwrap().len(), 1);
     assert_eq!(both["items"][0]["source"], "B");
-    for required in [json!("source:s1"), json!([1]), json!(["bad"]), json!(["source:s3"])] {
-        let response = r.call("knowledge.recall", json!({
-            "query": "quasar", "visible": ["source:s1", "source:s2"], "require": required
-        }));
+    for required in [
+        json!("source:s1"),
+        json!([1]),
+        json!(["bad"]),
+        json!(["source:s3"]),
+    ] {
+        let response = r.call(
+            "knowledge.recall",
+            json!({
+                "query": "quasar", "visible": ["source:s1", "source:s2"], "require": required
+            }),
+        );
         assert_eq!(response["error"]["code"], -32602, "{response}");
     }
 }
