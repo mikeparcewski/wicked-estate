@@ -684,6 +684,21 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     assert!(found.iter().all(|r| r.raw_name == "ghost"));
     assert!(found.iter().all(|r| r.from == sym("a")));
 
+    // Optional for stores whose unresolved representation cannot count by source (Surreal).
+    if let Some(n) = store
+        .count_unresolved_refs_from(&[sym("a"), sym("a")])
+        .expect("count unresolved refs by source")
+    {
+        assert_eq!(n, 2, "count sites once even when the source id is repeated");
+        assert_eq!(
+            store
+                .count_unresolved_refs_from(&[])
+                .expect("empty source set"),
+            Some(0),
+            "implementing stores know an empty source set has no unresolved sites"
+        );
+    }
+
     let stats_after = store.stats().expect("stats after unresolved upsert");
     assert_eq!(
         stats_after.unresolved_ref_count, 2,

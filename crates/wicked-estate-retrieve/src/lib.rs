@@ -1023,11 +1023,11 @@ impl RetrievalTool for TraverseGraph {
 ///               "confidence": 1.0, "provenance": "parsed",
 ///               "resolved_by": "scip-rust" }, … ],
 ///   "found": true, "depth_bounded": false, "node_bounded": false,
-///   "unresolved": null }
+///   "unresolved": null, "unresolved_on_frontier": null }
 /// ```
-/// `found: false` with both bound flags clear is a **proven** absence. With either flag set it
-/// is a **bounded** one and the diagnostics say so — conflating the two is the R3 failure the
-/// agent-behavior rules forbid.
+/// `found: false` with both bound flags clear and `unresolved_on_frontier: 0` is a **proven**
+/// absence. With either flag set it is a **bounded** one; a positive or unknown unresolved count
+/// means absence in the RESOLVED graph only. The diagnostics distinguish these cases (R3).
 #[derive(Debug, Default)]
 pub struct Path;
 
@@ -1043,16 +1043,18 @@ impl RetrievalTool for Path {
          intermediate functions and open only those files. Use this instead of reconstructing \
          a route from TraverseGraph's edge list. `from` and `to` accept a symbol name or a \
          SymbolId. `found: false` is a PROVEN absence only when `depth_bounded` and \
-         `node_bounded` are both false; when either is set, raise `depth` / `max_nodes` (the \
+         `node_bounded` are both false and `unresolved_on_frontier` is 0 (a positive count \
+         means unresolved call sites on the reached set could carry a route; null means the \
+         store cannot tell); when either bound flag is set, raise `depth` / `max_nodes` (the \
          defaults are smaller than the CLI's) before concluding anything from the absence."
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
         // Builds every reply that is decided BEFORE resolution — the unusable-operand
         // branches below — and requires the reason, so none of them can hand-build
-        // `unresolved: null`, the wire shape the spec licenses a reader to treat as "no route
-        // exists in the graph". Replies decided AFTER resolution come from the terminal
-        // return at the end of this function, where the same five keys are built from
+        // `unresolved: null`. Proven absence also requires a known zero unresolved frontier
+        // count (estate#348). Replies decided AFTER resolution come from the terminal
+        // return at the end of this function, where the same keys are built from
         // `PathResult`'s own earned values. Round 1 fixed `depth: 0` emitting an unearned
         // proven absence; round 2 found the same class one branch over, which is what moving
         // the pre-resolution branches behind one constructor prevents (CLAUDE.md §11).
@@ -1063,6 +1065,7 @@ impl RetrievalTool for Path {
             content: json!({
                 "hops": [], "found": false,
                 "depth_bounded": false, "node_bounded": false,
+                "unresolved_on_frontier": null,
                 "unresolved": unresolved,
                 "resolved": false, "query": null, "suggestions": [],
                 "suggestions_truncated": false, "crossings": [],
@@ -1153,10 +1156,22 @@ impl RetrievalTool for Path {
                     result.depth_bounded, result.node_bounded
                 ));
             } else {
-                diag.push(format!(
-                    "Path: no route from '{from}' to '{to}'; the whole reachable set was \
-                     searched, so no route exists"
-                ));
+                diag.push(match result.unresolved_on_frontier {
+                    Some(0) => format!(
+                        "Path: no route from '{from}' to '{to}'; the whole reachable set was \
+                         searched, so no route exists"
+                    ),
+                    Some(n) => format!(
+                        "Path: no route from '{from}' to '{to}' in the RESOLVED graph; {n} \
+                         unresolved reference site(s) from reached symbols could carry one, \
+                         so this is not a proven absence"
+                    ),
+                    None => format!(
+                        "Path: no route from '{from}' to '{to}' in the RESOLVED graph; the \
+                         unresolved references on the reached set could not be counted here, so \
+                         this is not a proven absence"
+                    ),
+                });
             }
         }
 
@@ -1189,6 +1204,7 @@ impl RetrievalTool for Path {
             "found": result.found,
             "depth_bounded": result.depth_bounded,
             "node_bounded": result.node_bounded,
+            "unresolved_on_frontier": result.unresolved_on_frontier,
             "unresolved": result.unresolved.map(|u| u.as_str()),
             "resolved": true, "query": null, "suggestions": [],
             "suggestions_truncated": false,
@@ -4221,6 +4237,49 @@ mod tests {
     }
 
     #[test]
+    fn path_reached_unresolved_site_is_not_a_proven_absence() {
+        use wicked_estate_core::UnresolvedRef;
+
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("start", "start", NodeKind::Function, "src/lib.rs", 0),
+                make_node("mid", "mid", NodeKind::Function, "src/lib.rs", 0),
+                make_node("goal", "goal", NodeKind::Function, "src/lib.rs", 0),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[make_call_edge("start", "mid")])
+            .unwrap();
+        store
+            .upsert_unresolved_refs(&[UnresolvedRef::new(
+                SymbolId("mid".into()),
+                "goal_like",
+                EdgeKind::Calls,
+                Location::new("src/lib.rs", Span::ZERO),
+            )])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let res = Path
+            .invoke(&store, &json!({"from": "start", "to": "goal"}))
+            .unwrap();
+        assert_eq!(res.content["found"], false);
+        assert_eq!(res.content["unresolved_on_frontier"], 1);
+        assert!(
+            !res.diagnostics
+                .iter()
+                .any(|d| d.contains("no route exists"))
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("not a proven absence"))
+        );
+    }
+
+    #[test]
     fn path_bounded_absence_says_so_and_proven_absence_does_not() {
         let store = path_chain_store(6, 0);
         let bounded = Path
@@ -4248,6 +4307,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(proven.content["found"], false);
+        assert_eq!(proven.content["unresolved_on_frontier"], 0);
         assert_eq!(proven.content["depth_bounded"], false);
         assert!(
             proven
@@ -4574,7 +4634,8 @@ mod tests {
         assert_eq!(
             expected.unwrap(),
             // (#358) `query`/`resolved`/`suggestions`/`suggestions_truncated`: the name-miss keys,
-            // on every reply so a parser never meets a key set it has not seen.
+            // on every reply so a parser never meets a key set it has not seen. (#348)
+            // `unresolved_on_frontier`: an int or null on every reply, additive.
             vec![
                 "crossings".to_string(),
                 "depth_bounded".to_string(),
@@ -4586,6 +4647,7 @@ mod tests {
                 "suggestions".to_string(),
                 "suggestions_truncated".to_string(),
                 "unresolved".to_string(),
+                "unresolved_on_frontier".to_string(),
             ]
         );
     }
@@ -4759,6 +4821,32 @@ mod tests {
             2,
             "endpoints come from the traversal; only operand resolution may call get_node"
         );
+    }
+
+    /// estate#348: a store that cannot count unresolved references by source (the trait default,
+    /// which `GetNodeCounter` keeps) never yields a proven absence, and the key is present as null.
+    #[test]
+    fn path_unknown_unresolved_count_is_not_a_proven_absence() {
+        let inner = path_chain_store(6, 0);
+        let counting = GetNodeCounter {
+            inner: &inner,
+            get_node_calls: std::cell::Cell::new(0),
+        };
+        // Reverse direction over the chain: nothing to find and nothing cut off.
+        let res = Path
+            .invoke(
+                &counting,
+                &json!({"from": "name_f6_", "to": "name_f0_", "depth": 16}),
+            )
+            .unwrap();
+        assert_eq!(res.content["found"], false);
+        assert_eq!(res.content["depth_bounded"], false);
+        assert_eq!(res.content["node_bounded"], false);
+        assert!(res.content.get("unresolved_on_frontier").is_some());
+        assert!(res.content["unresolved_on_frontier"].is_null());
+        let diag = res.diagnostics.join("\n");
+        assert!(!diag.contains("no route exists"), "{diag}");
+        assert!(diag.contains("not a proven absence"), "{diag}");
     }
 
     // ── TraverseGraph ────────────────────────────────────────────────────────

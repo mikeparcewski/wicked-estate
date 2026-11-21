@@ -1104,6 +1104,16 @@ impl GraphRead for MemStore {
             .collect())
     }
 
+    fn count_unresolved_refs_from(&self, from: &[SymbolId]) -> Result<Option<u64>> {
+        let from: HashSet<&SymbolId> = from.iter().collect();
+        let count = self
+            .unresolved
+            .iter()
+            .filter(|r| from.contains(&r.from))
+            .count() as u64;
+        Ok(Some(count))
+    }
+
     fn indexed_files(&self) -> Result<Vec<String>> {
         // Both file-writing calls, not just `set_file_digest`. `set_file_content` records a path in
         // `file_git_shas` and never touches `file_digests`, so a digest-only answer would hide

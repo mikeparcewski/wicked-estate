@@ -468,6 +468,17 @@ impl<H: GraphRead + Sync + ?Sized> GraphRead for OverlayReader<'_, H> {
         self.home.unresolved_refs_for_name(name)
     }
 
+    // #9b count_unresolved_refs_from — HOME-ONLY while cross is off. With cross on, a walk may
+    // reach foreign nodes whose unresolved sites live in a foreign store this reader cannot count,
+    // so the answer is unknown (`None`), never a home-only `Some(0)` (estate#348: a proven
+    // absence needs a known zero).
+    fn count_unresolved_refs_from(&self, from: &[SymbolId]) -> Result<Option<u64>> {
+        if self.cross_on() {
+            return Ok(None);
+        }
+        self.home.count_unresolved_refs_from(from)
+    }
+
     // #10 file_digest — HOME-ONLY (file/content reads are home-engine).
     fn file_digest(&self, file: &str) -> Result<Option<String>> {
         self.home.file_digest(file)

@@ -11,7 +11,7 @@
 use wicked_estate_core::path::{Unresolved, path_between};
 use wicked_estate_core::{
     Direction, Edge, EdgeKind, GraphRead, GraphStats, Language, Location, Node, NodeKind,
-    ResolutionTier, Span, Subgraph, SymbolId, SymbolQuery, TraversalSpec,
+    ResolutionTier, Span, Subgraph, SymbolId, SymbolQuery, TraversalSpec, UnresolvedRef,
 };
 use wicked_estate_store::{GraphStoreMutExt, MemStore, SqliteStore};
 
@@ -346,6 +346,86 @@ fn resolvable_pair_with_no_route_is_a_proven_absence() {
     );
 }
 
+/// estate#348: `CountingStore` keeps the trait default for `count_unresolved_refs_from`
+/// (`Ok(None)`): a store that cannot count unresolved sites by source never licenses a proven
+/// absence, even though its walk was complete.
+#[test]
+fn default_unresolved_count_is_unknown_not_zero() {
+    let nodes = vec![node("x"), node("y")];
+    let inner = mem(&nodes, &[]);
+    let counting = CountingStore {
+        inner: &inner,
+        traverse_calls: std::cell::Cell::new(0),
+        neighbor_calls: std::cell::Cell::new(0),
+    };
+    let r = path_between(&counting, "x", "y", 8, 5_000).expect("query");
+    assert!(!r.found && !r.depth_bounded && !r.node_bounded, "{r:?}");
+    assert_eq!(r.unresolved_on_frontier, None, "unknown, never Some(0)");
+    // The same graph on the counting MemStore is a proven absence.
+    let direct = path_between(&inner, "x", "y", 8, 5_000).expect("query");
+    assert_eq!(direct.unresolved_on_frontier, Some(0));
+}
+
+/// The resolved walk is complete, but a reached symbol's unresolved site may carry a route.
+fn assert_reached_unresolved_count<S: GraphStoreMutExt>(store: &mut S, ids: [&str; 3]) {
+    let [start, mid, goal] = ids;
+    load(
+        &mut *store,
+        &[node(start), node(mid), node(goal)],
+        &[edge(start, mid)],
+    );
+    let r = path_between(&*store, start, goal, 8, 5_000).expect("query");
+    assert!(!r.found, "{r:?}");
+    assert!(!r.depth_bounded && !r.node_bounded, "{r:?}");
+    assert_eq!(r.unresolved_on_frontier, Some(0), "{r:?}");
+
+    // An unresolved reference from the unreachable goal does not affect this search.
+    store.begin_batch().expect("begin");
+    store
+        .upsert_unresolved_refs(&[UnresolvedRef::new(
+            sym(goal),
+            "goal_like",
+            EdgeKind::Calls,
+            Location::new("src/lib.rs", Span::ZERO),
+        )])
+        .expect("unreached ref");
+    store.commit_batch().expect("commit");
+    let r = path_between(&*store, start, goal, 8, 5_000).expect("query");
+    assert!(!r.found && !r.depth_bounded && !r.node_bounded, "{r:?}");
+    assert_eq!(r.unresolved_on_frontier, Some(0));
+
+    store.begin_batch().expect("begin");
+    store
+        .upsert_unresolved_refs(&[UnresolvedRef::new(
+            sym(mid),
+            "goal_like",
+            EdgeKind::Calls,
+            Location::new("src/lib.rs", Span::ZERO),
+        )])
+        .expect("reached ref");
+    store.commit_batch().expect("commit");
+    let r = path_between(&*store, start, goal, 8, 5_000).expect("query");
+    assert!(!r.found && !r.depth_bounded && !r.node_bounded, "{r:?}");
+    assert_eq!(r.unresolved_on_frontier, Some(1));
+    assert_eq!(
+        store
+            .count_unresolved_refs_from(&[sym(mid), sym(mid)])
+            .expect("count"),
+        Some(1),
+        "duplicate source ids must not double-count sites"
+    );
+    assert_eq!(
+        store.count_unresolved_refs_from(&[]).expect("empty count"),
+        Some(0)
+    );
+}
+
+#[test]
+fn unresolved_sites_on_reached_symbols_prevent_proven_absence_on_both_backends() {
+    assert_reached_unresolved_count(&mut mem(&[], &[]), ["start", "mid", "goal"]);
+    assert_reached_unresolved_count(&mut sqlite(&[], &[]), ["start", "mid", "goal"]);
+}
+
 // ── endpoints: rendered without a store lookup ───────────────────────────────
 
 #[test]
@@ -486,6 +566,11 @@ fn path_between_on_postgres_matches_the_embedded_backends() {
         exact.found && !exact.depth_bounded,
         "b3 sits AT the bound with nothing beyond it: {exact:?}"
     );
+
+    let start = format!("{tag}-start");
+    let mid = format!("{tag}-mid");
+    let goal = format!("{tag}-goal");
+    assert_reached_unresolved_count(&mut pg, [start.as_str(), mid.as_str(), goal.as_str()]);
 }
 
 #[test]

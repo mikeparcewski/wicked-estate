@@ -4942,6 +4942,7 @@ fn path_json(from: &str, to: &str, r: &wicked_estate_core::PathResult) -> serde_
         "found": r.found,
         "depth_bounded": r.depth_bounded,
         "node_bounded": r.node_bounded,
+        "unresolved_on_frontier": r.unresolved_on_frontier,
         "unresolved": r.unresolved.map(|u| u.as_str()),
         // X1 (DES-S2 §5): the route's steps from one repo into another, with evidence.
         "crossings": wicked_estate_core::crossing::path_crossings(&r.hops),
@@ -5028,11 +5029,23 @@ fn write_path_text(
              the search was cut off"
         )?;
     }
-    if !r.found && !r.depth_bounded && !r.node_bounded {
-        writeln!(
-            out,
-            "coverage: the whole reachable set was searched — no route exists"
-        )?;
+    if !r.depth_bounded && !r.node_bounded {
+        match r.unresolved_on_frontier {
+            Some(0) => writeln!(
+                out,
+                "coverage: the whole reachable set was searched — no route exists"
+            )?,
+            Some(n) => writeln!(
+                out,
+                "coverage: no route in the RESOLVED graph; {n} unresolved reference site(s) \
+                 from reached symbols could carry one, so this is not a proven absence"
+            )?,
+            None => writeln!(
+                out,
+                "coverage: no route in the RESOLVED graph; the unresolved references on the \
+                 reached set could not be counted here, so this is not a proven absence"
+            )?,
+        }
     }
     Ok(())
 }
@@ -5570,7 +5583,8 @@ mod path_render_tests {
             "an unusable input must not read as a proven absence: {text}"
         );
 
-        let proven = PathResult::default();
+        let mut proven = PathResult::default();
+        proven.unresolved_on_frontier = Some(0);
         let absent = rendered(&proven, "a", "b", 5_000);
         assert!(
             absent.contains("no route exists"),
@@ -5580,6 +5594,20 @@ mod path_render_tests {
             text, absent,
             "the two cases must not render identically — that is the R3 failure"
         );
+    }
+
+    #[test]
+    fn text_unresolved_frontier_count_is_not_a_proven_absence() {
+        for count in [Some(3), None] {
+            let mut r = PathResult::default();
+            r.unresolved_on_frontier = count;
+            let text = rendered(&r, "a", "b", 5_000);
+            assert!(!text.contains("no route exists"), "{text}");
+            assert!(text.contains("not a proven absence"), "{text}");
+            if count == Some(3) {
+                assert!(text.contains("3 unresolved reference site(s)"), "{text}");
+            }
+        }
     }
 
     /// The node-budget line. D7 fixes the CLI budget at 5 000, so the spawn fixtures cannot
@@ -5619,6 +5647,9 @@ mod path_render_tests {
         assert!(hops[0].contains("a_fn (src/a.rs:42)"), "{}", hops[0]);
         assert!(hops[0].contains("b_fn (src/a.rs:42)"), "{}", hops[0]);
         assert!(hops[0].contains("confidence"), "{}", hops[0]);
+        // A found route is not an absence: no coverage line, whatever the unresolved count.
+        assert!(!text.contains("not a proven absence"), "{text}");
+        assert!(!text.contains("no route"), "{text}");
     }
 
     #[test]
