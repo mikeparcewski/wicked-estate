@@ -4634,7 +4634,8 @@ mod tests {
         assert_eq!(
             expected.unwrap(),
             // (#358) `query`/`resolved`/`suggestions`/`suggestions_truncated`: the name-miss keys,
-            // on every reply so a parser never meets a key set it has not seen.
+            // on every reply so a parser never meets a key set it has not seen. (#348)
+            // `unresolved_on_frontier`: an int or null on every reply, additive.
             vec![
                 "crossings".to_string(),
                 "depth_bounded".to_string(),
@@ -4646,6 +4647,7 @@ mod tests {
                 "suggestions".to_string(),
                 "suggestions_truncated".to_string(),
                 "unresolved".to_string(),
+                "unresolved_on_frontier".to_string(),
             ]
         );
     }
