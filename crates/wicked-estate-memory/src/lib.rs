@@ -339,10 +339,18 @@ impl MemoryEngine {
             .metadata
             .get(meta_keys::RETIRED_AT)
             .and_then(|v| v.as_i64())?;
+        Some((Self::retired_body(node)?, retired_at))
+    }
+
+    // The memory a retired node holds, without requiring `retired_at`: erasure only needs the body,
+    // so a retired row whose timestamp does not decode can still be erased for good.
+    fn retired_body(node: &Node) -> Option<Memory> {
+        if node.kind != NodeKind::Other(RETIRED_MEMORY_NODE_KIND.into()) {
+            return None;
+        }
         let mut active = node.clone();
         active.kind = NodeKind::Other(MEMORY_NODE_KIND.into());
-        let memory = Memory::from_node(&active)?;
-        Some((memory, retired_at))
+        Memory::from_node(&active)
     }
 
     /// Soft-retire one active memory by id or SymbolId string. Retains embeddings and edges.
@@ -416,7 +424,11 @@ impl MemoryEngine {
 
     fn erasure_memories(&self) -> wicked_estate_core::Result<Vec<Memory>> {
         let mut memories = self.all_memories()?;
-        memories.extend(self.retired(None)?.into_iter().map(|(memory, _)| memory));
+        memories.extend(
+            self.memory_nodes(RETIRED_MEMORY_NODE_KIND)?
+                .iter()
+                .filter_map(Self::retired_body),
+        );
         Ok(memories)
     }
 
@@ -1264,7 +1276,30 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].0.symbol(), good.symbol());
         assert_eq!(eng.unretire(&good.id).unwrap(), Some(good.symbol()));
-        assert_eq!(eng.erase("project:retire").unwrap(), 1);
+        // Erasure decodes the body without `retired_at`: the bad row is removed for good too.
+        assert_eq!(eng.erase("project:retire").unwrap(), 2);
+        assert!(eng.store.get_node(&bad.symbol()).unwrap().is_none());
+        assert!(eng.store.get_node(&good.symbol()).unwrap().is_none());
+    }
+
+    #[test]
+    fn erase_by_id_removes_a_retired_row_whose_retired_at_does_not_decode() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let bad = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            Scope::root(),
+            "bad quartz",
+            1,
+        );
+        eng.capture(&bad).unwrap();
+        eng.retire(&bad.id, 2).unwrap();
+        let mut node = eng.store.get_node(&bad.symbol()).unwrap().unwrap();
+        node.metadata.remove(meta_keys::RETIRED_AT);
+        eng.store.upsert_nodes(&[node]).unwrap();
+        assert!(eng.retired(None).unwrap().is_empty());
+        assert_eq!(eng.erase_id(&bad.id).unwrap(), Some(bad.symbol()));
+        assert!(eng.store.get_node(&bad.symbol()).unwrap().is_none());
     }
 
     #[test]
