@@ -232,6 +232,21 @@ fn package_links_cross_repos_with_evidence_and_retract() {
     );
     assert_eq!(br["link"][0]["stale"], false, "{br}");
 
+    // #419: CLI Path reports the same live project state as blast-radius.
+    let (ok, out, err) = run(&[
+        "path",
+        "cons/src/app.ts",
+        "prov/src/index.ts",
+        "--json",
+        "--db",
+        db,
+    ]);
+    assert!(ok, "{out}{err}");
+    let path: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(path["found"], true, "{path}");
+    assert_eq!(path["crossings"].as_array().unwrap().len(), 1, "{path}");
+    assert_eq!(path["link"], br["link"], "{path}");
+
     // G1.8: an unchanged relink writes nothing new.
     let again = link(db);
     assert_eq!(again["replayed"], true, "{again}");

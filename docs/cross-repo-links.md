@@ -74,16 +74,32 @@ lists them under `possible`, and text mode prints them.
   `from`/`to` repos and the evidence (`ranks: ["package-manifest"]`, `identity`, `package`,
   `ecosystem`, `confidence`, `skew`, versions). Only edges the walk admitted count; an import
   placeholder shared by two repos is never a crossing.
+- `via` on every dependent: an array of `{id, kind}` edges from that row to starts or returned
+  rows exactly one hop closer to the target, using the smallest depths across all matching starts.
+  Every walked dependency kind participates, including `contains`; `kind` has the wire form of
+  `path --json` hops (`"calls"`, `{"other": "<tag>"}`). Edges to import-transit files excluded from
+  the rows are omitted because a client cannot place those files. Edges are deduped, sorted by kind
+  then target id, and capped at 3 per row; `via_omitted` counts additional edges.
+  Both keys are always present (`[]` and `0` when there are no such edges). Paging retains the same
+  edges as the full answer; an inner row can appear on another page.
 - `via_crossing` on each dependent reached through one (from the walk that reached it at its
   smallest depth), and `via_crossing_omitted` when that crossing is past the listed cap.
 
 `path --json` (CLI and MCP) carries `crossings` for the route's hops that cross repos.
 
-The CLI `blast-radius --json` also carries `link`: per project, its `generation`, whether it is
+CLI `blast-radius --json` and `path --json`, and MCP `BlastRadius` and `Path`, also carry `link`:
+per project, its `generation`, whether it is
 `stale` (a member was re-indexed, removed, is mid-index or failed, the last link errored or was
 refused, or the linker or its rules changed) and which labels moved, plus `coverage`: per member,
 links in and out, package imports considered, manifests read, and counts of what could not be linked
-by reason (`link --status --json` lists the packages). The MCP answer does not carry `link` yet.
+by reason (`link --status --json` lists the packages), plus `last_error`. An available store with
+no linked projects carries `link: []`; a transport without a store handle omits the key. MCP
+measures this state after the response cache on every answer, so cache hits still report moved
+member indexes and emit a `LINK-STALE` warning with the relink command. MCP reserves 1,500 bytes
+for compact link state, dropping member coverage entries from the end of the longest list first
+when necessary. `coverage_omitted` counts those entries, and a diagnostic points to
+`wicked-estate link --project <p> --status --json` for the full list. Project state and stale labels
+are retained even when those fixed fields alone exceed the reserve.
 
 A link edge's own confidence is its identity rule's (`path`, `git-source`, `registry-source` 0.75;
 `registry-source(version-only)` 0.6).

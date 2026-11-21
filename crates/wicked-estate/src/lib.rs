@@ -3299,6 +3299,8 @@ pub struct BlastRadius {
     pub crossings_total: usize,
     /// Dependent symbol id -> the id of the crossing on its predecessor chain.
     pub via_crossing: std::collections::BTreeMap<String, String>,
+    /// Per row, edges to the immediately inner ring, capped with an omitted-edge count.
+    pub via: std::collections::BTreeMap<String, (Vec<wicked_estate_core::ViaEdge>, usize)>,
 }
 
 /// Confidence summary over a set of edges: `{min, avg, edge_count}`, the MCP `BlastRadius`
@@ -3375,6 +3377,8 @@ fn blast_radius_from(store: &dyn GraphRead, starts: Vec<Node>, depth: u32) -> Re
     let mut out = BlastRadius::default();
     let mut crossing_set = wicked_estate_core::crossing::CrossingSet::default();
     let mut seen = std::collections::HashSet::new();
+    let start_ids = starts.iter().map(|n| n.symbol.0.clone()).collect();
+    let mut row_edges = HashMap::new();
     // Eligible edges, deduped across walks: two same-named symbols can share a caller.
     let mut evidence: HashMap<(SymbolId, SymbolId, wicked_estate_core::EdgeKind), f32> =
         HashMap::new();
@@ -3403,6 +3407,11 @@ fn blast_radius_from(store: &dyn GraphRead, starts: Vec<Node>, depth: u32) -> Re
             .chain(std::iter::once(&sym.symbol))
             .collect();
         for e in &sub.edges {
+            if rows.contains(&e.source) {
+                row_edges
+                    .entry((e.source.clone(), e.target.clone(), e.kind.clone()))
+                    .or_insert_with(|| e.clone());
+            }
             if is_dependency_evidence(&e.kind)
                 && rows.contains(&e.source)
                 && reached.contains(&e.target)
@@ -3430,6 +3439,12 @@ fn blast_radius_from(store: &dyn GraphRead, starts: Vec<Node>, depth: u32) -> Re
     out.crossings_total = total;
     out.via_crossing = via;
     out.confidence = EdgeConfidence::from_confidences(evidence.into_values());
+    out.via = wicked_estate_core::crossing::predecessor_edges(
+        &row_edges.into_values().collect::<Vec<_>>(),
+        &out.depths,
+        &start_ids,
+        wicked_estate_core::crossing::VIA_CAP,
+    );
     Ok(out)
 }
 
