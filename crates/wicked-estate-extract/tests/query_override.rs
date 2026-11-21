@@ -1,12 +1,12 @@
 //! ADR-010 tier 2, proven in ONE registry configuration (the registry is a process-wide
 //! `OnceLock`, so file boundaries = configuration boundaries): the plugins dir holds a SUPERSET
-//! query override for `typescript` (built-in query + an `internal_module` pattern) and a
-//! NAMESPACE-ONLY override for `tsx` (legal — overrides match per LANG_TABLE entry, so this is
+//! query override for `typescript` (built-in query + a `function_signature` pattern) and a
+//! SIGNATURE-ONLY override for `tsx` (legal — overrides match per LANG_TABLE entry, so this is
 //! not a duplicate).
 //!
-//! - `.ts` fixture → namespace AND function present: the override *captures* what the built-in
-//!   misses (the control test `builtin_misses_namespace.rs` pins that premise).
-//! - `.tsx` fixture → namespace present, function ABSENT: wholesale *replacement*, not a merge.
+//! - `.ts` fixture → ambient signature AND function present: the override captures what the
+//!   built-in misses (the control test `builtin_misses_namespace.rs` pins that premise).
+//! - `.tsx` fixture → ambient signature present, function ABSENT: wholesale replacement.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -16,9 +16,9 @@ use wicked_estate_extract::TreeSitterExtractor;
 use wicked_estate_extract::treesitter::extractor_for_extension;
 
 const BUILTIN_TS_QUERY: &str = include_str!("../src/queries/typescript.scm");
-const NAMESPACE_PATTERN: &str =
-    "\n(internal_module\n  name: (identifier) @code_namespace.name\n) @code_namespace.def\n";
-const FIXTURE: &str = "namespace Util {\n  export function f(): void {}\n}\n";
+const AMBIENT_FUNCTION_PATTERN: &str =
+    "\n(function_signature\n  name: (identifier) @code_function.name\n) @code_function.def\n";
+const FIXTURE: &str = "declare function provided(): void;\nexport function f(): void {}\n";
 
 /// Build the plugins dir and point the process-wide registry at it — exactly once, before any
 /// registry access from either test.
@@ -37,18 +37,18 @@ fn plugins_root() -> &'static PathBuf {
         .unwrap();
         std::fs::write(
             ts.join("typescript.scm"),
-            format!("{BUILTIN_TS_QUERY}{NAMESPACE_PATTERN}"),
+            format!("{BUILTIN_TS_QUERY}{AMBIENT_FUNCTION_PATTERN}"),
         )
         .unwrap();
 
-        let tsx = root.join("tsx-namespace-only");
+        let tsx = root.join("tsx-signature-only");
         std::fs::create_dir_all(&tsx).unwrap();
         std::fs::write(
             tsx.join("plugin.toml"),
-            "name = \"tsx-namespace-only\"\nquery = \"tsx.scm\"\noverride_query = \"tsx\"\n",
+            "name = \"tsx-signature-only\"\nquery = \"tsx.scm\"\noverride_query = \"tsx\"\n",
         )
         .unwrap();
-        std::fs::write(tsx.join("tsx.scm"), NAMESPACE_PATTERN).unwrap();
+        std::fs::write(tsx.join("tsx.scm"), AMBIENT_FUNCTION_PATTERN).unwrap();
 
         // SAFETY: before any registry access; set_var is unsafe in edition 2024.
         unsafe {
@@ -79,8 +79,8 @@ fn superset_override_captures_what_the_builtin_misses() {
     plugins_root();
     let ex = extract("typescript", "a.ts");
     assert!(
-        has(&ex, &NodeKind::Namespace, "Util"),
-        "the override's internal_module pattern must mint the namespace node; got {:?}",
+        has(&ex, &NodeKind::Function, "provided"),
+        "the override's function_signature pattern must mint the ambient function; got {:?}",
         ex.nodes
             .iter()
             .map(|n| (&n.kind, &n.name))
@@ -100,18 +100,18 @@ fn superset_override_captures_what_the_builtin_misses() {
             text: FIXTURE.to_string(),
         })
         .unwrap();
-    assert!(has(&ex2, &NodeKind::Namespace, "Util"));
+    assert!(has(&ex2, &NodeKind::Function, "provided"));
 }
 
 #[test]
 fn override_is_wholesale_replacement_not_a_merge() {
     plugins_root();
-    // The tsx override carries ONLY the namespace pattern — the built-in function pattern is
+    // The tsx override carries ONLY the signature pattern — the built-in function pattern is
     // deliberately absent, and with it the function capture must disappear.
     let ex = extract("tsx", "a.tsx");
     assert!(
-        has(&ex, &NodeKind::Namespace, "Util"),
-        "namespace-only override captures the namespace"
+        has(&ex, &NodeKind::Function, "provided"),
+        "signature-only override captures the ambient function"
     );
     assert!(
         !has(&ex, &NodeKind::Function, "f"),

@@ -58,7 +58,7 @@ use wicked_estate_core::{
 };
 
 /// Resolve references to unique same-name project symbols. Confidence comes from the tier
-/// (`ImportMap` = 0.6). Self-edges and ambiguous (>1 candidate) names are skipped.
+/// (`ImportMap` = 0.6). Self-edges and names spanning multiple overload families are skipped.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NameResolver;
 
@@ -82,23 +82,27 @@ impl Resolver for NameResolver {
             // dropping a deny-listed homonym (e.g. an html type_alias) can make a legitimate
             // same-family callable unique. Every edge this mints is measured (Q4b).
             candidates.retain(|n| admissible_target(&r.kind, n));
-            // Unique resolution only — ambiguity is deferred to a precise tier (W2.2+).
-            if let [only] = candidates.as_slice() {
-                if only.symbol != r.from {
-                    // Family guard (D5) runs POST-uniqueness on the sole survivor — strictly
-                    // narrowing, never edge-minting (it is what stops a typescript ref whose
-                    // only admissible homonym is a bash variable from binding cross-family).
-                    if !family_compatible(index, from_family(index, &r.from).as_deref(), only) {
+            // Overloads of one logical definition are one name candidate (#377).
+            if !one_overload_family(candidates.iter()) {
+                continue;
+            }
+            let overloads = candidates.len();
+            for candidate in &candidates {
+                if candidate.symbol != r.from {
+                    // Family guard (D5) runs POST-uniqueness on each member.
+                    if !family_compatible(index, from_family(index, &r.from).as_deref(), candidate)
+                    {
                         continue;
                     }
-                    let edge = Edge::new(
+                    let mut edge = Edge::new(
                         r.from.clone(),
-                        only.symbol.clone(),
+                        candidate.symbol.clone(),
                         r.kind.clone(),
                         self.tier(),
                         self.id(),
                     )
                     .with_location(r.location.clone());
+                    record_overloads(&mut edge, overloads);
                     out.push(edge);
                 }
             }
@@ -108,6 +112,34 @@ impl Resolver for NameResolver {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Normalize only a trailing SCIP ordinal method disambiguator (#377).
+fn overload_identity(symbol: &wicked_estate_core::SymbolId) -> std::borrow::Cow<'_, str> {
+    let text = symbol.0.as_str();
+    if let Some((base, ordinal)) = text.strip_suffix(").").and_then(|s| s.rsplit_once("(+")) {
+        if !ordinal.is_empty() && ordinal.bytes().all(|b| b.is_ascii_digit()) {
+            return std::borrow::Cow::Owned(format!("{base}()."));
+        }
+    }
+    std::borrow::Cow::Borrowed(text)
+}
+
+fn one_overload_family<'a>(
+    mut candidates: impl Iterator<Item = &'a wicked_estate_core::Node>,
+) -> bool {
+    let Some(first) = candidates.next() else {
+        return false;
+    };
+    let identity = overload_identity(&first.symbol);
+    candidates.all(|candidate| overload_identity(&candidate.symbol) == identity)
+}
+
+fn record_overloads(edge: &mut Edge, count: usize) {
+    if count > 1 {
+        edge.metadata
+            .insert("overloads".into(), serde_json::json!(count));
+    }
+}
 
 /// Refs whose `raw_name` is a reserved encoding owned by a dedicated resolver (APEXlang
 /// `apexlang-ref:` / `apexlang-in:`). The name tiers skip them outright: an encoded name is not a
@@ -270,7 +302,9 @@ fn family_compatible(
 /// 2. Candidate in the **same directory** (same module / namespace approximation) →
 ///    `confidence 0.62`, metadata `{"scope":"same-dir"}`.
 /// 3. Unique cross-file candidate → `confidence 0.60` (standard ImportMap, no metadata).
-/// 4. Truly ambiguous (multiple equally-ranked candidates) → skip; left for precise tiers.
+/// 4. Multiple equally-ranked overload families → skip; left for precise tiers.
+///
+/// All overloads of the winning definition bind, with `overloads` recording the member count.
 ///
 /// For method-style references the candidate pool is additionally filtered to callable nodes
 /// (Function / Method / Constructor) before the scope ranking is applied.
@@ -422,36 +456,36 @@ impl Resolver for ScopedNameResolver {
                 .map(|(_, n)| *n)
                 .collect();
 
-            // If more than one candidate shares the best tier, the reference is still
-            // ambiguous at this precision level — defer to a precise tier (SCIP/TSG/LSP).
-            if best.len() != 1 {
+            // Distinct overload ids at the winning tier belong to one definition (#377).
+            if !one_overload_family(best.iter().copied()) {
                 continue;
             }
 
-            let winner = best[0];
             let confidence = wicked_estate_core::Confidence::new(best_tier.confidence());
+            let overloads = best.len();
+            for winner in best {
+                let mut edge = Edge::new(
+                    r.from.clone(),
+                    winner.symbol.clone(),
+                    r.kind.clone(),
+                    self.tier(),
+                    self.id(),
+                )
+                .with_location(r.location.clone());
 
-            let mut edge = Edge::new(
-                r.from.clone(),
-                winner.symbol.clone(),
-                r.kind.clone(),
-                self.tier(),
-                self.id(),
-            )
-            .with_location(r.location.clone());
+                // Override the tier-default confidence with the scope-adjusted value.
+                edge.confidence = confidence;
 
-            // Override the tier-default confidence with the scope-adjusted value.
-            edge.confidence = confidence;
-
-            // Record the disambiguation reason in edge metadata.
-            if let Some(label) = best_tier.label() {
-                edge.metadata.insert(
-                    "scope".to_string(),
-                    serde_json::Value::String(label.to_string()),
-                );
+                // Record the disambiguation reason in edge metadata.
+                if let Some(label) = best_tier.label() {
+                    edge.metadata.insert(
+                        "scope".to_string(),
+                        serde_json::Value::String(label.to_string()),
+                    );
+                }
+                record_overloads(&mut edge, overloads);
+                out.push(edge);
             }
-
-            out.push(edge);
         }
 
         Ok(out)
@@ -538,9 +572,9 @@ fn normalise_relative_path(path: &str) -> String {
 /// 3. Remove self-candidates.
 /// 4. Among the remaining candidates, keep those whose `location.file` plausibly matches `M`
 ///    using [`file_matches_module`] (relative-path resolution + suffix matching).
-/// 5. If exactly one candidate matches → emit an edge at `ImportMap` confidence with
+/// 5. If one overload family matches → emit an edge per member at `ImportMap` confidence with
 ///    `metadata["via"] = "import-map"`.
-/// 6. If zero or >1 candidates match → skip (leave for precise tiers).
+/// 6. If zero or multiple overload families match → skip (leave for precise tiers).
 ///
 /// For `import-alias:<local>:<original>`, look up the module by `<local>` and search for
 /// `<original>` only within that module. If there are no matches, try `<local>` in the same
@@ -619,30 +653,31 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
                 matched = module_candidates(local);
             }
 
-            // Emit only when unambiguous after import-scoping.
-            if matched.len() != 1 {
+            // Emit every overload when import-scoping leaves one logical definition (#377).
+            if !one_overload_family(matched.iter()) {
                 continue;
             }
 
-            let winner = &matched[0];
-            let mut edge = wicked_estate_core::Edge::new(
-                r.from.clone(),
-                winner.symbol.clone(),
-                r.kind.clone(),
-                self.tier(),
-                self.id(),
-            )
-            .with_location(r.location.clone());
+            let overloads = matched.len();
+            for winner in &matched {
+                let mut edge = wicked_estate_core::Edge::new(
+                    r.from.clone(),
+                    winner.symbol.clone(),
+                    r.kind.clone(),
+                    self.tier(),
+                    self.id(),
+                )
+                .with_location(r.location.clone());
 
-            // Boost confidence slightly above the base ImportMap tier (0.6) since we have
-            // explicit import-map evidence — but stay below ScopedNameResolver's same-file (0.65).
-            edge.confidence = wicked_estate_core::Confidence::new(0.63);
-            edge.metadata.insert(
-                "via".to_string(),
-                serde_json::Value::String("import-map".to_string()),
-            );
-
-            out.push(edge);
+                // Explicit import evidence stays below the same-file confidence (0.65).
+                edge.confidence = wicked_estate_core::Confidence::new(0.63);
+                edge.metadata.insert(
+                    "via".to_string(),
+                    serde_json::Value::String("import-map".to_string()),
+                );
+                record_overloads(&mut edge, overloads);
+                out.push(edge);
+            }
         }
 
         Ok(out)
@@ -1246,6 +1281,89 @@ mod tests {
         )
     }
 
+    fn assert_overload_resolution(resolver: &dyn Resolver) {
+        let first = Node::new(
+            SymbolId("test . . . I#m().".into()),
+            NodeKind::Method,
+            "m",
+            Language::new("java"),
+            Location::new("src/I.java", Span::ZERO),
+        );
+        let mut second = first.clone();
+        second.symbol = SymbolId("test . . . I#m(+1).".into());
+        let r = import_ref("caller", "src/Caller.java", "m", "./I");
+        let index = VecIndex(vec![first.clone(), second.clone()]);
+        let edges = resolver.resolve(std::slice::from_ref(&r), &index).unwrap();
+        assert_eq!(edges.len(), 2, "{} must bind every overload", resolver.id());
+        for target in [&first.symbol, &second.symbol] {
+            let edge = edges.iter().find(|e| &e.target == target).unwrap();
+            assert_eq!(edge.metadata.get("overloads"), Some(&serde_json::json!(2)));
+            assert_eq!(edge.location.as_ref(), Some(&r.location));
+        }
+
+        let mut third = second.clone();
+        third.symbol = SymbolId("test . . . I#m(+2).".into());
+        let index = VecIndex(vec![second.clone(), third]);
+        let edges = resolver.resolve(std::slice::from_ref(&r), &index).unwrap();
+        assert_eq!(
+            edges.len(),
+            2,
+            "a surviving overload family needs no base id"
+        );
+
+        let index = VecIndex(vec![first.clone()]);
+        let edges = resolver.resolve(std::slice::from_ref(&r), &index).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert!(!edges[0].metadata.contains_key("overloads"));
+
+        // Another owner and a non-ordinal suffix are still separate definitions.
+        for symbol in ["test . . . J#m().", "test . . . I#m(+type)."] {
+            let mut unrelated = first.clone();
+            unrelated.symbol = SymbolId(symbol.into());
+            let index = VecIndex(vec![first.clone(), second.clone(), unrelated]);
+            assert!(
+                resolver
+                    .resolve(std::slice::from_ref(&r), &index)
+                    .unwrap()
+                    .is_empty(),
+                "{} must park unrelated same-name definitions: {symbol}",
+                resolver.id(),
+            );
+        }
+    }
+
+    #[test]
+    fn name_resolver_binds_every_overload_of_one_definition() {
+        assert_overload_resolution(&NameResolver);
+    }
+
+    #[test]
+    fn scoped_resolver_binds_every_overload_at_the_best_tier() {
+        assert_overload_resolution(&ScopedNameResolver);
+        let first = node_kind_lang("m", "m", "src/I.java", "java", NodeKind::Method);
+        let mut second = first.clone();
+        second.symbol = Symbol::global(
+            "test",
+            None,
+            vec![Descriptor::method("m", Some("+1".into()))],
+        )
+        .id();
+        let unrelated = node_kind_lang("other_m", "m", "other/J.java", "java", NodeKind::Method);
+        let index = VecIndex(vec![first, second, unrelated]);
+        let r = import_ref("caller", "src/I.java", "m", "./I");
+        let edges = ScopedNameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 2, "only the best scope tier participates");
+        assert!(edges.iter().all(|e| {
+            e.metadata.get("scope").and_then(|v| v.as_str()) == Some("same-file")
+                && e.metadata.get("overloads") == Some(&serde_json::json!(2))
+        }));
+    }
+
+    #[test]
+    fn import_map_resolver_binds_every_overload_in_the_module() {
+        assert_overload_resolution(&ImportMapResolver);
+    }
+
     // ── NameResolver tests ───────────────────────────────────────────────────
 
     #[test]
@@ -1350,7 +1468,9 @@ mod tests {
     #[test]
     fn skips_ambiguous_and_self_and_unknown() {
         // two "beta" defs → ambiguous → skip; a self-call → skip; unknown name → skip.
-        let index = VecIndex(vec![node("alpha"), node("beta"), node("beta")]);
+        let mut other_beta = node("beta");
+        other_beta.symbol = sym("other_beta");
+        let index = VecIndex(vec![node("alpha"), node("beta"), other_beta]);
         let refs = vec![
             call_ref("alpha", "beta"),  // ambiguous
             call_ref("alpha", "alpha"), // self

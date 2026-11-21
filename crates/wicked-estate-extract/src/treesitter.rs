@@ -1680,13 +1680,24 @@ fn def_symbol(
     name: &str,
     suffix: Suffix,
 ) -> SymbolId {
+    disambiguated_def_symbol(scheme, module, chain, name, suffix, None)
+}
+
+fn disambiguated_def_symbol(
+    scheme: &str,
+    module: &str,
+    chain: &[Descriptor],
+    name: &str,
+    suffix: Suffix,
+    disambiguator: Option<String>,
+) -> SymbolId {
     let mut descriptors = Vec::with_capacity(chain.len() + 2);
     descriptors.push(Descriptor::new(module.to_string(), Suffix::Namespace));
     descriptors.extend_from_slice(chain);
     descriptors.push(Descriptor {
         name: name.to_string(),
         suffix,
-        disambiguator: None,
+        disambiguator,
     });
     Symbol::global(scheme, None, descriptors).id()
 }
@@ -4551,12 +4562,15 @@ impl Extractor for TreeSitterExtractor {
                 .collect();
             pending = deduped;
 
-            for p in &pending {
-                // Non-emitting anchors (`@code_<kind>.anchor`) exist ONLY as containment
-                // anchors for the enclosing_chain walk above: no Node, no DefRec (so
-                // `def_symbol_at` framework joins never land on the anchor range), and —
-                // because Contains edges are emitted per DefRec below — no Contains edge.
+            let split_overloads = matches!(
+                self.lang_name.as_str(),
+                "java" | "csharp" | "apex" | "kotlin" | "scala"
+            );
+            let mut identities = Vec::with_capacity(pending.len());
+            let mut overloads: HashMap<SymbolId, Vec<usize>> = HashMap::new();
+            for (i, p) in pending.iter().enumerate() {
                 if !p.emit {
+                    identities.push(None);
                     continue;
                 }
                 let mut chain = enclosing_chain(&pending, p.start, p.end);
@@ -4567,6 +4581,32 @@ impl Extractor for TreeSitterExtractor {
                     chain.push(Descriptor::new(owner.clone(), Suffix::Type));
                 }
                 let symbol = def_symbol(&scheme, &module, &chain, &p.name, def_suffix(&p.kind));
+                if split_overloads && !p.decl && def_suffix(&p.kind) == Suffix::Method {
+                    overloads.entry(symbol.clone()).or_default().push(i);
+                }
+                identities.push(Some((chain, symbol)));
+            }
+            for indices in overloads.values_mut() {
+                indices.sort_by_key(|&i| (pending[i].start, pending[i].end));
+                for (ordinal, &i) in indices.iter().enumerate().skip(1) {
+                    if let Some((chain, symbol)) = &mut identities[i] {
+                        *symbol = disambiguated_def_symbol(
+                            &scheme,
+                            &module,
+                            chain,
+                            &pending[i].name,
+                            Suffix::Method,
+                            Some(format!("+{ordinal}")),
+                        );
+                    }
+                }
+            }
+
+            for (p, identity) in pending.iter().zip(&identities) {
+                // Non-emitting anchors contribute containment only.
+                let Some((_, symbol)) = identity else {
+                    continue;
+                };
                 let mut node = Node::new(
                     symbol.clone(),
                     def_nodekind(&p.kind),
@@ -4587,6 +4627,17 @@ impl Extractor for TreeSitterExtractor {
                     src,
                 ) {
                     b.stamp(&mut node.metadata);
+                }
+                if let Some(has_body) = crate::behaviour::has_body(
+                    &self.lang_name,
+                    &p.kind,
+                    &tree,
+                    p.start,
+                    p.end,
+                    p.decl,
+                ) {
+                    node.metadata
+                        .insert(crate::behaviour::HAS_BODY_KEY.to_string(), has_body.into());
                 }
                 if p.decl {
                     // `.decl` capture: mark the record as a DECLARATION contribution
@@ -4618,11 +4669,60 @@ impl Extractor for TreeSitterExtractor {
                 }
                 def_nodes.push(node);
                 defs.push(DefRec {
-                    symbol,
+                    symbol: symbol.clone(),
                     start: p.start,
                     end: p.end,
                     name: p.name.clone(),
                 });
+            }
+
+            #[derive(Default)]
+            struct MergeEvidence {
+                count: usize,
+                kinds: Vec<String>,
+                has_body: bool,
+            }
+
+            let mut contributions: Vec<_> = pending
+                .iter()
+                .zip(&identities)
+                .filter_map(|(p, identity)| identity.as_ref().map(|(_, symbol)| (p, symbol)))
+                .collect();
+            contributions.sort_by_key(|(p, _)| (p.start, p.end));
+            let mut merged: HashMap<&SymbolId, MergeEvidence> = HashMap::new();
+            for (p, symbol) in contributions {
+                let evidence = merged.entry(symbol).or_default();
+                evidence.count += 1;
+                if !evidence.kinds.contains(&p.kind) {
+                    evidence.kinds.push(p.kind.clone());
+                }
+            }
+            for node in &def_nodes {
+                if let Some(evidence) = merged.get_mut(&node.symbol) {
+                    evidence.has_body |= node
+                        .metadata
+                        .get(crate::behaviour::HAS_BODY_KEY)
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                }
+            }
+            for node in &mut def_nodes {
+                if let Some(evidence) = merged.get(&node.symbol).filter(|e| e.count > 1) {
+                    // Only a merge of different kinds (`class` + `interface`) is recorded: a
+                    // same-kind pair (a property getter and setter) adds no evidence.
+                    if evidence.kinds.len() > 1 {
+                        node.metadata.insert(
+                            "merged_kinds".to_string(),
+                            serde_json::json!(evidence.kinds),
+                        );
+                    }
+                    if node.metadata.contains_key(crate::behaviour::HAS_BODY_KEY) {
+                        node.metadata.insert(
+                            crate::behaviour::HAS_BODY_KEY.to_string(),
+                            evidence.has_body.into(),
+                        );
+                    }
+                }
             }
         }
 
@@ -9602,8 +9702,7 @@ public class PlainListener {
 
     #[test]
     fn identity_disambiguator_is_none() {
-        // D6 pinned: no overload disambiguator is ever populated — every Method-suffixed id
-        // renders as `name().` (empty parens).
+        // TypeScript keeps one runtime identity for signatures and implementations (#377).
         let ex = identity_extraction();
         for n in ex.nodes.iter().filter(|n| {
             matches!(
@@ -9616,6 +9715,323 @@ public class PlainListener {
                 "disambiguator must stay None: {}",
                 n.symbol
             );
+        }
+    }
+
+    #[test]
+    fn callable_body_evidence_tracks_syntax() {
+        let cases = [
+            (
+                "java",
+                "C.java",
+                "abstract class C { void run() {} abstract void shape(); }",
+            ),
+            (
+                "csharp",
+                "C.cs",
+                "abstract class C { int run() => 1; public abstract void shape(); }",
+            ),
+            (
+                "csharp",
+                "I.cs",
+                "interface C { int run() => 1; void shape(); }",
+            ),
+            (
+                "apex",
+                "C.cls",
+                "public abstract class C { public void run() {} public abstract void shape(); }",
+            ),
+            (
+                "php",
+                "C.php",
+                "<?php abstract class C { function run() {} abstract function shape(); }",
+            ),
+            (
+                "kotlin",
+                "C.kt",
+                "abstract class C { fun run() = 1\n abstract fun shape(): Int }",
+            ),
+        ];
+        for (lang, path, code) in cases {
+            let ex = TreeSitterExtractor::for_language(lang)
+                .unwrap()
+                .extract(&sf(path, lang, code))
+                .unwrap();
+            for (name, has_body) in [("run", true), ("shape", false)] {
+                let node = ex.nodes.iter().find(|n| n.name == name).unwrap();
+                assert_eq!(
+                    node.metadata.get("has_body"),
+                    Some(&serde_json::json!(has_body)),
+                    "{lang}: {name}"
+                );
+                assert!(node.symbol.as_str().ends_with(&format!("C#{name}().")));
+            }
+            assert!(
+                ex.nodes
+                    .iter()
+                    .filter(|n| n.name == "C")
+                    .all(|n| !n.metadata.contains_key("has_body"))
+            );
+        }
+
+        // Query overrides can emit anchors that the built-in queries do not capture.
+        for (lang, code, query, expected) in [
+            (
+                "csharp",
+                "class C { C() => init(); int run() { int local() => 1; return local(); } }",
+                "(constructor_declaration name: (identifier) @code_constructor.name) \
+                 @code_constructor.def\n\
+                 (local_function_statement name: (identifier) @code_function.name) \
+                 @code_function.def",
+                true,
+            ),
+            (
+                "typescript",
+                "const f = function() {}; class C { g = function() {}; }",
+                "(variable_declarator name: (identifier) @code_function.name \
+                 value: (function_expression)) @code_function.def\n\
+                 (public_field_definition name: (property_identifier) @code_method.name \
+                 value: (function_expression)) @code_method.def",
+                true,
+            ),
+            (
+                "java",
+                "class C { void declared() {} }",
+                "(method_declaration name: (identifier) @code_method.name) @code_method.decl",
+                false,
+            ),
+        ] {
+            let entry = LANG_TABLE.iter().find(|e| e.name == lang).unwrap();
+            let ex = TreeSitterExtractor::from_grammar(lang, (entry.make_language)(), query)
+                .unwrap()
+                .extract(&sf("m", lang, code))
+                .unwrap();
+            let callables: Vec<_> = ex
+                .nodes
+                .iter()
+                .filter(|n| {
+                    matches!(
+                        n.kind,
+                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                    )
+                })
+                .collect();
+            assert_eq!(callables.len(), if lang == "java" { 1 } else { 2 });
+            for node in callables {
+                assert_eq!(
+                    node.metadata.get("has_body"),
+                    Some(&serde_json::json!(expected))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn callable_body_evidence_includes_arrows_and_scala_expressions() {
+        for (lang, path, code, names) in [
+            (
+                "typescript",
+                "m.ts",
+                "const arrow = () => 1; class C { field = () => 1; run() {} }",
+                &["arrow", "field", "run"][..],
+            ),
+            (
+                "tsx",
+                "m.tsx",
+                "const arrow = () => <div />; class C { field = () => 1; run() {} }",
+                &["arrow", "field", "run"][..],
+            ),
+            (
+                "javascript",
+                "m.js",
+                "const arrow = () => 1; class C { run() {} }",
+                &["arrow", "run"][..],
+            ),
+            (
+                "scala",
+                "m.scala",
+                "object C { def run() = 1 }",
+                &["run"][..],
+            ),
+        ] {
+            let ex = TreeSitterExtractor::for_language(lang)
+                .unwrap()
+                .extract(&sf(path, lang, code))
+                .unwrap();
+            for name in names {
+                let node = ex
+                    .nodes
+                    .iter()
+                    .find(|n| {
+                        n.name == *name && matches!(n.kind, NodeKind::Function | NodeKind::Method)
+                    })
+                    .unwrap();
+                assert_eq!(
+                    node.metadata.get("has_body"),
+                    Some(&serde_json::json!(true))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overload_identity_is_ordinal_only_in_selected_languages() {
+        for (lang, path, code) in [
+            (
+                "java",
+                "C.java",
+                "class C { void run() { first(); } void run(int x) { second(); } }",
+            ),
+            (
+                "csharp",
+                "C.cs",
+                "class C { void run() { first(); } void run(int x) { second(); } }",
+            ),
+            (
+                "apex",
+                "C.cls",
+                "class C { void run() { first(); } void run(Integer x) { second(); } }",
+            ),
+            (
+                "kotlin",
+                "C.kt",
+                "class C { fun run() { first() }\n fun run(x: Int) { second() } }",
+            ),
+            (
+                "scala",
+                "C.scala",
+                "class C { def run() = first()\n def run(x: Int) = second() }",
+            ),
+        ] {
+            let ex = TreeSitterExtractor::for_language(lang)
+                .unwrap()
+                .extract(&sf(path, lang, code))
+                .unwrap();
+            let mut methods: Vec<_> = ex.nodes.iter().filter(|n| n.name == "run").collect();
+            methods.sort_by_key(|n| n.location.span.start_byte);
+            assert_eq!(methods.len(), 2, "{lang}");
+            assert!(methods[0].symbol.as_str().ends_with("C#run()."), "{lang}");
+            assert!(methods[1].symbol.as_str().ends_with("C#run(+1)."), "{lang}");
+            for (name, method) in [("first", methods[0]), ("second", methods[1])] {
+                assert!(
+                    ex.refs
+                        .iter()
+                        .any(|r| r.raw_name == name && r.from == method.symbol),
+                    "{lang}: {name} must originate at its overload"
+                );
+                assert!(
+                    ex.local_edges
+                        .iter()
+                        .any(|e| e.kind == EdgeKind::Contains && e.target == method.symbol)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn merged_definitions_keep_source_kinds_and_any_body() {
+        for lang in ["typescript", "tsx"] {
+            for (code, kinds) in [
+                (
+                    "class X { m() {} } interface X { m(): void }",
+                    serde_json::json!(["class", "interface"]),
+                ),
+                (
+                    "interface X { m(): void } class X { m() {} }",
+                    serde_json::json!(["interface", "class"]),
+                ),
+            ] {
+                let ex = TreeSitterExtractor::for_language(lang)
+                    .unwrap()
+                    .extract(&sf("m.ts", lang, code))
+                    .unwrap();
+                let types: Vec<_> = ex.nodes.iter().filter(|n| n.name == "X").collect();
+                assert_eq!(types.len(), 2);
+                for node in types {
+                    assert_eq!(node.metadata.get("merged_kinds"), Some(&kinds));
+                }
+                let methods: Vec<_> = ex.nodes.iter().filter(|n| n.name == "m").collect();
+                assert_eq!(methods.len(), 2);
+                assert_eq!(methods[0].symbol, methods[1].symbol);
+                for node in methods {
+                    assert_eq!(
+                        node.metadata.get("has_body"),
+                        Some(&serde_json::json!(true))
+                    );
+                    assert!(!node.metadata.contains_key("merged_kinds"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn namespaces_emit_type_containers_and_merge_with_interfaces() {
+        for lang in ["typescript", "tsx"] {
+            let ex = TreeSitterExtractor::for_language(lang)
+                .unwrap()
+                .extract(&sf(
+                    "m.ts",
+                    lang,
+                    "namespace N { export const a = f(); export function g() {} }\n\
+                     interface N {}\nmodule M { export function h() {} }\n\
+                     namespace A.B { export function nested() {} }\n\
+                     declare module \"external\" {}",
+                ))
+                .unwrap();
+            let namespace = ex
+                .nodes
+                .iter()
+                .find(|n| n.name == "N" && n.kind == NodeKind::Namespace)
+                .unwrap();
+            assert!(namespace.symbol.as_str().ends_with("/N#"));
+            assert_eq!(
+                namespace.metadata.get("merged_kinds"),
+                Some(&serde_json::json!(["namespace", "interface"]))
+            );
+            for suffix in ["N#g().", "N#a.", "M#h().", "A.B#nested()."] {
+                assert!(ex.nodes.iter().any(|n| n.symbol.as_str().ends_with(suffix)));
+            }
+            assert!(!ex.nodes.iter().any(|n| n.name.contains("external")));
+        }
+    }
+
+    #[test]
+    fn interface_constants_and_trait_vars_are_definitions() {
+        for (lang, path, code, name, kind) in [
+            (
+                "java",
+                "I.java",
+                "interface I { int MAX = 3; }",
+                "MAX",
+                NodeKind::Field,
+            ),
+            (
+                "scala",
+                "T.scala",
+                "trait T { var n = 0 }",
+                "n",
+                NodeKind::Variable,
+            ),
+        ] {
+            let ex = TreeSitterExtractor::for_language(lang)
+                .unwrap()
+                .extract(&sf(path, lang, code))
+                .unwrap();
+            assert!(ex.nodes.iter().any(|n| n.name == name && n.kind == kind));
+        }
+    }
+
+    #[test]
+    fn same_kind_redefinitions_carry_no_merged_kinds() {
+        let ex = TreeSitterExtractor::for_language("python")
+            .unwrap()
+            .extract(&sf("m.py", "python", "def f(): pass\ndef f(): return 1\n"))
+            .unwrap();
+        let functions: Vec<_> = ex.nodes.iter().filter(|n| n.name == "f").collect();
+        assert_eq!(functions.len(), 2);
+        for node in functions {
+            assert!(!node.metadata.contains_key("merged_kinds"));
+            assert!(!node.metadata.contains_key("has_body"));
         }
     }
 
