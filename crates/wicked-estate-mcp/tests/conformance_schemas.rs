@@ -1,12 +1,12 @@
 //! Conformance tests: L2.1–L2.5 — v0.13.0+ tools/list vs frozen golden schemas.
 //!
 //! Covers:
-//! - L2.1: All 33 tool names from golden files are present in the live tools/list response.
+//! - L2.1: All 34 tool names from golden files are present in the live tools/list response.
 //! - L2.2: Estate tool required fields and property keys match their golden schemas.
 //! - L2.3: Memory tool required fields and property keys match their golden schemas.
 //! - L2.4: Knowledge tool required fields and property keys match their golden schemas.
 //! - L2.5: Proposal tool required fields and property keys match their golden schemas.
-//! - L2.4 (count): tools/list with all domains returns exactly 12 estate + 7 memory + 10 knowledge
+//! - L2.4 (count): tools/list with all domains returns exactly 12 estate + 7 memory + 11 knowledge
 //!   + 4 proposal.
 //!
 //! (Counts raised from 23/10 when arch-R2 added `rules.recall` as the 11th estate tool; the
@@ -64,6 +64,7 @@ const MEMORY_TOOLS: &[&str] = &[
 
 const KNOWLEDGE_TOOLS: &[&str] = &[
     "knowledge.ingest",
+    "knowledge.forget",
     "knowledge.write",
     "knowledge.relate",
     "knowledge.recall",
@@ -124,7 +125,7 @@ fn load_golden(name: &str) -> Value {
 /// Returns a map from tool name → the full tool Value (with `name`, `description`, `inputSchema`).
 ///
 /// Uses `McpContext::default()` — `embedder_meta_id` is `None` — so the dim-guard always fails
-/// and SemanticSearch is never advertised, giving the stable 33-tool set.
+/// and SemanticSearch is never advertised, giving the stable 34-tool set.
 fn tools_list_map_with_domains() -> HashMap<String, Value> {
     let dir = tempfile::tempdir().expect("create tempdir");
 
@@ -393,13 +394,13 @@ fn conf_proposal_tool_required_fields_match_goldens() {
 }
 
 /// L2.4 (count) — tools/list with all domain handles active must return exactly
-/// 12 estate tools, 7 memory tools, 10 knowledge tools, and 4 proposal tools.
+/// 12 estate tools, 7 memory tools, 11 knowledge tools, and 4 proposal tools.
 ///
 /// Gated out when `fastembed` or `model2vec` features are active because those features
 /// can enable SemanticSearch in the list, changing the total count.
 #[test]
 #[cfg(not(any(feature = "fastembed", feature = "model2vec")))]
-fn conf_tool_count_12_estate_7_memory_10_knowledge_4_proposal() {
+fn conf_tool_count_12_estate_7_memory_11_knowledge_4_proposal() {
     let live = tools_list_map_with_domains();
 
     let estate_count = ESTATE_TOOLS
@@ -434,8 +435,8 @@ fn conf_tool_count_12_estate_7_memory_10_knowledge_4_proposal() {
         "expected 7 memory tools, found {memory_count}\nall live tools: {all_live:?}"
     );
     assert_eq!(
-        knowledge_count, 10,
-        "expected 10 knowledge tools, found {knowledge_count}\nall live tools: {all_live:?}"
+        knowledge_count, 11,
+        "expected 11 knowledge tools, found {knowledge_count}\nall live tools: {all_live:?}"
     );
     assert_eq!(
         proposal_count, 4,
@@ -443,8 +444,9 @@ fn conf_tool_count_12_estate_7_memory_10_knowledge_4_proposal() {
     );
     assert_eq!(
         live.len(),
-        33,
-        "expected 33 total tools (12 estate + 7 memory + 10 knowledge + 4 proposal), found {}\nall live tools: {all_live:?}",
+        34,
+        "expected 34 total tools (12 estate + 7 memory + 11 knowledge + 4 proposal), \
+         found {}\nall live tools: {all_live:?}",
         live.len()
     );
 }

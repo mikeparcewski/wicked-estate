@@ -350,15 +350,15 @@ Treats infrastructure + mainframe as **just more languages/collectors** feeding 
 
 ## 9. MCP server ✅
 `wicked-estate-mcp` — JSON-RPC: `tools/list` returns the tools with derived JSON Schema;
-`tools/call` dispatches + wraps results in the MCP envelope. **33 tools across 3 domains** with all
+`tools/call` dispatches + wraps results in the MCP envelope. **34 tools across 3 domains** with all
 stores open: 12 unconditional estate read tools (`all_tools()` — SearchEntity, RetrieveEntity,
 TraverseGraph, Path, BlastRadius, FetchContent, ContextBundle, RulesInventory, `rules.recall`,
-RankHotspots, Communities, Lineage), 7 `memory.*` tools plus the 4 `proposal.*` queue tools, and 10
-`knowledge.*` tools. `SemanticSearch` is a 34th, listed only when embeddings are present
+RankHotspots, Communities, Lineage), 7 `memory.*` tools plus the 4 `proposal.*` queue tools, and 11
+`knowledge.*` tools. `SemanticSearch` is a 35th, listed only when embeddings are present
 (`live_semantic_search` → `handle_request_with_semantic`). Estate-only mode (no memory/knowledge
-domains) lists the 12 estate tools (13 with `SemanticSearch`). `--readonly` omits the 11 write tools
-(`memory.capture`/`erase`/`learn`/`reflect`, `knowledge.ingest`/`write`/`relate`/`relate_code`/`replace_source`,
-`proposal.approve`/`reject`) from `tools/list` and rejects them in `tools/call`; `proposal.submit` stays (it only queues). Rule authorship flows only through human-merged doc
+domains) lists the 12 estate tools (13 with `SemanticSearch`). `--readonly` omits the 12 write tools
+(`memory.capture`/`erase`/`learn`/`reflect`, `knowledge.ingest`/`forget`/`write`/`relate`/`relate_code`/`replace_source`,
+`proposal.approve`/`reject`) from `tools/list` and rejects them in `tools/call`; `proposal.submit` stays (it only queues; a missing memory store is refused under `--readonly`). Rule authorship flows only through human-merged doc
 PRs (ADR-012). Implements the R1–R7 behavior contract.
 
 ---
@@ -425,7 +425,7 @@ knowledge is what estate read (docs, and the structure of live data sources). Ea
   leaves only hidden rows, and one interrupted after it leaves the new generation visible (stale rows stay hidden
   until the next generation cleans them up).
   `knowledge.neighbors` accepts `store: "control"` as a start; a control end is shown only when its own deps are
-  visible. No new tool (the count stays 33).
+  visible. No new tool (the count stays 34).
 
 ---
 

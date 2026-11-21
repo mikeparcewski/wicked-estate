@@ -1,4 +1,4 @@
-//! MCP dispatch for the 10 `knowledge.*` tools: the 7 document tools plus the knowledge plane's
+//! MCP dispatch for the 11 `knowledge.*` tools: the 7 document tools plus the knowledge plane's
 //! `knowledge.replace_source`, `knowledge.source_catalog` and `knowledge.neighbors`
 //! (DES-KNOWLEDGE-DATA-001 §4, §10.1), with the document-owned links and `control` endpoints of
 //! DES-PM-001 §3.4.
@@ -12,8 +12,8 @@ use wicked_estate_knowledge::shape::{
     CONTROL_STORE, ESTATE_STORE, KNOWLEDGE_STORE, MAX_NEIGHBOR_DEPTH,
 };
 use wicked_estate_knowledge::{
-    DocLink, KnowledgeApi, LinkDir, LinkEnd, NeighborsQuery, SourceDoc, SourceGeneration,
-    SourceSection, Visible,
+    DocLink, ForgetTarget, KnowledgeApi, LinkDir, LinkEnd, NeighborsQuery, SourceDoc,
+    SourceGeneration, SourceSection, Visible,
 };
 use wicked_estate_overlay::{TYPED_RELS, is_typed_rel};
 
@@ -30,6 +30,7 @@ pub fn dispatch(
         .unwrap_or_default()
         .as_secs() as i64;
     match tool {
+        "knowledge.forget" => dispatch_forget(id, &args, knowledge),
         "knowledge.ingest" => dispatch_ingest(id, &args, knowledge, now),
         "knowledge.write" => dispatch_write(id, &args, knowledge, now),
         "knowledge.relate" => dispatch_relate(id, &args, knowledge),
@@ -111,7 +112,61 @@ pub(crate) fn fetch_epochs(store: &dyn GraphRead, ids: &[String]) -> HashMap<Str
     epochs
 }
 
+fn dispatch_forget(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi) -> Value {
+    let confirm = match args.get("confirm_erase_all") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(confirm)) => *confirm,
+        Some(_) => return json_rpc_error(id, -32602, "confirm_erase_all must be a boolean"),
+    };
+    let fields: Vec<&str> = ["id", "source", "scope_prefix"]
+        .into_iter()
+        .filter(|field| args.get(*field).is_some_and(|v| !v.is_null()))
+        .collect();
+    if fields.len() != 1 {
+        return json_rpc_error(id, -32602, "give exactly one of id, source or scope_prefix");
+    }
+    let field = fields[0];
+    let Some(value) = args.get(field).and_then(Value::as_str) else {
+        return json_rpc_error(id, -32602, &format!("{field} must be a string"));
+    };
+    if value.trim().is_empty() && !(field == "scope_prefix" && value.is_empty() && confirm) {
+        return json_rpc_error(
+            id,
+            -32602,
+            "target must be non-empty; scope_prefix: \"\" requires confirm_erase_all: true",
+        );
+    }
+    let target = match field {
+        "id" => ForgetTarget::Id(value.to_string()),
+        "source" => ForgetTarget::Source(value.to_string()),
+        _ => ForgetTarget::ScopePrefix(value.to_string()),
+    };
+    match knowledge.forget(&target) {
+        Ok(report) => mcp_result(
+            id,
+            json!({
+                "forgotten": report.forgotten,
+                "skipped_live_source": report.skipped_live_source,
+            }),
+        ),
+        Err(error) => json_rpc_error(id, -32603, &error.to_string()),
+    }
+}
+
 fn dispatch_ingest(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, now: i64) -> Value {
+    let replace_source = match args.get("replace_source") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(replace)) => *replace,
+        Some(_) => return json_rpc_error(id, -32602, "replace_source must be a boolean"),
+    };
+    if replace_source
+        && !args
+            .get("source")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    {
+        return json_rpc_error(id, -32602, "replace_source requires a non-empty source");
+    }
     let title = match args.get("title").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => return json_rpc_error(id, -32602, "title required"),
@@ -155,6 +210,15 @@ fn dispatch_ingest(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, n
         .and_then(|v| v.as_str())
         .or(path)
         .unwrap_or("");
+    if replace_source {
+        return match knowledge.ingest_replacing(&title, &chunks, scope, source, now) {
+            Ok((doc_id, report)) => mcp_result(
+                id,
+                json!({"doc_id": doc_id, "replaced": report.forgotten}),
+            ),
+            Err(error) => json_rpc_error(id, -32603, &error.to_string()),
+        };
+    }
     match knowledge.ingest(&title, &chunks, scope, source, now) {
         Ok(doc_id) => mcp_result(id, json!({"doc_id": doc_id})),
         Err(e) => json_rpc_error(id, -32603, &e.to_string()),
@@ -282,6 +346,24 @@ fn dispatch_recall(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, n
     let visible = match parse_visible(id, args) {
         Ok(v) => v,
         Err(e) => return e,
+    };
+    let required = match args.get("require") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(entries)) => {
+            let mut deps = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let Some(dep) = entry.as_str() else {
+                    return json_rpc_error(id, -32602, "require entries must be strings");
+                };
+                deps.push(dep);
+            }
+            deps
+        }
+        Some(_) => return json_rpc_error(id, -32602, "require must be an array of dep strings"),
+    };
+    let visible = match visible.with_required(required) {
+        Ok(visible) => visible,
+        Err(error) => return json_rpc_error(id, -32602, &error),
     };
     match knowledge.recall_hits(&query, token_budget, scope_prefix.as_deref(), &visible, now) {
         Ok(items) => {

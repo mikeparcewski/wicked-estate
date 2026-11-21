@@ -21,6 +21,16 @@ struct McpChild {
 
 impl McpChild {
     fn spawn(home: &Path, cwd: &Path, state: Option<&Path>, readonly: bool) -> Self {
+        Self::spawn_with_env(home, cwd, state, readonly, &[])
+    }
+
+    fn spawn_with_env(
+        home: &Path,
+        cwd: &Path,
+        state: Option<&Path>,
+        readonly: bool,
+        env: &[(&str, &str)],
+    ) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_wicked-estate-mcp"));
         cmd.env_clear()
             .env("HOME", home)
@@ -34,6 +44,9 @@ impl McpChild {
         }
         if readonly {
             cmd.arg("--readonly");
+        }
+        for (name, value) in env {
+            cmd.env(name, value);
         }
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut child = cmd.spawn().expect("spawn wicked-estate-mcp");
@@ -242,4 +255,44 @@ fn readonly_missing_graph_creates_no_file_in_cwd() {
     assert!(init.get("error").is_none(), "initialize failed: {init}");
     let names = entries(cwd.path());
     assert!(names.is_empty(), "read-only created cwd entries: {names:?}");
+}
+
+#[test]
+fn readonly_missing_memory_refuses_proposal_submit_without_creating_store() {
+    let state = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let missing = state.path().join("memory.db");
+    let mut mcp = McpChild::spawn_with_env(
+        home.path(),
+        home.path(),
+        Some(state.path()),
+        true,
+        &[
+            ("WICKED_MEMORY_DB", missing.to_str().unwrap()),
+            ("WICKED_ESTATE_DB", ":memory:"),
+        ],
+    );
+    mcp.initialize();
+    mcp.initialized();
+    let reply = mcp.request(
+        2,
+        "tools/call",
+        json!({
+            "name": "proposal.submit",
+            "arguments": {"kind_type": "memory", "payload": {"content": "must persist", "tier": "semantic"}}
+        }),
+    );
+    assert_eq!(reply["error"]["code"], -32603, "{reply}");
+    let message = reply["error"]["message"].as_str().unwrap();
+    assert!(message.contains(missing.to_str().unwrap()), "{reply}");
+    assert!(message.contains("proposal would be lost"), "{reply}");
+    let list = mcp.request(
+        3,
+        "tools/call",
+        json!({"name": "proposal.list", "arguments": {}}),
+    );
+    assert!(list.get("error").is_none(), "{list}");
+    mcp.finish();
+    assert!(!missing.exists());
+    assert!(entries(state.path()).is_empty());
 }

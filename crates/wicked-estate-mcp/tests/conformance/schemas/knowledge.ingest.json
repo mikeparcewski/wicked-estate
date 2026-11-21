@@ -1,5 +1,5 @@
 {
-  "captured_from": "wicked-estate-mcp-0.35.x (anydoc-convert: +path, chunks optional when path is given; additive)",
+  "captured_from": "wicked-estate-mcp (estate-C6 PR A: additive optional parameter)",
   "description": "Ingest a document as doc + chunk nodes. Give the text as `chunks`, or give `path` to a local binary document (pdf, doc/docx, ppt/pptx, xls/xlsx, odt/odp/ods, rtf, epub): estate converts it to Markdown in-process (no network, no OCR) and chunks it at its H1/H2 headings; a scanned PDF is refused as needing OCR.",
   "inputSchema": {
     "properties": {
@@ -22,6 +22,11 @@
       "path": {
         "description": "a local binary document to convert instead of chunks",
         "type": "string"
+      },
+      "replace_source": {
+        "type": "boolean",
+        "default": false,
+        "description": "Replace document knowledge with this exact source before ingesting; requires a non-empty source."
       }
     },
     "required": [
