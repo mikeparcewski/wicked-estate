@@ -15,6 +15,7 @@ use wicked_estate_core::{Language, Location, Node, NodeKind, Span, Symbol, Symbo
 
 pub mod facets;
 pub mod fuzzy;
+pub mod lock;
 pub mod proposal;
 pub mod reason;
 pub mod recall;
@@ -23,6 +24,7 @@ pub mod scope;
 
 pub use facets::{Facets, facet_admits};
 pub use fuzzy::{fuzzy_candidates, jaccard, normalize};
+pub use lock::{MemLock, memory_lock};
 pub use proposal::{ApproveOutcome, Proposal, ProposalState, valid_kind_type};
 pub use reason::{Extracted, heuristic_extract, heuristic_same_entity, heuristic_summary};
 pub use recall::{Candidate, budget_pack, rrf_fuse};
@@ -123,7 +125,8 @@ pub mod meta_keys {
 }
 
 /// A memory item, before it is written as an estate `Node`. The builder owns the field layout so
-/// capture/recall/consolidation agree on it in one place.
+/// capture/recall/consolidation agree on it in one place. Node-only lock metadata is deliberately
+/// not carried here: callers rewriting an existing node must first check [`memory_lock`].
 #[derive(Debug, Clone)]
 pub struct Memory {
     pub id: String,
@@ -526,6 +529,16 @@ pub trait MemoryApi {
     /// operator counterpart to `recall`: recall is the agent's intent-scoped slice; list is the
     /// operator's complete inventory.
     fn list(&self, scope_prefix: Option<&str>) -> Result<Vec<MemoryListItem>, Self::Error>;
+
+    /// List active memories admitted by recall's ancestor/operator/locked-layer scope gate and
+    /// facet intent gate, without retrieval, ranking or a token budget. `None` means unsupported.
+    fn list_admitted(
+        &self,
+        _scope: &str,
+        _intent: &Facets,
+    ) -> Result<Option<Vec<MemoryListItem>>, Self::Error> {
+        Ok(None)
+    }
 
     /// Soft-retire an active memory by id or SymbolId string. `Some(0|1)` is the count changed;
     /// `None` means this implementer does not support retirement (not a successful no-op).

@@ -45,6 +45,32 @@ fn parse_tier(s: &str) -> anyhow::Result<Tier> {
     })
 }
 
+impl MemoryEngine {
+    /// Active inventory with exactly recall's scope and facet admission, without retrieval,
+    /// ranking, expiry/salience filtering or a token budget.
+    pub fn list_admitted(
+        &self,
+        scope: &str,
+        intent: &Facets,
+    ) -> wicked_estate_core::Result<Vec<MemoryListItem>> {
+        let scope = Scope::parse_strict(scope)
+            .map_err(|e| wicked_estate_core::Error::Invalid(e.to_string()))?;
+        let filter = ScopeFilter::Ancestors(&scope);
+        let mut items = Vec::new();
+        for node in self.memory_nodes(wicked_estate_memory_core::MEMORY_NODE_KIND)? {
+            let Some(memory) = Memory::from_node(&node) else {
+                continue;
+            };
+            if filter.admits(&memory.scope, &node)
+                && wicked_estate_memory_core::facet_admits(&memory.facets, intent).is_some()
+            {
+                items.push(memory_list_item(memory));
+            }
+        }
+        Ok(items)
+    }
+}
+
 impl MemoryApi for MemoryEngine {
     type Error = anyhow::Error;
 
@@ -243,6 +269,14 @@ impl MemoryApi for MemoryEngine {
             .into_iter()
             .map(memory_list_item)
             .collect())
+    }
+
+    fn list_admitted(
+        &self,
+        scope: &str,
+        intent: &Facets,
+    ) -> Result<Option<Vec<MemoryListItem>>, anyhow::Error> {
+        Ok(Some(MemoryEngine::list_admitted(self, scope, intent)?))
     }
 
     fn retire(&mut self, id: &str, now: i64) -> Result<Option<u32>, anyhow::Error> {

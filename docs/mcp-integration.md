@@ -37,6 +37,23 @@ It exposes **35 tools across 3 domains** plus `SemanticSearch` when embeddings a
 
 **Knowledge (10 tools):** `knowledge.ingest`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`, `knowledge.replace_source`, `knowledge.source_catalog`, `knowledge.neighbors`
 
+Memory locks are owned by verified governance packs. Ordinary `memory.capture` writes into a
+one-segment `org:` or `team:` scope, writes to locked ids, `memory.retire` / `memory.unretire` and
+`memory.erase` of locked nodes fail with JSON-RPC -32603 and `memory_locked`. A subtree erase
+containing any locked node refuses the whole erase and names the locked ids. Reflection,
+consolidation and Working expiry skip locked nodes. Recall inherits locked one-segment org/team
+memories across projects, then applies the normal facet gate.
+
+`memory.list {"admit_for":{"scope":"project:x","intent":{"project":"p1"}}}` applies
+exactly recall's ancestor/operator/locked-layer scope admission and facet gate, without query
+retrieval, ranking or a token budget. Combining `admit_for` with `scope_prefix` or `retired:true`,
+or supplying a malformed scope/intent, is -32602. An implementer without admission support returns
+-32601. Omit `admit_for` for the complete management inventory.
+
+The pack write and verification functions (`apply_pack_memories`, `pack_memories`) are library-only
+in `wicked-estate-memory`; they add no MCP tools (the count remains 35, including 9 memory tools).
+Signature verification and sync belong to the governance caller.
+
 ---
 
 ## Claude Code

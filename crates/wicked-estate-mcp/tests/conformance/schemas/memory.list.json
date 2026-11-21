@@ -1,6 +1,6 @@
 {
   "captured_from": "wicked-estate-mcp-0.16.3",
-  "description": "List active memories with facets, or only retired memories (retired:true) with retired_at.",
+  "description": "List active or retired memories; admit_for applies recall scope and facet admission without ranking.",
   "inputSchema": {
     "properties": {
       "scope_prefix": {
@@ -9,6 +9,20 @@
       "retired": {
         "type": "boolean",
         "default": false
+      },
+      "admit_for": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string"
+          },
+          "intent": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
       }
     },
     "type": "object"
