@@ -89,6 +89,7 @@ pub mod confined;
 pub mod freshness;
 pub mod link;
 pub mod repo_scope;
+pub mod write_batch;
 pub mod writer_lock;
 
 use std::collections::{HashMap, HashSet};

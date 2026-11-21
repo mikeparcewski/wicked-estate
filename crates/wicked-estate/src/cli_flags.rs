@@ -478,6 +478,10 @@ pub const COMMANDS: &[Command] = &[
         spec: owns(&[req("name")], &[DB, JSON, count("budget")]),
     },
     Command {
+        name: "write-batch",
+        spec: owns(&[req("file")], &[DB, JSON]),
+    },
+    Command {
         name: "annotate",
         spec: Spec::Owns {
             operands: &[req("name")],
