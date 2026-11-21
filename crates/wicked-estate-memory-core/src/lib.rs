@@ -96,6 +96,9 @@ impl MemKind {
 /// The node-kind label all memory nodes carry (so estate stores them generically).
 pub const MEMORY_NODE_KIND: &str = "memory";
 
+/// Soft-retired memories retain their identity, embedding and edges, but are never recalled.
+pub const RETIRED_MEMORY_NODE_KIND: &str = "memory_retired";
+
 /// How long a Working-tier memory lives: 24 h. Working is session scratch, not a learning — after
 /// this age recall no longer returns it and `archive` folds it into the archival tier.
 pub const WORKING_TTL_SECS: i64 = 86_400;
@@ -106,6 +109,7 @@ pub mod meta_keys {
     pub const SCOPE: &str = "scope";
     pub const CONTENT: &str = "content";
     pub const CREATED_AT: &str = "created_at";
+    pub const RETIRED_AT: &str = "retired_at";
     pub const VALID_AT: &str = "valid_at";
     pub const INVALID_AT: &str = "invalid_at";
     pub const LAST_ACCESS: &str = "last_access";
@@ -438,6 +442,20 @@ pub struct MemoryListItem {
     pub created_at: i64,
 }
 
+/// One soft-retired memory in the management inventory, with its retirement time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RetiredMemory {
+    pub item: MemoryListItem,
+    pub retired_at: i64,
+}
+
+impl RetiredMemory {
+    pub fn new(item: MemoryListItem, retired_at: i64) -> Self {
+        Self { item, retired_at }
+    }
+}
+
 /// Memory counts, optionally scoped (MCP: memory.coverage). HC-007 frozen schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryCoverage {
@@ -508,6 +526,26 @@ pub trait MemoryApi {
     /// operator counterpart to `recall`: recall is the agent's intent-scoped slice; list is the
     /// operator's complete inventory.
     fn list(&self, scope_prefix: Option<&str>) -> Result<Vec<MemoryListItem>, Self::Error>;
+
+    /// Soft-retire an active memory by id or SymbolId string. `Some(0|1)` is the count changed;
+    /// `None` means this implementer does not support retirement (not a successful no-op).
+    fn retire(&mut self, _id: &str, _now: i64) -> Result<Option<u32>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Restore a retired memory, preserving its identity. `None` means not supported.
+    fn unretire(&mut self, _id: &str, _now: i64) -> Result<Option<u32>, Self::Error> {
+        Ok(None)
+    }
+
+    /// List only retired memories, optionally restricted to a scope subtree.
+    /// `None` means not supported; `Some(vec![])` means supported with no matching memories.
+    fn list_retired(
+        &self,
+        _scope_prefix: Option<&str>,
+    ) -> Result<Option<Vec<RetiredMemory>>, Self::Error> {
+        Ok(None)
+    }
 
     // ── Proposal queue (DES-MEM-FACETED-001 §5.0) ─────────────────────────────
     // A type-generic, inert write surface. `submit` writes a `Pending` proposal (SAFE even from a

@@ -21,7 +21,7 @@ Produces two binaries:
 | Binary | Purpose |
 |--------|---------|
 | `target/release/wicked-estate` | CLI — index, query, blast-radius, path, lineage, traverse, rank, rules-inventory, rules-recall, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
-| `target/release/wicked-estate-mcp` | MCP stdio server — 33 tools (12 estate + 7 memory + 10 knowledge + 4 proposal) for LLM agents |
+| `target/release/wicked-estate-mcp` | MCP stdio server — 35 tools (12 estate + 9 memory + 10 knowledge + 4 proposal) for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
 
@@ -567,7 +567,7 @@ wicked-estate-mcp --db /path/to/graph.db
 # or: WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 ```
 
-### The 33 tools (12 estate + 7 memory + 10 knowledge + 4 proposal)
+### The 35 tools (12 estate + 9 memory + 10 knowledge + 4 proposal)
 
 #### Estate tools
 
@@ -646,10 +646,12 @@ development binary needs `wicked-estate index <path> --force` once.
 | `memory.capture` | Store an experiential memory with tier, tags, and TTL. |
 | `memory.recall` | Retrieve memories matching a query, filtered by tier or tags. |
 | `memory.reflect` | Synthesize higher-tier insights from accumulated memories. |
-| `memory.erase` | Delete a memory by ID. |
+| `memory.erase` | Permanently delete an active or retired memory by ID, or a scope subtree. |
+| `memory.retire` | Hide an active memory from recall while keeping it for undo. |
+| `memory.unretire` | Restore a retired memory with its original ID. |
 | `memory.learn` | Reinforce or update an existing memory from new evidence. |
 | `memory.coverage` | Report memory store statistics (count by tier, staleness). |
-| `memory.list` | Management browse: list every memory in scope with its facets (not relevance-ranked or intent-filtered — the complete set). |
+| `memory.list` | Management browse: list active memories in scope with facets; `retired: true` lists only retired memories with `retired_at` (not relevance-ranked or intent-filtered — the complete set). |
 
 #### Knowledge tools (absorbed from wicked-knowledge)
 

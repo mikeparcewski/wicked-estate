@@ -1,0 +1,15 @@
+{
+  "description": "Restore one retired memory with the same identity.",
+  "inputSchema": {
+    "type": "object",
+    "required": [
+      "id"
+    ],
+    "properties": {
+      "id": {
+        "type": "string"
+      }
+    }
+  },
+  "name": "memory.unretire"
+}

@@ -917,7 +917,7 @@ pub struct DomainHandles<'a> {
 
 /// Unified routing entry-point: estate tools + optional memory/knowledge tools + resources/prompts.
 ///
-/// `domains = None` → estate-only mode (12/13 tools). `domains = Some(...)` → 33/34 tools (34 with
+/// `domains = None` → estate-only mode (12/13 tools). `domains = Some(...)` → 35/36 tools (36 with
 /// `SemanticSearch`), resources and prompts. Memory/knowledge tools that arrive without domains return a clean JSON-RPC error.
 /// `semantic` is the live SemanticSearch instance; when `None` the tool is neither advertised nor
 /// dispatchable (consistent fail-closed, same as the dim-guard behaviour in the old path).
@@ -937,7 +937,8 @@ pub fn handle_request_unified(
 /// Read-only-aware unified routing — the DES-GROUNDING-001 §3.0 safety keystone.
 ///
 /// When `read_only` is `true`, the write/destructive domain tools ([`is_write_tool`]:
-/// `memory.capture`/`memory.erase`/`memory.learn`/`memory.reflect`, `knowledge.ingest`/
+/// `memory.capture`/`memory.erase`/`memory.retire`/`memory.unretire`/`memory.learn`/
+/// `memory.reflect`, `knowledge.ingest`/
 /// `knowledge.write`/`knowledge.relate`/`knowledge.relate_code`) are OMITTED from `tools/list` (the
 /// primary defense —
 /// an agent never sees a tool it cannot call) AND hard-rejected with a JSON-RPC error in
@@ -1060,7 +1061,8 @@ pub fn handle_request_unified_status(
                 "SemanticSearch" => handle_tools_call_ctx(&id, &params, store, ctx, semantic),
 
                 "memory.capture" | "memory.recall" | "memory.reflect" | "memory.erase"
-                | "memory.learn" | "memory.coverage" | "memory.list" => match domains {
+                | "memory.learn" | "memory.coverage" | "memory.list" | "memory.retire"
+                | "memory.unretire" => match domains {
                     Some(d) => tools::memory::dispatch(tool, &id, &params, store, d.memory),
                     None => domain_unavailable(&id, "memory", status),
                 },
@@ -1246,6 +1248,8 @@ pub fn is_write_tool(tool: &str) -> bool {
         tool,
         "memory.capture"
             | "memory.erase"
+            | "memory.retire"
+            | "memory.unretire"
             | "memory.learn"
             | "memory.reflect"
             | "knowledge.ingest"
@@ -1359,10 +1363,79 @@ fn memory_tool_schemas() -> Vec<Value> {
         json!({"name":"memory.capture","description":"Capture a new memory node (episodic/semantic/procedural/archival).","inputSchema":{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"kind":{"type":"string","enum":["working","episode","entity","fact","skill","archive"]},"tier":{"type":"string","enum":["working","episodic","semantic","procedural","archival"]},"scope":{"type":"string","description":"Hierarchical scope path: slash-separated kind:id segments (e.g. \"org:acme/agent:claude\"). Empty, omitted, or null = root. Segments that are not kind:id pairs are rejected (invalid params), never silently dropped."},"about":{"type":"array","items":{"type":"string"}},"facets":{"type":"object","additionalProperties":{"type":"string"},"description":"Orthogonal intent-matching facets tagged to this memory's natural axis (e.g. {\"cli\":\"codex\"} or {\"repo\":\"wicked-estate\"}). Axis must match ^[a-z][a-z0-9_-]*$, value non-empty; invalid ⇒ invalid params."}}}}),
         json!({"name":"memory.recall","description":"Conversational recall: token-budgeted slice relevant to a query in scope. Returns [] when no memory matches lexically, via a graph seed, or semantically with cosine similarity >= 0.55. Working-tier matches follow all non-Working matches. Each item carries memory_id, scope (the item's own hierarchical scope, e.g. org:acme/agent:claude), content, tier, and score. Default visibility is inheritance: memories at `scope` or an ANCESTOR of it. Pass scope_prefix to flip to subtree-inclusive visibility instead.","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"scope":{"type":"string"},"scope_prefix":{"type":"string","description":"Optional subtree filter: when present, candidates are memories whose scope equals this prefix or DESCENDS from it (same predicate as memory.erase/memory.coverage scope_prefix), REPLACING the ancestor-visible inheritance filter from `scope`. \"\" = root subtree = every memory. Omitted or null = inheritance behavior. A recall with a prefix previews exactly the set memory.erase with that prefix would delete."},"seeds":{"type":"array","items":{"type":"string"}},"token_budget":{"type":"integer","default":2000},"intent":{"type":"object","additionalProperties":{"type":"string"},"description":"The session's intent tuple (axis→value). Recall returns the UNION of memories whose facets are a subset of this intent, specificity-ranked. A memory constraining an axis absent from intent is excluded. Omitted ⇒ empty ⇒ only unfaceted memories surface."}}}}),
         json!({"name":"memory.reflect","description":"Consolidate a scope. First DELETES working memories older than 24 h (a summary built over one is removed, then rebuilt from its surviving durable sources), so do not keep scratch in working memory expecting reflect to preserve it. Then distils episodic memories into semantic facts (T2), promotes reinforced facts to skills (T3), and archives aged low-salience memories (T4). Returns distilled_facts list.","inputSchema":{"type":"object","properties":{"scope":{"type":"string"}}}}),
-        json!({"name":"memory.erase","description":"Hard-delete memories. Pass exactly one of: `id` (erase that one memory, as memory.list or memory.recall returns its id) or `scope_prefix` (erase every memory whose scope is at or under the prefix).","inputSchema":{"type":"object","properties":{"scope_prefix":{"type":"string"},"id":{"type":"string"}}}}),
+        json!({
+            "name": "memory.erase",
+            "description": "Hard-delete active or retired memories. Pass exactly one of: \
+                id (erase that one memory, as memory.list or memory.recall returns its id) or \
+                scope_prefix (erase every memory whose scope is at or under the prefix).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope_prefix": {
+                        "type": "string"
+                    },
+                    "id": {
+                        "type": "string"
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "memory.retire",
+            "description": "Soft-retire one active memory by id or SymbolId string: kept for undo, \
+                never recalled. Returns retired_count (0 or 1).",
+            "inputSchema": {
+                "type": "object",
+                "required": [
+                    "id"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string"
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "memory.unretire",
+            "description": "Restore one retired memory by id or SymbolId string, preserving its \
+                identity. Returns restored_count (0 or 1).",
+            "inputSchema": {
+                "type": "object",
+                "required": [
+                    "id"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string"
+                    }
+                }
+            }
+        }),
         json!({"name":"memory.learn","description":"Store a semantic fact and link it to code symbols atomically.","inputSchema":{"type":"object","required":["content","symbols"],"properties":{"content":{"description":"one specific, non-obvious fact","type":"string"},"scope":{"description":"e.g. project:my-repo","type":"string"},"symbols":{"description":"exact code symbol name(s) this fact concerns","items":{"type":"string"},"type":"array"},"tier":{"description":"semantic=fact/decision, procedural=how-it-works","enum":["semantic","procedural"],"type":"string"}}}}),
         json!({"name":"memory.coverage","description":"Coverage: memory node counts (total, by tier, by kind), optionally scoped.","inputSchema":{"type":"object","properties":{"scope_prefix":{"type":"string"}}}}),
-        json!({"name":"memory.list","description":"Management browse: list EVERY memory in scope, each item carrying memory_id, scope, content, tier, facets (axis→value), and created_at. Unlike memory.recall this is NOT relevance-ranked, token-budgeted, or facet-intent-filtered — it returns the complete in-scope set (faceted memories included), for an operator surface that browses and filters by facet. Use memory.recall for an agent's intent-scoped, query-relevant slice; use memory.list to inventory or manage the store.","inputSchema":{"type":"object","properties":{"scope_prefix":{"type":"string","description":"Optional subtree filter: memories whose scope equals this prefix or DESCENDS from it (same predicate as memory.erase/memory.coverage). \"\", omitted, or null = every memory."}}}}),
+        json!({
+            "name": "memory.list",
+            "description": "Management browse: list every active memory in scope, each carrying \
+                memory_id, scope, content, tier, facets and created_at. Set retired:true to list \
+                ONLY retired memories, with retired_at (unix seconds). Complete inventory, \
+                including faceted memories: not relevance-ranked, token-budgeted or \
+                facet-intent-filtered. Use memory.recall for query-relevant recall.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "retired": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "True lists retired memories; default false lists active."
+                    },
+                    "scope_prefix": {
+                        "type": "string",
+                        "description": "Scope subtree; empty, omitted or null lists every scope."
+                    }
+                }
+            }
+        }),
     ]
 }
 
@@ -3074,7 +3147,7 @@ mod tests {
 
     #[test]
     fn unified_tools_list_with_domains_returns_30_tools() {
-        // tools/list with domains=Some → 12 estate + 7 memory + 10 knowledge + 4 proposal = 33 tools.
+        // With domains: 12 estate + 9 memory + 10 knowledge + 4 proposal = 35 tools.
         // (SemanticSearch absent: no matching dim-guard in default McpContext)
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 203, "method": "tools/list", "params": {} });
@@ -3097,8 +3170,8 @@ mod tests {
             .expect("tools must be array");
         assert_eq!(
             tools.len(),
-            33,
-            "12 estate + 7 memory + 10 knowledge + 4 proposal = 33; got {}",
+            35,
+            "12 estate + 9 memory + 10 knowledge + 4 proposal = 35; got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -3140,14 +3213,51 @@ mod tests {
         );
     }
 
-    /// The 11 write/destructive domain tools that `--readonly` must hide + refuse
+    #[test]
+    fn unsupported_memory_retirement_is_not_available() {
+        let store = fixture();
+        for (tool, args) in [
+            ("memory.retire", json!({"id": "unknown"})),
+            ("memory.unretire", json!({"id": "unknown"})),
+            ("memory.list", json!({"retired": true})),
+        ] {
+            let mut memory = FakeMemory;
+            let mut knowledge = FakeKnowledge;
+            let mut domains = DomainHandles {
+                memory: &mut memory,
+                knowledge: &mut knowledge,
+            };
+            let req = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": tool, "arguments": args}
+            });
+            let resp = handle_request_unified(
+                &store,
+                &req,
+                &McpContext::default(),
+                Some(&mut domains),
+                None,
+            );
+            assert_eq!(resp["error"]["code"], -32601, "{resp}");
+            assert!(
+                resp["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not available")
+            );
+        }
+    }
+
+    /// The 13 write/destructive domain tools that `--readonly` must hide + refuse
     /// (DES-GROUNDING-001 §3.0). Kept in one place so the test and [`is_write_tool`] can't drift.
     /// `memory.reflect` is here despite its recall-shaped name — it persists distilled facts.
     /// `proposal.approve`/`proposal.reject` write the active store / decide the queue (but
     /// `proposal.submit` is a deliberate safe-write kept under --readonly, so it is NOT here).
-    const WRITE_TOOLS: [&str; 11] = [
+    const WRITE_TOOLS: [&str; 13] = [
         "memory.capture",
         "memory.erase",
+        "memory.retire",
+        "memory.unretire",
         "memory.learn",
         "memory.reflect",
         "knowledge.ingest",
@@ -3351,6 +3461,13 @@ mod tests {
                 "a refused write ({w}) must NOT produce a tool result (the engine must not run); got {resp}"
             );
             assert_eq!(resp["id"], 900, "error must echo the request id for {w}");
+            assert!(
+                resp["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("--readonly"),
+                "{w} must name the read-only refusal cause: {resp}"
+            );
         }
     }
 
@@ -3416,7 +3533,7 @@ mod tests {
     fn without_readonly_write_tools_are_advertised_and_dispatch() {
         let store = fixture();
 
-        // Default (non-readonly) tools/list advertises all 33, writes included.
+        // Default (non-readonly) tools/list advertises all 35, writes included.
         let names = {
             let mut fake_mem = FakeMemory;
             let mut fake_know = FakeKnowledge;
