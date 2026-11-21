@@ -127,7 +127,10 @@ pub fn pack_memories(engine: &MemoryEngine, pack: &str) -> Result<Vec<PackMemory
             Error::Invalid(format!("pack {pack}: undecodable memory {}", node.symbol))
         })?;
         let id = memory.id.strip_prefix(&prefix).ok_or_else(|| {
-            Error::Invalid(format!("pack {pack}: memory {} lacks pack prefix", memory.id))
+            Error::Invalid(format!(
+                "pack {pack}: memory {} lacks pack prefix",
+                memory.id
+            ))
         })?;
         memories.push(
             PackMemory::new(id, memory.kind, memory.tier, memory.content)
@@ -222,7 +225,8 @@ pub fn apply_pack_memories(
             }
         }
         let mut node = memory.to_node();
-        let mut metadata = serde_json::to_value(&lock).map_err(|e| Error::Invalid(e.to_string()))?;
+        let mut metadata =
+            serde_json::to_value(&lock).map_err(|e| Error::Invalid(e.to_string()))?;
         metadata["hash"] = hash.into();
         node.metadata.insert("lock".into(), metadata);
         writes.push((memory, node));

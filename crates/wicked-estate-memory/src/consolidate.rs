@@ -945,8 +945,16 @@ mod tests {
             2,
             "acme + competitor keep SEPARATE Stripe entities (no cross-tenant merge)"
         );
-        assert!(stripe.iter().any(|m| m.scope.as_path() == "org:acme/unit:eng"));
-        assert!(stripe.iter().any(|m| m.scope.as_path() == "org:competitor/unit:eng"));
+        assert!(
+            stripe
+                .iter()
+                .any(|m| m.scope.as_path() == "org:acme/unit:eng")
+        );
+        assert!(
+            stripe
+                .iter()
+                .any(|m| m.scope.as_path() == "org:competitor/unit:eng")
+        );
     }
 
     #[test]

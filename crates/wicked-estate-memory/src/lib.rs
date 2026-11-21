@@ -1055,7 +1055,12 @@ mod tests {
             node.metadata.insert("lock".into(), value);
             assert_eq!(memory_lock(&node).unwrap().pack, "?");
             eng.store.upsert_nodes(std::slice::from_ref(&node)).unwrap();
-            assert!(eng.capture(&mem).unwrap_err().to_string().contains("memory_locked"));
+            assert!(
+                eng.capture(&mem)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("memory_locked")
+            );
             assert!(
                 eng.erase_id(&mem.id)
                     .unwrap_err()
@@ -1078,7 +1083,12 @@ mod tests {
                     .contains("memory_locked")
             );
         }
-        assert!(eng.erase("").unwrap_err().to_string().contains("memory_locked"));
+        assert!(
+            eng.erase("")
+                .unwrap_err()
+                .to_string()
+                .contains("memory_locked")
+        );
     }
 
     #[test]

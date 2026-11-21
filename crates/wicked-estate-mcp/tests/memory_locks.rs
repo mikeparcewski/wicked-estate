@@ -130,7 +130,10 @@ fn locked_writes_refuse_at_mcp_and_preserve_the_complete_inventory() {
         .unwrap();
     assert!(memory_lock(&learned_node).is_none());
     assert_eq!(
-        rig.ok("memory.list", json!({}))["items"].as_array().unwrap().len(),
+        rig.ok("memory.list", json!({}))["items"]
+            .as_array()
+            .unwrap()
+            .len(),
         2
     );
     assert_eq!(
@@ -238,14 +241,23 @@ fn pack_apply_hashes_projection_and_reconciles_versions_and_removals() {
     let pack = PackRef::new("fixture", "org", "v1");
     let first = PackMemory::new("first", MemKind::Fact, Tier::Semantic, "quartz policy")
         .with_facets(Facets::try_from_map([("project", "p1")]).unwrap());
-    let second = PackMemory::new("second", MemKind::Skill, Tier::Procedural, "quartz procedure");
+    let second = PackMemory::new(
+        "second",
+        MemKind::Skill,
+        Tier::Procedural,
+        "quartz procedure",
+    );
     let report = apply_pack_memories(&mut engine, &pack, &[first.clone(), second]).unwrap();
     assert_eq!((report.written, report.unchanged, report.erased), (2, 0, 0));
     let sym = Symbol::synthetic("mem", "fixture:first").id();
     let original = engine.node(&sym).unwrap().unwrap();
     let lock = memory_lock(&original).unwrap();
     assert_eq!(
-        (lock.pack.as_str(), lock.layer.as_str(), lock.version.as_str()),
+        (
+            lock.pack.as_str(),
+            lock.layer.as_str(),
+            lock.version.as_str()
+        ),
         ("fixture", "org", "v1")
     );
     assert_eq!(original.metadata["scope"], "org:fixture");
@@ -279,13 +291,18 @@ fn pack_apply_hashes_projection_and_reconciles_versions_and_removals() {
             _ => unreachable!(),
         }
         let sym = Symbol::synthetic("mem", format!("other:{}", changed.id)).id();
-        apply_pack_memories(&mut other, &PackRef::new("other", "team", "v9"), &[changed])
-            .unwrap();
-        assert_ne!(other.node(&sym).unwrap().unwrap().metadata["lock"]["hash"], hash);
+        apply_pack_memories(&mut other, &PackRef::new("other", "team", "v9"), &[changed]).unwrap();
+        assert_ne!(
+            other.node(&sym).unwrap().unwrap().metadata["lock"]["hash"],
+            hash
+        );
     }
     let read = pack_memories(&engine, "fixture").unwrap();
     assert_eq!(read.len(), 2);
-    assert!(read.iter().any(|m| m.id == "first" && m.facets == first.facets));
+    assert!(
+        read.iter()
+            .any(|m| m.id == "first" && m.facets == first.facets)
+    );
     let report = apply_pack_memories(&mut engine, &pack, &read).unwrap();
     assert_eq!((report.written, report.unchanged, report.erased), (0, 2, 0));
     assert_eq!(
@@ -300,7 +317,9 @@ fn pack_apply_hashes_projection_and_reconciles_versions_and_removals() {
     .unwrap();
     assert_eq!((report.written, report.unchanged, report.erased), (1, 0, 1));
     assert_eq!(
-        memory_lock(&engine.node(&sym).unwrap().unwrap()).unwrap().version,
+        memory_lock(&engine.node(&sym).unwrap().unwrap())
+            .unwrap()
+            .version,
         "v2"
     );
     assert_eq!(pack_memories(&engine, "fixture").unwrap().len(), 1);
@@ -313,8 +332,14 @@ fn pack_apply_hashes_projection_and_reconciles_versions_and_removals() {
     )
     .unwrap();
     assert_eq!(report.written, 1);
-    assert_ne!(engine.node(&sym).unwrap().unwrap().metadata["lock"]["hash"], hash);
-    assert_eq!(apply_pack_memories(&mut engine, &pack, &[]).unwrap().erased, 1);
+    assert_ne!(
+        engine.node(&sym).unwrap().unwrap().metadata["lock"]["hash"],
+        hash
+    );
+    assert_eq!(
+        apply_pack_memories(&mut engine, &pack, &[]).unwrap().erased,
+        1
+    );
     assert!(pack_memories(&engine, "fixture").unwrap().is_empty());
 }
 
@@ -350,13 +375,21 @@ fn pack_apply_validates_all_inputs_before_writing() {
     engine.capture(&existing).unwrap();
     let fresh = PackMemory::new("fresh", MemKind::Fact, Tier::Semantic, "fresh quartz");
     assert!(apply_pack_memories(&mut engine, &pack, &[fresh, good.clone()]).is_err());
-    assert_eq!(engine.count().unwrap(), 1, "ownership failures must not partially apply");
+    assert_eq!(
+        engine.count().unwrap(),
+        1,
+        "ownership failures must not partially apply"
+    );
     assert!(memory_lock(&engine.node(&existing.symbol()).unwrap().unwrap()).is_none());
 
     let mut corrupt = locked("fixture:good", "org:fixture");
-    corrupt.metadata.insert("lock".into(), json!({"pack": "fixture"}));
+    corrupt
+        .metadata
+        .insert("lock".into(), json!({"pack": "fixture"}));
     let mut rig = Rig::seeded(&[corrupt]);
     assert!(pack_memories(&rig.memory, "fixture").is_err());
-    let error = apply_pack_memories(&mut rig.memory, &pack, &[]).unwrap_err().to_string();
+    let error = apply_pack_memories(&mut rig.memory, &pack, &[])
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("memory_locked"), "{error}");
 }
