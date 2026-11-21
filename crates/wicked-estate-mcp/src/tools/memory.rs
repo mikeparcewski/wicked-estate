@@ -374,6 +374,42 @@ fn dispatch_list(id: &Value, args: &Value, memory: &dyn MemoryApi<Error = anyhow
         Some(Value::Bool(retired)) => *retired,
         Some(_) => return json_rpc_error(id, -32602, "memory.list: retired must be a boolean"),
     };
+    if let Some(admit_for) = args.get("admit_for").filter(|v| !v.is_null()) {
+        if args.get("scope_prefix").is_some_and(|v| !v.is_null()) || retired {
+            return json_rpc_error(
+                id,
+                -32602,
+                "memory.list: admit_for cannot be combined with scope_prefix or retired:true",
+            );
+        }
+        if !admit_for.is_object() {
+            return json_rpc_error(id, -32602, "memory.list: admit_for must be an object");
+        }
+        let scope = match admit_for.get("scope") {
+            None | Some(Value::Null) => "",
+            Some(Value::String(scope)) => scope.as_str(),
+            Some(_) => return json_rpc_error(id, -32602, "admit_for.scope must be a string"),
+        };
+        if let Err(error) = Scope::parse_strict(scope) {
+            return json_rpc_error(id, -32602, &format!("invalid admit_for.scope: {error}"));
+        }
+        let intent = match parse_facets(id, admit_for, "intent") {
+            Ok(intent) => intent,
+            Err(error) => return error,
+        };
+        return match memory.list_admitted(scope, &intent) {
+            Ok(Some(items)) => {
+                let wire: Vec<Value> = items.into_iter().map(list_item).collect();
+                mcp_result(id, json!({"items": wire}))
+            }
+            Ok(None) => json_rpc_error(
+                id,
+                -32601,
+                "memory.list admit_for not available: admission is unsupported",
+            ),
+            Err(error) => json_rpc_error(id, -32603, &error.to_string()),
+        };
+    }
     if retired {
         return match memory.list_retired(scope_prefix) {
             Ok(Some(items)) => {

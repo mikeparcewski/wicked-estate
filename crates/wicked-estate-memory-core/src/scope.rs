@@ -51,6 +51,11 @@ pub const OPERATOR_SCOPE_KIND: &str = "operator";
 pub const OPERATOR_SCOPE_DEFAULT: &str = "operator:local";
 
 impl Scope {
+    /// Exactly one org/team layer segment; descendants keep ordinary inheritance semantics.
+    pub fn is_memory_layer(&self) -> bool {
+        self.0.len() == 1 && matches!(self.0[0].kind.as_str(), "org" | "team")
+    }
+
     /// Is this exactly an operator scope (`operator:<id>`, one segment)? Operator memories are
     /// cross-project by design, so ancestor-visible recall admits them under every scope. A deeper
     /// path (`operator:x/project:y`) is NOT: it stays as narrow as it was written.

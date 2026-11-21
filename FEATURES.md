@@ -374,6 +374,12 @@ knowledge is what estate read (docs, and the structure of live data sources). Ea
   `working|episodic|semantic|procedural|archival`. `memory.recall` is token-budgeted and inherits from ancestor
   scopes (`scope_prefix` flips it to the subtree); each item carries `memory_id`, `scope`, `content`, `tier`, `score`.
 - **Operator memories** ✅ — an explicit operator scope applies across projects; project memories stay in their project.
+- **Pack memory locks** ✅ — verified governance sync uses the library-only `apply_pack_memories`
+  and `pack_memories` functions for org/team layers. Ordinary writes into a one-segment `org:` or
+  `team:` scope, edits of locked ids, retirement/restoration and erasure refuse with `memory_locked`;
+  a subtree erase containing any lock refuses the whole operation. Maintenance skips locked nodes.
+  Recall inherits locked one-segment org/team memories across projects, with facets still enforced.
+  No MCP tool locks, unlocks, applies or removes a pack.
 - **Facts linked to code** ✅ — `memory.learn` stores a fact and links it to code symbols in one step.
 - **Reflection** ✅ — `memory.reflect` deletes working memories older than 24 h first (a summary built over one is
   removed, then rebuilt from its surviving durable sources), distils episodes into facts, promotes reinforced facts
@@ -382,7 +388,9 @@ knowledge is what estate read (docs, and the structure of live data sources). Ea
   `memory.coverage` (active counts by tier and kind), `memory.retire` / `memory.unretire`
   (hide from recall / restore with the same id), and `memory.erase` (permanently remove one id,
   or everything under a scope prefix, including retired memories). `memory.list {retired: true}`
-  lists only retired memories with `retired_at`.
+  lists only retired memories with `retired_at`. `memory.list {admit_for: {scope, intent}}`
+  applies recall's ancestor/operator/locked-layer and facet admission without ranking or budgeting;
+  it cannot be combined with `scope_prefix` or `retired:true`.
 - **Propose, then approve** ✅ — `proposal.submit` queues an inert `memory`, `knowledge` or `policy:<type>`
   proposal (safe under `--readonly`; provenance is stamped by the server, never taken from args);
   `proposal.list`; `proposal.approve` promotes it (a `policy:*` proposal is handed back for steering);

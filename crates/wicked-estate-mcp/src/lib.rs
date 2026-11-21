@@ -1393,7 +1393,8 @@ fn memory_tool_schemas() -> Vec<Value> {
             "name": "memory.erase",
             "description": "Hard-delete active or retired memories. Pass exactly one of: \
                 id (erase that one memory, as memory.list or memory.recall returns its id) or \
-                scope_prefix (erase every memory whose scope is at or under the prefix).",
+                scope_prefix (erase every memory whose scope is at or under the prefix). \
+                Any locked victim refuses the whole erase with memory_locked.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1446,10 +1447,23 @@ fn memory_tool_schemas() -> Vec<Value> {
                 memory_id, scope, content, tier, facets and created_at. Set retired:true to list \
                 ONLY retired memories, with retired_at (unix seconds). Complete inventory, \
                 including faceted memories: not relevance-ranked, token-budgeted or \
-                facet-intent-filtered. Use memory.recall for query-relevant recall.",
+                facet-intent-filtered by default. admit_for applies recall scope and facet \
+                admission without ranking. Use memory.recall for query-relevant recall.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "admit_for": {
+                        "type": "object",
+                        "description": "Recall admission without ranking; incompatible with \
+                            scope_prefix or retired:true.",
+                        "properties": {
+                            "scope": {"type": "string"},
+                            "intent": {
+                                "type": "object",
+                                "additionalProperties": {"type": "string"}
+                            }
+                        }
+                    },
                     "retired": {
                         "type": "boolean",
                         "default": false,
@@ -3436,6 +3450,7 @@ mod tests {
             ("memory.retire", json!({"id": "unknown"})),
             ("memory.unretire", json!({"id": "unknown"})),
             ("memory.list", json!({"retired": true})),
+            ("memory.list", json!({"admit_for": {"scope": "project:x"}})),
         ] {
             let mut memory = FakeMemory;
             let mut knowledge = FakeKnowledge;

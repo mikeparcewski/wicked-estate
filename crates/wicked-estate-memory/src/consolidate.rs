@@ -24,7 +24,7 @@ use crate::MemoryEngine;
 use wicked_estate_core::{Edge, EdgeKind, ResolutionTier, Result, SymbolId};
 use wicked_estate_memory_core::{
     Extracted, Facets, MemKind, Memory, Scope, Tier, WORKING_TTL_SECS, fuzzy_candidates,
-    heuristic_extract, heuristic_same_entity, heuristic_summary, normalize,
+    heuristic_extract, heuristic_same_entity, heuristic_summary, memory_lock, normalize,
     salience as compute_salience,
 };
 
@@ -130,11 +130,16 @@ impl MemoryEngine {
     /// Entities VISIBLE to an episode at `mem_scope` (its own scope or an ANCESTOR — INHERITANCE
     /// direction, the FATAL-fix). Used by `merge_candidates`.
     fn visible_entities(&self, mem_scope: &Scope) -> Result<Vec<Memory>> {
-        Ok(self
-            .all_memories()?
-            .into_iter()
-            .filter(|m| m.kind == MemKind::Entity && m.scope.is_ancestor_of(mem_scope))
-            .collect())
+        let mut entities = Vec::new();
+        for memory in self.all_memories()? {
+            if memory.kind == MemKind::Entity
+                && memory.scope.is_ancestor_of(mem_scope)
+                && !self.is_locked(&memory.symbol())?
+            {
+                entities.push(memory);
+            }
+        }
+        Ok(entities)
     }
 
     /// Deterministic dedup HINT (DEC-R): for `name`, return likely-same existing entities visible to
@@ -228,6 +233,12 @@ impl MemoryEngine {
         distilled: Option<Extracted>,
         now: i64,
     ) -> Result<usize> {
+        // A locked memory is never consolidated, and nothing but a verified pack writes into a
+        // one-segment org/team layer scope: an (unlocked, pre-lock) episode there is skipped, not
+        // an error that would fail the whole reflect.
+        if episode.scope.is_memory_layer() || self.is_locked(&episode.symbol())? {
+            return Ok(0);
+        }
         let ex = distilled.unwrap_or_else(|| heuristic_extract(&episode.content));
         let ep_sym = episode.symbol();
 
@@ -284,6 +295,9 @@ impl MemoryEngine {
         let Some(node) = self.store.get_node(id)? else {
             return Ok(());
         };
+        if memory_lock(&node).is_some() {
+            return Ok(());
+        }
         let Some(mut m) = Memory::from_node(&node) else {
             return Ok(());
         };
@@ -371,6 +385,10 @@ impl MemoryEngine {
             .iter()
             .filter(|m| !is_scratch(m) && scope.is_ancestor_of(&m.scope))
         {
+            // Locked, or in a pack-only layer scope where an archive could not be written.
+            if m.scope.is_memory_layer() || self.is_locked(&m.symbol())? {
+                continue;
+            }
             kept += 1;
             match groups
                 .iter_mut()
@@ -415,6 +433,10 @@ impl MemoryEngine {
             now,
         )
         .with_facets(facets);
+        self.check_lock(&arc)?;
+        for memory in cluster {
+            self.check_lock(memory)?;
+        }
         // self-contained provenance: record subsumed source ids in metadata.
         let arc_node = {
             let mut n = arc.to_node();
@@ -547,6 +569,9 @@ impl MemoryEngine {
             let Some(node) = self.store.get_node(&arc.symbol())? else {
                 continue;
             };
+            if memory_lock(&node).is_some() {
+                continue;
+            }
             let sources: Vec<String> = node
                 .metadata
                 .get("source_ids")
@@ -584,6 +609,11 @@ impl MemoryEngine {
     fn remove_memories(&mut self, ids: &[SymbolId]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
+        }
+        for id in ids {
+            if let Some(node) = self.store.get_node(id)? {
+                Self::refuse_locked(&node)?;
+            }
         }
         let id_strs: Vec<String> = ids.iter().map(|s| s.0.clone()).collect();
         self.store.remove_nodes(ids)?;
@@ -623,7 +653,7 @@ mod tests {
         // (`heuristic_extract` through `capture_facts(None)`), NOT a Reasoner auto-distill. This is
         // the option-(b) floor — ≥1 fact + entities from the heuristic ALONE, no model in the loop.
         let mut eng = MemoryEngine::in_memory().unwrap();
-        let scope = Scope::parse("org:acme");
+        let scope = Scope::parse("org:acme/unit:eng");
         cap(
             &mut eng,
             MemKind::Episode,
@@ -653,7 +683,7 @@ mod tests {
         // exactly the agent's facts/entities — the deterministic floor is the fallback, not an
         // override. Proves the agent path is honoured (option-(b) is only the no-agent default).
         let mut eng = MemoryEngine::in_memory().unwrap();
-        let scope = Scope::parse("org:acme");
+        let scope = Scope::parse("org:acme/unit:eng");
         let ep = Memory::new(
             MemKind::Episode,
             Tier::Episodic,
@@ -885,8 +915,8 @@ mod tests {
         // FATAL-fix regression: entity reuse must follow scope INHERITANCE, never leak across tenants.
         // (1) cross-tenant non-merge even when reflecting at root.
         let mut eng = MemoryEngine::in_memory().unwrap();
-        let acme = Scope::parse("org:acme");
-        let comp = Scope::parse("org:competitor");
+        let acme = Scope::parse("org:acme/unit:eng");
+        let comp = Scope::parse("org:competitor/unit:eng");
         cap(
             &mut eng,
             MemKind::Entity,
@@ -915,16 +945,24 @@ mod tests {
             2,
             "acme + competitor keep SEPARATE Stripe entities (no cross-tenant merge)"
         );
-        assert!(stripe.iter().any(|m| m.scope.as_path() == "org:acme"));
-        assert!(stripe.iter().any(|m| m.scope.as_path() == "org:competitor"));
+        assert!(
+            stripe
+                .iter()
+                .any(|m| m.scope.as_path() == "org:acme/unit:eng")
+        );
+        assert!(
+            stripe
+                .iter()
+                .any(|m| m.scope.as_path() == "org:competitor/unit:eng")
+        );
     }
 
     #[test]
     fn entity_merge_reuses_ancestor_entity() {
         // (3) an entity at an ANCESTOR scope IS reused by a descendant episode (inheritance).
         let mut eng = MemoryEngine::in_memory().unwrap();
-        let org = Scope::parse("org:acme");
-        let team = Scope::parse("org:acme/team:a");
+        let org = Scope::parse("org:acme/unit:eng");
+        let team = Scope::parse("org:acme/unit:eng/team:a");
         cap(&mut eng, MemKind::Entity, Tier::Semantic, &org, "Stripe", 0); // org-level entity
         cap(
             &mut eng,
