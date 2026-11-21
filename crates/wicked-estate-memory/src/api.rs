@@ -265,10 +265,7 @@ impl MemoryApi for MemoryEngine {
                 .collect(),
             None => mems,
         };
-        Ok(filtered
-            .into_iter()
-            .map(memory_list_item)
-            .collect())
+        Ok(filtered.into_iter().map(memory_list_item).collect())
     }
 
     fn list_admitted(

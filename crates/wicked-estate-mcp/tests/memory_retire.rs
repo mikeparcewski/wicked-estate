@@ -132,8 +132,15 @@ fn erase_by_id_and_scope_remove_retired_memories_and_their_xedges() {
             .put_edge(&XEdge::about(id.clone(), "code-seed", 0))
             .unwrap();
         rig.capture("surviving quartz");
-        assert_eq!(rig.ok("memory.retire", json!({"id": id}))["retired_count"], 1);
-        assert_eq!(xedge.len().unwrap(), 1, "retirement keeps the xedge for undo");
+        assert_eq!(
+            rig.ok("memory.retire", json!({"id": id}))["retired_count"],
+            1
+        );
+        assert_eq!(
+            xedge.len().unwrap(),
+            1,
+            "retirement keeps the xedge for undo"
+        );
         let args = if by_scope {
             json!({"scope_prefix": "project:wicked"})
         } else {

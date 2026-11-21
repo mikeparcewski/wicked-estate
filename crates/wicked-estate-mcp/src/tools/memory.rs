@@ -287,7 +287,11 @@ fn dispatch_retirement(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
     else {
-        return json_rpc_error(id, -32602, &format!("{tool}: id must be a non-empty string"));
+        return json_rpc_error(
+            id,
+            -32602,
+            &format!("{tool}: id must be a non-empty string"),
+        );
     };
     let result = if restore {
         memory.unretire(memory_id, now)
