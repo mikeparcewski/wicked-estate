@@ -353,7 +353,8 @@ impl MemoryEngine {
                 continue;
             }
             node.kind = NodeKind::Other(RETIRED_MEMORY_NODE_KIND.into());
-            node.metadata.insert(meta_keys::RETIRED_AT.into(), now.into());
+            node.metadata
+                .insert(meta_keys::RETIRED_AT.into(), now.into());
             let sym = node.symbol.clone();
             self.store.upsert_nodes(&[node])?;
             self.ext.remove(std::slice::from_ref(&sym.0))?;
@@ -891,7 +892,8 @@ mod tests {
             100,
         );
         let seed = wicked_estate_core::Symbol::synthetic("code", "seed").id();
-        eng.capture_about(&mem, std::slice::from_ref(&seed)).unwrap();
+        eng.capture_about(&mem, std::slice::from_ref(&seed))
+            .unwrap();
         let original = eng.node(&mem.symbol()).unwrap().unwrap();
         let vector = eng.embed_for(&mem.content);
         assert_eq!(eng.ext.count().unwrap(), 1);
@@ -984,14 +986,23 @@ mod tests {
         assert!(reflected.distilled_facts.is_empty());
         assert_eq!(MemoryApi::coverage(&eng, None).unwrap().total, 0);
         assert!(MemoryApi::list(&eng, None).unwrap().is_empty());
-        assert_eq!(MemoryApi::list_retired(&eng, None).unwrap().unwrap().len(), 3);
+        assert_eq!(
+            MemoryApi::list_retired(&eng, None).unwrap().unwrap().len(),
+            3
+        );
     }
 
     #[test]
     fn an_undecodable_retired_node_never_blocks_list_restore_or_erase() {
         let mut eng = MemoryEngine::in_memory().unwrap();
         let scope = Scope::parse("project:retire");
-        let good = Memory::new(MemKind::Fact, Tier::Semantic, scope.clone(), "good quartz", 1);
+        let good = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            scope.clone(),
+            "good quartz",
+            1,
+        );
         let bad = Memory::new(MemKind::Fact, Tier::Semantic, scope, "bad quartz", 1);
         eng.capture(&good).unwrap();
         eng.capture(&bad).unwrap();
