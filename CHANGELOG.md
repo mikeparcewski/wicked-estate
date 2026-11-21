@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`release.yml` no longer rewrites third-party pins (#479).** The bump step turned `zip = { version = "9.0.5" }` into the new estate version, so the `Cargo.lock` update failed and nothing was tagged. The bump is now `scripts/bump_workspace_version.py`, limited to `[workspace.package]` and the `wicked-estate-*` pins, with a unit test (run by CI's `unittest discover`) that feeds it a third-party full-semver pin.
+
 ## [0.35.8] — 2026-11-20
 
 Patch release on main 190e5b99, carrying 11 PRs since 0.35.7: #507, #509, #510, #512, #514, #517, #518, #521, #524, #525, #526.

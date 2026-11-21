@@ -33,7 +33,7 @@ Internal deps are pinned to this version (`{ path = "...", version = "0.0.1" }`)
 them to plain `version` deps on publish. Keep them in sync with the workspace version.
 
 > ⚠️ `.github/workflows/release.yml` does **not** sync the per-crate pins in
-> `crates/*/Cargo.toml` — its regex rewrites only the root `Cargo.toml`. Do not dispatch it for a
+> `crates/*/Cargo.toml` — its bump step (`scripts/bump_workspace_version.py`) rewrites only the root `Cargo.toml`, and there only `[workspace.package]` and the `wicked-estate-*` pins. Do not dispatch it for a
 > minor bump unless its `version_pins` guard step is present and green; bump the pins manually on a
 > branch first. Drifted pins fail publish **mid-sequence** (caret semantics: `^0.14.2` excludes
 > `0.15.0`), after leaf crates are already irreversibly published. The guard test is

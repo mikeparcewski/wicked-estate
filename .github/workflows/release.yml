@@ -44,26 +44,9 @@ jobs:
         env:
           NEW_VERSION: ${{ github.event.inputs.version }}
         run: |
-          python3 - <<'EOF'
-          import os, pathlib
-          new_ver = os.environ["NEW_VERSION"]
-          p = pathlib.Path("Cargo.toml")
-          text = p.read_text()
-          # Find the current version in [workspace.package] and dependency pins.
-          # All internal crate version pins use the same value as workspace.package.
-          import re
-          # Replace any version = "N.N.N" that matches a semver pattern.
-          # Third-party deps use "1", "2", "1.85", etc. — only full semver gets replaced.
-          updated = re.sub(
-              r'(version\s*=\s*)"(\d+\.\d+\.\d+)"',
-              lambda m: f'{m.group(1)}"{new_ver}"',
-              text,
-          )
-          if updated == text:
-              print("WARNING: no semver version strings found in Cargo.toml")
-          p.write_text(updated)
-          print(f"Bumped semver strings to {new_ver}")
-          EOF
+          # Only [workspace.package] and the wicked-estate-* path-dep pins change; third-party
+          # pins (zip, calamine, ...) stay (#479). Logic and test: scripts/bump_workspace_version.py.
+          python3 scripts/bump_workspace_version.py "$NEW_VERSION"
 
       # The Claude-plugin manifest carries its own version field outside Cargo's
       # reach — it shipped 0.13.1 across the 0.14.x/0.15.0 releases because
@@ -90,7 +73,7 @@ jobs:
       - name: update Cargo.lock
         run: cargo check --workspace --quiet
 
-      # The regex above rewrites ONLY the root Cargo.toml. The per-crate internal
+      # The bump step rewrites ONLY the root Cargo.toml. The per-crate internal
       # pins (crates/*/Cargo.toml) are NOT synced by this workflow — if they have
       # drifted, publishing would fail MID-SEQUENCE after leaf crates are already
       # irreversibly live (caret semantics: ^0.15.0 excludes 0.16.0). This guard
