@@ -1,9 +1,11 @@
-//! MCP dispatch for the 7 `memory.*` tools.
+//! MCP dispatch for the 9 `memory.*` tools.
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use wicked_estate_core::{GraphRead, SymbolId};
-use wicked_estate_memory_core::{CaptureRequest, Facets, MemoryApi, RecallQuery, Scope};
+use wicked_estate_memory_core::{
+    CaptureRequest, Facets, MemoryApi, MemoryListItem, RecallQuery, Scope,
+};
 
 pub fn dispatch(
     tool: &str,
@@ -22,6 +24,8 @@ pub fn dispatch(
         "memory.recall" => dispatch_recall(id, &args, memory, now),
         "memory.reflect" => dispatch_reflect(id, &args, memory, now),
         "memory.erase" => dispatch_erase(id, &args, memory, now),
+        "memory.retire" => dispatch_retirement(id, &args, memory, now, false),
+        "memory.unretire" => dispatch_retirement(id, &args, memory, now, true),
         "memory.learn" => dispatch_learn(id, &args, store, memory, now),
         "memory.coverage" => dispatch_coverage(id, &args, memory),
         "memory.list" => dispatch_list(id, &args, memory),
@@ -266,6 +270,48 @@ fn dispatch_erase(
     }
 }
 
+fn dispatch_retirement(
+    id: &Value,
+    args: &Value,
+    memory: &mut dyn MemoryApi<Error = anyhow::Error>,
+    now: i64,
+    restore: bool,
+) -> Value {
+    let tool = if restore {
+        "memory.unretire"
+    } else {
+        "memory.retire"
+    };
+    let Some(memory_id) = args
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return json_rpc_error(id, -32602, &format!("{tool}: id must be a non-empty string"));
+    };
+    let result = if restore {
+        memory.unretire(memory_id, now)
+    } else {
+        memory.retire(memory_id, now)
+    };
+    match result {
+        Ok(Some(count)) => mcp_result(
+            id,
+            if restore {
+                json!({"restored_count": count})
+            } else {
+                json!({"retired_count": count})
+            },
+        ),
+        Ok(None) => json_rpc_error(
+            id,
+            -32601,
+            &format!("{tool} not available: memory implementer does not support retirement"),
+        ),
+        Err(e) => json_rpc_error(id, -32603, &e.to_string()),
+    }
+}
+
 fn dispatch_learn(
     id: &Value,
     args: &Value,
@@ -306,7 +352,7 @@ fn dispatch_coverage(
     }
 }
 
-/// `memory.list` — the management browse. Returns the COMPLETE in-scope memory set, each item
+/// `memory.list` — the management browse. Returns the in-scope active or retired set, each item
 /// carrying `facets` (the recall wire omits them and excludes faceted memories under empty intent).
 /// The per-item wire shape mirrors `memory.recall` (`memory_id`/`scope`/`content`/`tier`) plus
 /// `facets` + `created_at`, so an existing recall-item consumer parses it unchanged.
@@ -319,23 +365,48 @@ fn dispatch_coverage(
 /// ever grows past operator scale.
 fn dispatch_list(id: &Value, args: &Value, memory: &dyn MemoryApi<Error = anyhow::Error>) -> Value {
     let scope_prefix = args.get("scope_prefix").and_then(|v| v.as_str());
+    let retired = match args.get("retired") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(retired)) => *retired,
+        Some(_) => return json_rpc_error(id, -32602, "memory.list: retired must be a boolean"),
+    };
+    if retired {
+        return match memory.list_retired(scope_prefix) {
+            Ok(Some(items)) => {
+                let wire: Vec<Value> = items
+                    .into_iter()
+                    .map(|retired| {
+                        let mut item = list_item(retired.item);
+                        item["retired_at"] = json!(retired.retired_at);
+                        item
+                    })
+                    .collect();
+                mcp_result(id, json!({"items": wire}))
+            }
+            Ok(None) => json_rpc_error(
+                id,
+                -32601,
+                "memory.list retired view not available: retirement is unsupported",
+            ),
+            Err(e) => json_rpc_error(id, -32603, &e.to_string()),
+        };
+    }
     match memory.list(scope_prefix) {
         Ok(items) => {
-            let wire: Vec<Value> = items
-                .into_iter()
-                .map(|item| {
-                    json!({
-                        "memory_id":  item.id,
-                        "scope":      item.scope,
-                        "content":    item.content,
-                        "tier":       item.tier,
-                        "facets":     item.facets,
-                        "created_at": item.created_at,
-                    })
-                })
-                .collect();
+            let wire: Vec<Value> = items.into_iter().map(list_item).collect();
             mcp_result(id, json!({"items": wire}))
         }
         Err(e) => json_rpc_error(id, -32603, &e.to_string()),
     }
+}
+
+fn list_item(item: MemoryListItem) -> Value {
+    json!({
+        "memory_id":  item.id,
+        "scope":      item.scope,
+        "content":    item.content,
+        "tier":       item.tier,
+        "facets":     item.facets,
+        "created_at": item.created_at,
+    })
 }
