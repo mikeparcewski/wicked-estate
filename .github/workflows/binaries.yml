@@ -53,10 +53,13 @@ jobs:
             py: python3
             macos_min: '11.0'
           # The remaining x86_64 macOS image; when it is retired this leg moves to
-          # `--target x86_64-apple-darwin` on arm64, smoke-tested under Rosetta.
+          # `--target x86_64-apple-darwin` on arm64, smoke-tested under Rosetta. Same floor as the
+          # arm64 leg (#381): one documented minimum for both macOS archives, and rustc's own
+          # default here (10.12) is below what current Xcode SDKs still target for C.
           - target: x86_64-apple-darwin
             os: macos-15-intel
             py: python3
+            macos_min: '11.0'
           # Built inside manylinux_2_28 so the binary needs glibc >= 2.28 (RHEL/Alma/Rocky 8+,
           # Debian 10+, Ubuntu 20.04+); a build on the runner's own glibc would not start on RHEL 9.
           - target: x86_64-unknown-linux-gnu
@@ -125,6 +128,20 @@ jobs:
           rm -rf check
           ${{ matrix.py }} -c "import shutil, sys; shutil.unpack_archive(sys.argv[1], 'check')" "$archive"
           echo "dir=check/wicked-estate-${{ steps.version.outputs.version }}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+      # The floor is a claim about machines the build never ran on: read it back from the
+      # shipped binaries' LC_BUILD_VERSION, so a runner image change cannot move it silently.
+      - name: minimum macOS recorded in the binaries
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          want='${{ matrix.macos_min }}'
+          if [ -z "$want" ]; then echo "::error::${{ matrix.target }} has no macos_min"; exit 1; fi
+          for b in wicked-estate wicked-estate-mcp; do
+            got=$(vtool -show-build "${{ steps.package.outputs.dir }}/$b" | awk '$1 == "minos" { print $2; exit }')
+            echo "$b: minos $got (want $want)"
+            if [ "$got" != "$want" ]; then echo "::error::$b minos is '$got', want $want"; exit 1; fi
+          done
       # The smoke test runs against the EXTRACTED archive, before anything is uploaded: a leg
       # that fails it uploads nothing, and the release job then refuses to publish.
       - name: install smoke test

@@ -94,6 +94,9 @@ gh attestation verify wicked-estate-$V-$T.tar.gz --repo mikeparcewski/wicked-est
 - **Linux** binaries are built against glibc 2.28, so they start on RHEL/Alma/Rocky 8+, Debian 10+
   and Ubuntu 20.04+. They are glibc builds and not static musl ones, because a musl binary cannot
   `dlopen` the runtime grammar plugins (`PLUGIN.md`).
+- **macOS** binaries need macOS 11 (Big Sur) or later, on Apple silicon and Intel alike: the
+  release build pins that floor for the Rust and the C code (SQLite, the grammars) and checks it
+  on the shipped binaries.
 - **macOS** binaries are not notarized yet. After downloading, clear the quarantine flag once:
   `xattr -d com.apple.quarantine wicked-estate wicked-estate-mcp`.
 - **Windows** binaries link the C runtime statically, so no VC++ redistributable is needed.

@@ -316,5 +316,30 @@ class PublishWorkflowTests(unittest.TestCase):
         self.assertNotIn('>>>', result.stdout)
 
 
+class BinariesWorkflowTests(unittest.TestCase):
+    """#381: every macOS archive pins its floor for Rust and C alike."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.binaries = (ROOT / ".github/workflows/binaries.yml").read_text()
+
+    def legs(self):
+        build = job(self.binaries, "build")
+        include = build.split("        include:\n", 1)[1].split("    steps:\n", 1)[0]
+        return [leg for leg in re.split(r"^          - ", include, flags=re.MULTILINE)[1:]]
+
+    def test_every_macos_leg_pins_a_deployment_target(self):
+        mac = [leg for leg in self.legs() if "apple-darwin" in leg.splitlines()[0]]
+        self.assertEqual(len(mac), 2, mac)
+        for leg in mac:
+            target = leg.splitlines()[0]
+            self.assertRegex(leg, r"\n\s+macos_min: '\d+\.\d+'\n", f"{target} has no macos_min")
+
+    def test_shipped_macos_binaries_are_checked_against_the_floor(self):
+        script = step_script(job(self.binaries, "build"), "minimum macOS recorded in the binaries")
+        self.assertIn("vtool -show-build", script)
+        self.assertIn("matrix.macos_min", script)
+
+
 if __name__ == '__main__':
     unittest.main()
