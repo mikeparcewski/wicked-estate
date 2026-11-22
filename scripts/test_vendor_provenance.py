@@ -2,41 +2,74 @@
 
 from pathlib import Path
 import re
+import shutil
+import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "crates/wicked-estate-extract/vendor"
+ROW = re.compile(r"^\| `[^`]+`[^|]*\| `([^`]+)/` \| ([^|]*)\|", re.MULTILINE)
 
 
-def vendored_trees():
-    return sorted(p.name for p in VENDOR.iterdir() if p.is_dir() and p.name.startswith("tree-sitter-"))
+def vendored_trees(vendor):
+    return sorted(p.name for p in vendor.iterdir() if p.is_dir() and p.name.startswith("tree-sitter-"))
+
+
+def provenance_problems(vendor, notice):
+    """Every reason the vendored trees are not fully recorded and attributed; empty when they are."""
+    problems = []
+    trees = vendored_trees(vendor)
+    rows = ROW.findall((vendor / "PROVENANCE.md").read_text())
+    if sorted(sub for sub, _ in rows) != trees:
+        problems.append(f"PROVENANCE rows {sorted(sub for sub, _ in rows)} != trees {trees}")
+    noticed = sorted(set(re.findall(r"crates/wicked-estate-extract/vendor/(tree-sitter-[\w-]+)/", notice)))
+    if noticed != trees:
+        problems.append(f"NOTICE paths {noticed} != trees {trees}")
+    third_party = {sub for sub, source in rows if not source.strip().startswith("In-house")}
+    for tree in trees:
+        license_file = vendor / tree / "LICENSE"
+        lines = license_file.read_text().splitlines() if license_file.exists() else []
+        copyrights = [line.strip() for line in lines if line.strip().startswith("Copyright (c)")]
+        # MIT requires the copyright notice to travel with the binary; NOTICE ships in every archive.
+        if tree in third_party and not copyrights:
+            problems.append(f"{tree}: third-party tree without a LICENSE copyright line")
+        problems += [f"{tree}: {c!r} missing from NOTICE" for c in copyrights if c not in notice]
+    return problems
 
 
 class VendoredGrammarProvenanceTests(unittest.TestCase):
     def test_trees_are_found(self):
-        self.assertGreaterEqual(len(vendored_trees()), 12)
+        self.assertGreaterEqual(len(vendored_trees(VENDOR)), 12)
 
-    def test_every_tree_has_one_provenance_row(self):
-        table = (VENDOR / "PROVENANCE.md").read_text()
-        subpaths = re.findall(r"^\| `[^`]+`[^|]*\| `([^`]+)/` \|", table, re.MULTILINE)
-        self.assertEqual(sorted(subpaths), vendored_trees())
+    def test_every_tree_is_recorded_and_attributed(self):
+        self.assertEqual(provenance_problems(VENDOR, (ROOT / "NOTICE").read_text()), [])
 
-    def test_every_tree_is_attributed_in_notice(self):
-        notice = (ROOT / "NOTICE").read_text()
-        paths = set(re.findall(r"crates/wicked-estate-extract/vendor/(tree-sitter-[\w-]+)/", notice))
-        self.assertEqual(sorted(paths), vendored_trees())
+    def test_a_lost_or_emptied_third_party_license_is_caught(self):
+        notice = (ROOT / "NOTICE").read_text().replace("Copyright (c) 2023 joannefan", "")
+        for emptied in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                vendor = Path(tmp) / "vendor"
+                shutil.copytree(VENDOR, vendor, ignore=shutil.ignore_patterns("*.c", "*.h", "*.json", "corpus"))
+                if emptied:
+                    (vendor / "tree-sitter-vb6/LICENSE").write_text("")
+                else:
+                    (vendor / "tree-sitter-vb6/LICENSE").unlink()
+                self.assertEqual(provenance_problems(vendor, notice),
+                                 ["tree-sitter-vb6: third-party tree without a LICENSE copyright line"])
 
-    def test_third_party_copyright_lines_are_reproduced_in_notice(self):
-        # MIT requires the copyright notice to travel with the binary; NOTICE ships in every archive.
-        notice = (ROOT / "NOTICE").read_text()
-        for tree in vendored_trees():
-            license_file = VENDOR / tree / "LICENSE"
-            if not license_file.exists():
-                continue
-            for line in license_file.read_text().splitlines():
-                if line.strip().startswith("Copyright (c)"):
-                    self.assertIn(line.strip(), notice, f"{tree}: {line.strip()!r} missing from NOTICE")
+    def test_a_copyright_line_missing_from_notice_is_caught(self):
+        notice = (ROOT / "NOTICE").read_text().replace("Copyright (c) 2023 tmepple", "")
+        self.assertEqual(provenance_problems(VENDOR, notice),
+                         ["tree-sitter-vba: 'Copyright (c) 2023 tmepple' missing from NOTICE"])
+
+    def test_a_tree_without_a_row_is_caught(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vendor = Path(tmp) / "vendor"
+            shutil.copytree(VENDOR, vendor, ignore=shutil.ignore_patterns("*.c", "*.h", "*.json", "corpus"))
+            (vendor / "tree-sitter-new").mkdir()
+            problems = provenance_problems(vendor, (ROOT / "NOTICE").read_text())
+            self.assertEqual(len(problems), 2, problems)
 
 
 if __name__ == "__main__":
