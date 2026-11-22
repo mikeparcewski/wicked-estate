@@ -103,6 +103,10 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      # Each crate is polled at its OWN manifest version (#563): the 11 vendored tree-sitter grammars
+      # version independently of the workspace (0.1.x, 0.26.x), so polling them at the tag version
+      # never succeeds and the GitHub Release draft below was skipped on every release.
+      # The tag still has to match the wicked-estate crate's version.
       - name: wait until crates.io serves every package (up to 15 min)
         shell: bash
         env:
@@ -110,32 +114,56 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          crates="$(bash scripts/publish.sh --list)"
-          [ -n "$crates" ] || { echo "::error::publish.sh --list returned no crates"; exit 1; }
+          # A tag cut before #563 has a publish.sh without --list-versions, and that publish.sh
+          # treats an unknown argument as a real publish. Stop with a clear error instead.
+          grep -q -- '--list-versions' scripts/publish.sh || {
+            echo "::error::scripts/publish.sh at $TAG predates --list-versions (#563); this check cannot run on that tag"
+            exit 1
+          }
+          pairs="$(bash scripts/publish.sh --list-versions)"
+          [ -n "$pairs" ] || { echo "::error::publish.sh --list-versions returned no crates"; exit 1; }
+          for pair in $pairs; do
+            [[ "$pair" =~ ^[a-z0-9_-]+=[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]] || {
+              echo "::error::publish.sh --list-versions printed a malformed crate=version pair: $pair"
+              exit 1
+            }
+          done
+          estate_version=""
+          for pair in $pairs; do
+            if [ "${pair%%=*}" = "wicked-estate" ]; then estate_version="${pair#*=}"; fi
+          done
+          if [ "$estate_version" != "$VERSION" ]; then
+            echo "::error::tag $TAG does not match the wicked-estate manifest version (${estate_version:-missing})"
+            exit 1
+          fi
           started="$(date +%s)"
           deadline=$(( started + 15 * 60 ))
           check_deadline() {
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::crates.io still does not serve every package at $VERSION after 15 minutes. Publish succeeded; re-run failed jobs, or dispatch the tag. publish.sh skips published crates."
+              echo "::error::crates.io still does not serve every package at its manifest version after 15 minutes (missing on the last full check:$last_missing). Publish succeeded; re-run failed jobs, or dispatch the tag. publish.sh skips published crates."
               exit 1
             fi
           }
+          last_missing=""
           while :; do
             missing=""
-            for crate in $crates; do
+            for pair in $pairs; do
+              crate="${pair%%=*}"
+              version="${pair#*=}"
               check_deadline
               # Every estate crate name has at least four characters.
               url="https://index.crates.io/${crate:0:2}/${crate:2:2}/$crate"
               if index="$(curl -fsS --max-time 30 "$url")" \
-                 && jq -e -s --arg version "$VERSION" \
+                 && jq -e -s --arg version "$version" \
                    'any(.[]; .vers == $version and .yanked == false)' <<< "$index" >/dev/null; then
                 continue
               fi
-              missing="$missing $crate"
+              missing="$missing $crate@$version"
             done
+            last_missing="$missing"
             check_deadline
             if [ -z "$missing" ]; then
-              echo "all packages resolve at $VERSION after $(( $(date +%s) - started ))s"
+              echo "all packages resolve at their manifest versions (wicked-estate $VERSION) after $(( $(date +%s) - started ))s"
               break
             fi
             echo "not yet:$missing; next check in 30s"
