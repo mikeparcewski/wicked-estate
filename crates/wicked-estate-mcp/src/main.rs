@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::Write;
 use tokio::io::AsyncBufReadExt;
+use wicked_estate_extract::doc_convert::{self, BudgetAlloc};
 use wicked_estate_knowledge::{KnowledgeApi, KnowledgeEngine};
 use wicked_estate_mcp::{DomainHandles, McpContext, ServerStatus, handle_request_unified_status};
 use wicked_estate_memory::MemoryEngine;
@@ -23,6 +24,9 @@ use wicked_estate_memory_core::MemoryApi;
 use wicked_estate_overlay::XedgeStore;
 use wicked_estate_retrieve::Embedder as _;
 use wicked_estate_store::SqliteStore;
+
+#[global_allocator]
+static ALLOC: BudgetAlloc = BudgetAlloc::new();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI / env resolution
@@ -299,8 +303,18 @@ fn emit_tool_duration(
     });
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    if let Some(code) = doc_convert::run_child_if_requested(&ALLOC) {
+        std::process::exit(code);
+    }
+    doc_convert::isolate_conversions();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<()> {
     // DES-GROUNDING-001 §3.0: read-only mode — advertise + dispatch only read/query tools.
     let read_only = resolve_read_only();
     let db_path = read_only_store(resolve_db_path()?, read_only, "graph");

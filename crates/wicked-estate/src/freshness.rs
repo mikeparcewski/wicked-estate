@@ -813,6 +813,24 @@ impl FreshnessProbe {
                  results may mix old and new files and miss cross-file edges; re-run index if no run is active"
             ));
         }
+        let skipped_documents = self
+            .store
+            .as_deref()
+            .map(crate::skipped_documents)
+            .unwrap_or_default();
+        if !skipped_documents.is_empty() {
+            let examples = skipped_documents
+                .iter()
+                .take(3)
+                .map(|(path, reason)| format!("{path}: {reason}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            diags.push(format!(
+                "DOC-SKIPPED: {} document(s) in the tree are not in the index (e.g. {examples}); \
+                 see wicked-estate stats --json",
+                skipped_documents.len()
+            ));
+        }
         if let Some(store) = self.store.as_deref() {
             if let Some(object) = content
                 .as_object_mut()
@@ -941,6 +959,7 @@ impl FreshnessProbe {
         let block = json!({
             "commits_behind": worst,
             "indexing": indexing,
+            "skipped_documents": skipped_documents.len(),
             "roots": root_rows,
             "stale_files": stale
                 .iter()
@@ -1052,6 +1071,73 @@ fn mark_rows(v: &mut Value, marks: &HashMap<&str, &str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotate_reports_skipped_documents_until_record_is_cleared() {
+        for label in [None, Some("ledger")] {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+            if let Some(label) = label {
+                store.meta_set_key("repo_labels", r#"["ledger","other"]"#);
+                for repo in [label, "other"] {
+                    store.meta_set_key(
+                        &repo_scope::meta_key(Some(repo), "root"),
+                        &root.path().to_string_lossy(),
+                    );
+                }
+                store.meta_set_key("skipped_documents", "ignored.pdf\tignored");
+                store.meta_set_key(
+                    &repo_scope::meta_key(Some("other"), "skipped_documents"),
+                    "other/z.pdf\tno text",
+                );
+            }
+            let key = repo_scope::meta_key(label, "skipped_documents");
+            let paths: Vec<_> = ["a.pdf", "b.pdf", "c.pdf", "d.pdf"]
+                .iter()
+                .map(|path| repo_scope::namespaced(label, path))
+                .collect();
+            let record = paths
+                .iter()
+                .rev()
+                .map(|path| format!("{path}\tno text"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            store.meta_set_key(&key, &record);
+            let mut probe = FreshnessProbe::with_store(":memory:", Some(Box::new(store)));
+            let mut content = json!({});
+            let mut diags = vec![];
+            probe.annotate(&mut content, &mut diags);
+            let skipped: Vec<_> = diags
+                .iter()
+                .filter(|diag| diag.starts_with("DOC-SKIPPED:"))
+                .collect();
+            let count = if label.is_some() { 5 } else { 4 };
+            assert_eq!(content["freshness"]["skipped_documents"], json!(count));
+            assert_eq!(
+                skipped,
+                vec![&format!(
+                    "DOC-SKIPPED: {count} document(s) in the tree are not in the index \
+                     (e.g. {}: no text; {}: no text; {}: no text); \
+                     see wicked-estate stats --json",
+                    paths[0], paths[1], paths[2]
+                )]
+            );
+
+            let store = probe.store.as_mut().unwrap();
+            store.meta_set_key(&key, "");
+            if label.is_some() {
+                store.meta_set_key(
+                    &repo_scope::meta_key(Some("other"), "skipped_documents"),
+                    "",
+                );
+            }
+            let mut content = json!({});
+            let mut diags = vec![];
+            probe.annotate(&mut content, &mut diags);
+            assert_eq!(content["freshness"]["skipped_documents"], json!(0));
+            assert!(!diags.iter().any(|diag| diag.starts_with("DOC-SKIPPED:")));
+        }
+    }
 
     #[test]
     fn crossing_answers_carry_live_link_status_after_member_reindex() {

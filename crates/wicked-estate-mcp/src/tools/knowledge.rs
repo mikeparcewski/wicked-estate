@@ -225,7 +225,7 @@ fn dispatch_ingest(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, n
 }
 
 /// The chunks of the binary document at `path` (pdf, docx, pptx, xlsx, ...): read locally,
-/// converted to Markdown in-process, redacted with the same rules as any `.md`, split at H1/H2.
+/// converted to Markdown in a supervised child process, redacted like any `.md`, split at H1/H2.
 /// The read is confined like the indexer's (wicked-estate#405): `path` must resolve, symlinks and
 /// `..` included, inside the server's working directory, so this tool reads no more of the disk
 /// than an index of that directory would. A file the secret-file rule excludes is never read.
