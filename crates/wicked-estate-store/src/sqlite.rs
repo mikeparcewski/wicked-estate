@@ -135,16 +135,21 @@ fn rebuild_fts_all(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Migrated = every `nodes_fts` row's rowid is the sid of the symbol it carries (#420, #570).
+/// Migrated = `nodes_fts` holds exactly one row per node, keyed by the node's sid and carrying
+/// its symbol (#420, #570): every FTS row's rowid is a node's sid with that sid's symbol, and
+/// there are as many FTS rows as nodes (rowids are unique, so that is one row per node).
 ///
 /// The rows themselves are the evidence, so no marker or trigger has to be trusted: a store
-/// written before #420 (automatic rowids), or one an OLDER binary wrote to since (it deletes by
-/// symbol text and inserts with an automatic rowid), fails it, and the next writer open rebuilds.
-/// One pass over the FTS rows with a primary-key lookup each; it runs on opens, not per query.
+/// written before #420 (automatic rowids), one an OLDER binary wrote to since (it deletes by
+/// symbol text and inserts with an automatic rowid), and a populated store with a missing or
+/// partial FTS table all fail it, and the next writer open rebuilds. One pass over the FTS rows
+/// with primary-key lookups; it runs on opens, not per query.
 fn fts_rowid_migrated(conn: &Connection) -> Result<bool> {
     conn.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM nodes_fts f WHERE NOT EXISTS( \
-             SELECT 1 FROM symbols s WHERE s.sid = f.rowid AND s.sym = f.symbol))",
+        "SELECT (SELECT COUNT(*) FROM nodes) = (SELECT COUNT(*) FROM nodes_fts) \
+            AND NOT EXISTS(SELECT 1 FROM nodes_fts f WHERE NOT EXISTS( \
+                SELECT 1 FROM nodes n JOIN symbols s ON s.sid = n.symbol \
+                WHERE n.symbol = f.rowid AND s.sym = f.symbol))",
         [],
         |r| r.get::<_, i64>(0),
     )
@@ -9327,35 +9332,98 @@ mod tests {
         conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
     }
 
-    /// #570: a store this build writes (a fresh one, after a #420 rebuild and after the redaction
-    /// rebuild) opens in a defensive SQLite client and reads `nodes` and `nodes_fts`. On 0.35.x
-    /// the rebuild installed a trigger on the shadow table `nodes_fts_content`, and a defensive
-    /// client failed its first statement with "malformed database schema".
+    /// The FTS hits a defensive client gets for `token` (`node:sqlite`'s default open, #570).
+    fn defensive_fts_hits(path: &std::path::Path, token: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+        let mut stmt =
+            conn.prepare("SELECT symbol FROM nodes_fts WHERE nodes_fts MATCH ?1 ORDER BY 1")?;
+        stmt.query_map([token], |r| r.get(0))?.collect()
+    }
+
+    /// #570: a store this build writes reads in a defensive SQLite client (`nodes` and an FTS
+    /// MATCH) at every stage, each checked BEFORE another writer open could repair it: right
+    /// after fresh writes, after the #420 rebuild of a planted legacy row, after the redaction
+    /// rebuild, and after a reopen. On 0.35.x every rebuild installed a trigger on the shadow
+    /// table `nodes_fts_content`, and a defensive client failed its first statement with
+    /// "malformed database schema".
     #[test]
     fn a_defensive_client_reads_a_store_this_build_wrote_570() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("defensive.db");
+        let mut store = SqliteStore::open(&path).unwrap();
+        store
+            .upsert_nodes(&[fts_node("d1", "d.rs"), fts_node("d2", "d.rs")])
+            .unwrap();
+        assert_eq!(defensive_node_count(&path).unwrap(), 2, "fresh writes");
+        assert_eq!(defensive_fts_hits(&path, "docd2").unwrap(), vec!["d2"]);
+        // A legacy row (an older writer's automatic rowid), healed by the next writer open's
+        // #420 rebuild; the defensive read comes straight after that open.
+        drop(store);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DELETE FROM nodes_fts WHERE symbol = 'd1'; \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) \
+                   VALUES('d1', 'd1', '', 'docd1');",
+            )
+            .unwrap();
+            assert!(!fts_rowid_migrated(&conn).unwrap(), "fixture: a legacy row");
+        }
+        let mut store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(
+            defensive_node_count(&path).unwrap(),
+            2,
+            "after the #420 rebuild"
+        );
+        assert_eq!(defensive_fts_hits(&path, "docd1").unwrap(), vec!["d1"]);
+        store.migrate_redaction(&|_, t| t.to_string(), "t").unwrap();
+        assert_eq!(
+            defensive_node_count(&path).unwrap(),
+            2,
+            "after the redaction rebuild"
+        );
+        assert_eq!(defensive_fts_hits(&path, "docd2").unwrap(), vec!["d2"]);
+        drop(store);
+        drop(SqliteStore::open(&path).unwrap());
+        assert_eq!(defensive_node_count(&path).unwrap(), 2, "after a reopen");
+    }
+
+    /// #570 review: the row check also covers completeness. A populated store whose FTS table is
+    /// missing (a store written before FTS existed: the writer's SCHEMA re-creates it empty) or
+    /// partial is refused by the read-only currency check and rebuilt by the next writer open; the
+    /// old marker gate did the same.
+    #[test]
+    fn a_populated_store_with_a_missing_or_partial_fts_table_is_rebuilt_570() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-fts.db");
         {
             let mut store = SqliteStore::open(&path).unwrap();
             store
-                .upsert_nodes(&[fts_node("d1", "d.rs"), fts_node("d2", "d.rs")])
+                .upsert_nodes(&[fts_node("e1", "e.rs"), fts_node("e2", "e.rs")])
                 .unwrap();
-            store.migrate_redaction(&|_, t| t.to_string(), "t").unwrap();
         }
-        // A second writer open runs every open-time migration on a populated store.
-        drop(SqliteStore::open(&path).unwrap());
-        assert_eq!(defensive_node_count(&path).unwrap(), 2);
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
-            .unwrap();
-        let hit: String = conn
-            .query_row(
-                "SELECT symbol FROM nodes_fts WHERE nodes_fts MATCH 'docd2'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(hit, "d2");
+        for plant in [
+            "DROP TABLE nodes_fts",
+            "DELETE FROM nodes_fts WHERE symbol = 'e2'",
+        ] {
+            {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch(plant).unwrap();
+            }
+            if plant.starts_with("DELETE") {
+                let err = SqliteStore::open_readonly_current(&path)
+                    .err()
+                    .expect("a partial FTS table awaits a writer's rebuild");
+                assert!(err.to_string().contains("predates this build"), "{err}");
+            }
+            let store = SqliteStore::open(&path).unwrap();
+            assert_fts_keyed_by_sid(&store);
+            assert_eq!(fts_hits(&store, "doce2"), vec!["e2".to_string()], "{plant}");
+            drop(store);
+            assert!(SqliteStore::open_readonly_current(&path).is_ok(), "{plant}");
+        }
     }
 
     /// #570: a store a 0.35.x build wrote carries the shadow-table guard trigger, which a defensive
