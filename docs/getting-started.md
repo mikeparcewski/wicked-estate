@@ -329,8 +329,12 @@ wicked-estate rank [--limit N] [--seeds s1,s2] [--json] [--db ...]     # alias: 
 ```
 
 Returns the top symbols (default 20, at most 200) by PageRank over the call/import graph,
-computed live, so the ranking reflects `scip` ingests and injected cross-repo edges. Use it to
-find which symbols are most load-bearing in a repo. `--seeds` personalizes the ranking toward
+computed live, so it reflects every `Calls`/`Imports` edge in the store when you ask. Use it to
+find which symbols are most load-bearing in a repo.
+
+Only `Calls` and `Imports` edges count. `References` edges are not counted, and that includes
+everything `scip` writes (§8), so a `scip` ingest does not change the ranking. A symbol that is
+only referenced, never called or imported, ranks low. `--seeds` personalizes the ranking toward
 the given symbols (names or SymbolIds): rank a blast radius, not the whole repo. `--json` emits
 the MCP `RankHotspots` document on stdout, with diagnostics on stderr. Unknown flags and
 unknown seeds are errors.
@@ -428,6 +432,8 @@ Ingests a SCIP index (`index.scip`) produced by `scip-typescript` (or another SC
 structural symbols and written as confidence-1.0 `References` support facts owned by the indexer.
 SCIP has no call role, so `scip` never writes `Calls` — `f()` and `const g = f` are the same
 role-less occurrence. Re-running it replaces the indexer's previous facts. Run `index` first.
+`BlastRadius` follows these `References` (it walks every edge kind), but `rank`/`RankHotspots` and
+`clusters`/`Communities` count `Calls` and `Imports` only, so they do not change after `scip`.
 
 ```bash
 # First: tree-sitter extraction
@@ -582,8 +588,8 @@ wicked-estate-mcp --db /path/to/graph.db
 | `ContextBundle` | Return a scoped, ranked context bundle for a symbol — source + callers + dependencies. |
 | `RulesInventory` | List rule engines and rule sets in the graph; link rule sets to calling code. |
 | `rules.recall` | Faceted, severity-ordered recall of conformance `Rule` nodes (`PAT-*`/`POL-*`) — facets: language/layer/framework (wildcard), severity/rule_type (exact), scope subtree prefix. |
-| `RankHotspots` | Return the top N symbols by PageRank × change-frequency churn score. |
-| `Communities` | List detected symbol communities (Louvain clusters) in the graph. |
+| `RankHotspots` | Return the top N symbols by PageRank over `Calls` + `Imports` edges (`References`, including all SCIP evidence, are not counted). Optional: `limit` (default 20, max 200), `seeds` (personalized PageRank). |
+| `Communities` | List detected symbol communities (Louvain clusters over `Calls` + `Imports` edges; `References` are not counted). Optional: `limit` (default 20, max 200), `min_size` (default 2), `resolution` (default 1.0). |
 | `Lineage` | Trace dependency lineage by default (`Calls` + `Imports`). Optional: `relation: "flows_to"` traces semantic value flow from producer to consumer, for example Angular route/input value chains; `depth` (default 24, the max); `cursor` (a previous page's `next_cursor`). The answer is paged: keep calling with `cursor` while `next_cursor` is non-null. |
 
 Semantic value lineage is opt-in so existing dependency lineage calls do not change. First resolve
@@ -1068,6 +1074,10 @@ Multi-level Louvain over `CALLS` and `IMPORTS` edges. Unlike connected component
 any connected graph into one giant community), Louvain maximises partition modularity `Q`, so a
 codebase that is connected but has cluster structure — two cliques joined by one bridge — is split
 into the clusters. A good partition scores modularity `> 0.3`.
+
+No other edge kind counts: `References` (including all SCIP evidence) do not pull symbols into a
+community. A symbol with no `Calls` or `Imports` edge in either direction is a singleton and is
+dropped, however many `References` it has.
 
 | Flag | Default | Effect |
 |------|---------|--------|

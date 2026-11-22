@@ -7,6 +7,11 @@
 > fixing PR's evidence (`measure/bench-before.json` vs `measure/bench-after.json`); this file
 > is deliberately annotated, not regenerated — it pins a different corpus set.
 
+> **Note (rank edge set, 2026-11-22):** "top-ranked" below means PageRank over `Calls` and
+> `Imports` edges only. `References` edges (including all SCIP evidence) are not counted, so a
+> symbol that is only referenced, never called or imported, ranks low. This documents current
+> behaviour; the figures are unchanged. See FEATURES.md §6 and #294.
+
 > **Waves W1.6 / W8.1** — engine capability receipt.  \
 > The full agent A/B (baseline vs treatment with an LLM in the loop) is future work.
 > This report measures what the engine itself delivers: index speed, graph completeness,
