@@ -1,8 +1,10 @@
 """Release certification guardrails; text-level checks need only the stdlib."""
 
 from pathlib import Path
+import os
 import re
 import subprocess
+import tempfile
 import tomllib
 import unittest
 
@@ -19,6 +21,133 @@ def job(workflow, name):
     if not match:
         raise AssertionError(f"missing job: {name}")
     return match.group(1)
+
+
+def step_script(job_text, step_name):
+    """The dedented `run: |` body of one step, as the runner would execute it."""
+    step = job_text.split(f"      - name: {step_name}\n", 1)
+    if len(step) != 2:
+        raise AssertionError(f"missing step: {step_name}")
+    body = step[1].split("        run: |\n", 1)[1]
+    lines = []
+    for line in body.splitlines():
+        if line.strip() and not line.startswith("          "):
+            break
+        lines.append(line[10:])
+    return "\n".join(lines) + "\n"
+
+
+def manifest_versions():
+    """crate -> version from each publishable crate's own Cargo.toml (#563)."""
+    workspace_version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+    script = (ROOT / "scripts/publish.sh").read_text()
+    crates = re.search(r"^CRATES=\(\n(.*?)\n\)", script, re.MULTILINE | re.DOTALL)[1].split()
+    versions = {}
+    for crate in crates:
+        if crate.startswith("wicked-estate-tree-sitter-"):
+            suffix = crate.removeprefix("wicked-estate-tree-sitter-")
+            manifest = ROOT / f"crates/wicked-estate-extract/vendor/tree-sitter-{suffix}/Cargo.toml"
+        else:
+            manifest = ROOT / f"crates/{crate}/Cargo.toml"
+        package = tomllib.loads(manifest.read_text())["package"]
+        if package.get("publish") is False:
+            continue
+        version = package["version"]
+        versions[crate] = workspace_version if version == {"workspace": True} else version
+    return versions
+
+
+# A stand-in for `scripts/publish.sh` in the registry-wait tests: the real one needs cargo.
+STUB_PUBLISH = """#!/usr/bin/env bash
+# Supports --list and --list-versions.
+case "${1:-}" in
+  --list) printf '%s\\n' wicked-estate-tree-sitter-rpg wicked-estate-tree-sitter-cfml wicked-estate-core wicked-estate ;;
+  --list-versions) printf '%s\\n' wicked-estate-tree-sitter-rpg=0.1.3 wicked-estate-tree-sitter-cfml=0.26.21 \\
+      wicked-estate-core=0.35.9 wicked-estate=0.35.9 ;;
+  *) echo "stub publish.sh: unexpected argument ${1:-}" >&2; exit 2 ;;
+esac
+"""
+
+# curl serves sparse-index files from $INDEX_DIR; sleep fails so a wait that would loop ends the run.
+STUB_CURL = """#!/bin/sh
+for url; do :; done
+file="$INDEX_DIR/${url##*/}"
+[ -f "$file" ] || exit 22
+cat "$file"
+"""
+STUB_SLEEP = """#!/bin/sh
+echo "stub sleep $*: the wait would loop" >&2
+exit 1
+"""
+
+
+class RegistryWaitTests(unittest.TestCase):
+    """Runs the registry job's wait script against a fake crates.io index (#563)."""
+
+    @classmethod
+    def setUpClass(cls):
+        workflow = (ROOT / ".github/workflows/publish.yml").read_text()
+        cls.script = step_script(job(workflow, "registry"), "wait until crates.io serves every package (up to 15 min)")
+
+    def run_wait(self, index, tag="v0.35.9"):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "scripts").mkdir()
+            (tmp / "scripts/publish.sh").write_text(STUB_PUBLISH)
+            bin_dir, index_dir = tmp / "bin", tmp / "index"
+            bin_dir.mkdir()
+            index_dir.mkdir()
+            for name, body in (("curl", STUB_CURL), ("sleep", STUB_SLEEP)):
+                (bin_dir / name).write_text(body)
+                (bin_dir / name).chmod(0o755)
+            for crate, versions in index.items():
+                (index_dir / crate).write_text("".join(
+                    f'{{"name":"{crate}","vers":"{v}","yanked":{"true" if y else "false"}}}\n'
+                    for v, y in versions
+                ))
+            (tmp / "wait.sh").write_text(self.script)
+            env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                       INDEX_DIR=str(index_dir), TAG=tag)
+            return subprocess.run(
+                ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(tmp / "wait.sh")],
+                cwd=tmp, env=env, text=True, capture_output=True, timeout=60,
+            )
+
+    PUBLISHED = {
+        "wicked-estate-tree-sitter-rpg": [("0.1.2", False), ("0.1.3", False)],
+        "wicked-estate-tree-sitter-cfml": [("0.26.21", False)],
+        "wicked-estate-core": [("0.35.8", False), ("0.35.9", False)],
+        "wicked-estate": [("0.35.8", False), ("0.35.9", False)],
+    }
+
+    def test_vendored_crates_resolve_at_their_own_versions(self):
+        result = self.run_wait(self.PUBLISHED)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("all packages resolve", result.stdout)
+        self.assertNotIn("not yet", result.stdout)
+
+    def test_vendored_crate_missing_at_its_own_version_is_waited_for(self):
+        index = dict(self.PUBLISHED, **{
+            # The tag version is NOT the version the manifest asks for, and 0.1.3 is yanked.
+            "wicked-estate-tree-sitter-rpg": [("0.1.2", False), ("0.1.3", True), ("0.35.9", False)],
+        })
+        result = self.run_wait(index)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not yet: wicked-estate-tree-sitter-rpg@0.1.3;", result.stdout)
+        self.assertNotIn("cfml", result.stdout)
+
+    def test_workspace_crate_missing_at_the_tag_version_is_waited_for(self):
+        index = dict(self.PUBLISHED, **{"wicked-estate-core": [("0.35.8", False)]})
+        result = self.run_wait(index)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not yet: wicked-estate-core@0.35.9;", result.stdout)
+
+    def test_tag_must_match_the_wicked_estate_manifest_version(self):
+        result = self.run_wait(self.PUBLISHED, tag="v0.35.10")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("::error::", result.stdout)
+        self.assertIn("0.35.10", result.stdout)
+        self.assertNotIn("all packages resolve", result.stdout)
 
 
 class PublishWorkflowTests(unittest.TestCase):
@@ -119,6 +248,35 @@ class PublishWorkflowTests(unittest.TestCase):
             text=True, capture_output=True, check=True, timeout=180,
         )
         self.assertEqual(result.stdout, ''.join(f'{crate}\n' for crate in expected))
+
+
+    def test_list_versions_maps_each_crate_to_its_own_manifest_version(self):
+        expected = manifest_versions()
+        workspace_version = expected["wicked-estate"]
+        # The vendored grammars carry their own versions; that is what #563 is about.
+        vendored = {c: v for c, v in expected.items() if c.startswith("wicked-estate-tree-sitter-")}
+        self.assertTrue(vendored)
+        self.assertTrue(any(v != workspace_version for v in vendored.values()))
+        result = subprocess.run(
+            ['bash', 'scripts/publish.sh', '--list-versions'], cwd=ROOT,
+            text=True, capture_output=True, check=True, timeout=180,
+        )
+        self.assertEqual(result.stdout, ''.join(f'{c}={v}\n' for c, v in expected.items()))
+        listed = subprocess.run(
+            ['bash', 'scripts/publish.sh', '--list'], cwd=ROOT,
+            text=True, capture_output=True, check=True, timeout=180,
+        ).stdout.split()
+        self.assertEqual(listed, [line.split('=', 1)[0] for line in result.stdout.split()])
+
+    def test_publish_rejects_an_unknown_mode(self):
+        # An older tag's publish.sh treated any unknown argument as a REAL publish.
+        result = subprocess.run(
+            ['bash', 'scripts/publish.sh', '--list-version'], cwd=ROOT,
+            text=True, capture_output=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('unknown argument', result.stderr)
+        self.assertNotIn('>>>', result.stdout)
 
 
 if __name__ == '__main__':
