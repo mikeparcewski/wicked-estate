@@ -96,10 +96,14 @@ by reason (`link --status --json` lists the packages), plus `last_error`. An ava
 no linked projects carries `link: []`; a transport without a store handle omits the key. MCP
 measures this state after the response cache on every answer, so cache hits still report moved
 member indexes and emit a `LINK-STALE` warning with the relink command. MCP reserves 1,500 bytes
-for compact link state, dropping member coverage entries from the end of the longest list first
-when necessary. `coverage_omitted` counts those entries, and a diagnostic points to
-`wicked-estate link --project <p> --status --json` for the full list. Project state and stale labels
-are retained even when those fixed fields alone exceed the reserve.
+for the compact link state and its `LINK-STALE` / `LINK` diagnostics together. When they do not fit,
+member coverage entries are dropped from the end of the longest list first, then stale labels, and
+then a `last_error` longer than 200 characters is cut to that length. `coverage_omitted` and
+`stale_labels_omitted` count the dropped entries, `last_error_truncated` marks the cut error, and a
+diagnostic points to `wicked-estate link --project <p> --status --json` for the full lists. The
+relink command names the project's members that are still in the graph, shell-quoted. CLI
+`blast-radius --json` and `path --json` carry the same bounded form. Project state is retained even
+when those fixed fields alone exceed the reserve.
 
 A link edge's own confidence is its identity rule's (`path`, `git-source`, `registry-source` 0.75;
 `registry-source(version-only)` 0.6).

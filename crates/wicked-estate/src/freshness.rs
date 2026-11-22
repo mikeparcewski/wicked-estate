@@ -1251,6 +1251,73 @@ mod tests {
         assert!(!named.contains(&"retired"), "{line}");
     }
 
+    /// #559 review: after an incomplete first link (no coverage recorded) the relink command
+    /// still names the project's members, taken from the members the link recorded; a database
+    /// path with a space is shell-quoted.
+    #[test]
+    fn relink_command_names_recorded_members_and_quotes_the_db_559() {
+        let root = tempfile::tempdir().unwrap();
+        let labels: Vec<String> = ["provider", "consumer"].map(String::from).to_vec();
+        let mut probe = linked_probe(root.path(), &labels);
+        probe.db = "my graphs/graph.db".to_string();
+        let store = probe.store.as_mut().unwrap();
+        // What an incomplete first link leaves: no coverage (link.rs `link_inner`).
+        store.meta_put("link:p:coverage", "[]").unwrap();
+        crate::index_path_as(
+            store.as_mut(),
+            &root.path().join("consumer"),
+            Some("consumer"),
+        )
+        .unwrap();
+        let mut content = json!({"crossings": []});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        let line = diags
+            .iter()
+            .find(|d| d.starts_with("LINK-STALE: project 'p'"))
+            .expect("a LINK-STALE line");
+        assert!(
+            line.contains("link --db 'my graphs/graph.db' --project p --labels "),
+            "{line}"
+        );
+        let (_, command) = line.split_once("--labels ").unwrap();
+        let mut named: Vec<&str> = command.trim_end_matches('`').split(',').collect();
+        named.sort();
+        assert_eq!(named, ["consumer", "provider"], "{line}");
+    }
+
+    /// #559 review: a very long database path and a long `last_error` still fit LINK_RESERVE:
+    /// the stale lines fold to a form that echoes no stored value, and `last_error` is cut.
+    #[test]
+    fn link_block_fits_with_a_long_db_path_and_last_error_559() {
+        let root = tempfile::tempdir().unwrap();
+        let labels: Vec<String> = ["provider", "consumer"].map(String::from).to_vec();
+        let mut probe = linked_probe(root.path(), &labels);
+        probe.db = format!("/{}/graph.db", "deep".repeat(300));
+        probe
+            .store
+            .as_mut()
+            .unwrap()
+            .meta_put("link:p:last_error", &"E".repeat(5_000))
+            .unwrap();
+        let mut content = json!({"crossings": []});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        let link_lines: Vec<&String> = diags
+            .iter()
+            .filter(|d| d.starts_with("LINK-STALE:") || d.starts_with("LINK:"))
+            .collect();
+        let used = content["link"].to_string().len()
+            + link_lines.iter().map(|d| d.len() + 1).sum::<usize>();
+        assert!(
+            used <= wicked_estate_retrieve::LINK_RESERVE,
+            "{used} chars: {link_lines:?} {}",
+            content["link"]
+        );
+        assert_eq!(content["link"][0]["last_error_truncated"], true);
+        assert!(link_lines.iter().any(|d| d.starts_with("LINK-STALE:")));
+    }
+
     #[test]
     fn crossing_answers_distinguish_no_links_from_no_store() {
         let store = wicked_estate_store::SqliteStore::in_memory().unwrap();

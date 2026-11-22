@@ -555,7 +555,11 @@ impl KnowledgeEngine {
                 let Some(kn) = KNode::from_node(&node) else {
                     continue;
                 };
-                if kn.class == KClass::Chunk {
+                // The scope bound holds for the cascade too (#558): a chunk outside it stays,
+                // whatever doc it was related to.
+                if kn.class == KClass::Chunk
+                    && within.is_none_or(|scope| scope_in_prefix(&kn.scope, scope))
+                {
                     ids.insert(node.symbol);
                 }
             }

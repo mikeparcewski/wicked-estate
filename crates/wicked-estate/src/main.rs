@@ -1434,8 +1434,13 @@ fn main() -> Result<()> {
             // X1 (DES-S2 §5, §6): the state of every project link in this store — generation,
             // staleness and a per-member coverage summary (`link --status` lists the packages).
             // Built first so the row budget counts it (crew's capped read must stay parseable).
+            // Bounded like MCP BlastRadius's (wicked-estate#559): a long coverage list is cut and
+            // counted, so a store with many members cannot push the page past R4.
             let links = wicked_estate::link::answer_statuses(store.as_ref());
-            let links_json = serde_json::json!(links);
+            let links_json = wicked_estate::link::bounded_json(
+                links.clone(),
+                wicked_estate_retrieve::LINK_RESERVE,
+            );
             let links_len = links_json.to_string().len() + 10;
             let (mut kept, _) = cap_blast_radius_rows(name, unresolved, &br, depth, links_len);
             if kept == 0 && !deps.is_empty() {
@@ -1648,8 +1653,10 @@ fn main() -> Result<()> {
             });
             if json_out {
                 let mut doc = path_json(from, to, &result);
-                doc["link"] =
-                    serde_json::json!(wicked_estate::link::answer_statuses(store.as_ref()));
+                doc["link"] = wicked_estate::link::bounded_json(
+                    wicked_estate::link::answer_statuses(store.as_ref()),
+                    wicked_estate_retrieve::LINK_RESERVE,
+                );
                 doc["resolved"] = serde_json::json!(miss.is_none());
                 if let Some((operand, (found, truncated))) = &miss {
                     wicked_estate_retrieve::suggest::mark_miss(
