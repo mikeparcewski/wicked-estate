@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+## [0.35.9] — 2026-11-22
+
+Patch release on the train-11 cut 3adf57aa, carrying 24 PRs since 0.35.8: #527, #528, #529, #530, #531, #534, #535, #536, #537, #538, #539, #540, #541, #542, #546, #547, #550, #551, #552, #553, #554, #555, #557, #560.
+
+### Added
+
+- Write-batch (one lock, one transaction, one event); annotate --symbol and semantics refuse an id that is not a node. (#547)
+- extract: constrained Pydantic models (`Literal`, `Field(pattern=…)`, `extra="forbid"`, `frozen`) are classed `real`, not `data` (#434). (#550)
+- extract: callables in Java/C#/Apex/PHP/Kotlin/Scala/TS/JS record `has_body`. Overloads in Java/C#/Apex/Kotlin/Scala get distinct ids (`name(+k).`), and name resolution binds the whole overload family. Merged TS declarations carry `merged_kinds`. TS namespaces emit Namespace nodes (their members' ids now nest under `N#`). Java interface constants and Scala `var`s are captured (#377). (#550)
+- **Added** `memory.retire`, `memory.unretire` and `memory.list {retired: true}`: a memory can be hidden from recall, listed and restored with the same id; `memory.erase` still removes for good (#376). (#552)
+- **Added** org/team memory locks: a pack-locked memory cannot be captured over, erased, retired or rewritten by consolidation; recall inherits locked org/team memories; `memory.list {admit_for}` shows the recall admission; `apply_pack_memories` / `pack_memories` for the verified pack sync (#364). (#555)
+- **Changed** a plain capture into a one-segment `org:` or `team:` scope is refused (pack-only layer) (#364). (#555)
+- **blast-radius rows say how they were reached** (#450): every dependent row (CLI `--json` and MCP `BlastRadius`) carries `via`, the edges (any kind, at most 3, `via_omitted` counts the rest) to the start or to rows one ring in, so a client can draw true ring-to-ring edges. (#557)
+- **MCP answers carry the cross-repo link state** (#419): MCP `BlastRadius` and `Path` (and CLI `path --json`) carry `link` (generation, stale, moved members, coverage), measured after the response cache, with a `LINK-STALE` line naming the relink command. (#557)
+
+### Changed
+
+- **Publish CI only drafts the GitHub Release, after crates.io serves every crate; coord publishes it after certification (#482).** A new `registry` job polls crates.io's sparse index for every crate `scripts/publish.sh --list` names (new mode) and fails after 15 min; `github-release` now needs it and the binaries, creates the tag's Release as a draft and attaches the five archives and `SHA256SUMS` to it, never sets Latest and leaves an existing Release's state and notes alone. Coord publishes it after JOURNEY CERTIFIED with `gh release edit v<X.Y.Z> --repo mikeparcewski/wicked-estate --draft=false --latest`; until then `releases/latest` (what wicked-installer downloads) stays on the previous certified release. (#535)
+- CI: pushes run CI on `main` only; a PR branch runs CI once, as its pull_request run. (#554)
+
+### Fixed
+
+- memory.recall: vector hits need cosine >= 0.55, so a query with no real match returns an empty list; Working-tier matches never outrank other tiers (#516). (#527)
+- Index: an interrupted forced re-index can no longer let a rollback retry keep stale output (#477), and a file that stays unreadable after an upgrade is recorded and named instead of forcing a full re-extract on every run (#476). (#528)
+- **Fixed:** MemStore and SurrealStore now drop a symbol's semantics when `remove_file` deletes its node, so a re-added symbol no longer brings back an old requirement or approval, and restoring an empty semantics record stores nothing (matching SQLite and Postgres) (#461). (#529)
+- **`memory.reflect` description no longer says nothing is deleted (wicked-estate#395).** Reflect first deletes working memories older than 24 h (a summary built over one is removed, then rebuilt from its surviving durable sources), then distils, promotes and archives. The tool description now says so. Delivered by [wicked-crew](https://wc.wickedagile.com) run `c98640d8-63fa-529d-9a36-a121c6370def`. Merge stays human: the phase opens the PR, never merges it. Delivered-By: wicked-crew run c98640d8-63fa-529d-9a36-a121c6370def (#530)
+- **Fixed:** a semantic write (description, requirement, validation claim) committed by another connection while a re-index ran could be overwritten by the re-index's restore of the older value. The snapshot is now read inside the batch that restores it, and on Postgres semantic writes wait for that batch (#463). (#531)
+- **Fixed:** SQLite write batches that read before writing (re-index chunk batches, semantics restores, knowledge proposal rollbacks) and a support-fact replacement outside a batch no longer fail with `SQLITE_BUSY_SNAPSHOT` when another connection writes at the same time; they start as `BEGIN IMMEDIATE` and wait on the busy timeout instead. (#532) (#534)
+- **Fixed (#447):** mainframe exports: `.prc`/`.proc` PROC members are indexed by the JCL extractor and `.dcl` DCLGEN members as COBOL copybooks (with their Db2 table definitions); a `.ctl` is read as VB6 only when it has a VB6 `VERSION` header, so IDCAMS / Db2 control cards are no longer parsed as Visual Basic; every walked file the index does not read is reported at the end of the run as `NOT-INDEXED: .<ext>: <n> file(s): <reason> (e.g. ...)` plus a total line, on every run. (#536)
+- The COBOL `exit_only` stub rule keeps more uncertain paragraphs real and stubs fixed-format labels it used to miss (#475, #473, #465). A `>>SOURCE FORMAT FREE` or `$SET SOURCEFORMAT"FREE"` directive keeps every paragraph of the file real. The same directive detector and the same columns 73-80 card rule as the COBOL links pass decide the format, so a statement word past column 72 in a free-format file is no longer read as identification text. Identification labels with punctuation (`PROG.CBL`, `V1.2`) no longer keep an exit-only paragraph real, and neither does a floating `*>` comment that runs past column 72. A `D` or `-` in column 7, or a statement the grammar dropped after the last paragraph, keeps it real. Implemented by codex (gpt-6.1-sol); reviewed by the lane. (#537)
+- Restore_node_semantics gets a safe default and a capability check; #459 leftovers (#460, #472). (#538)
+- **Memory and knowledge stores redact secrets (#406).** Captured memories, knowledge writes and ingests, and proposal payloads mask known token shapes, URL credentials, private keys and secret-named assignments (`DB_PASSWORD=...`, `password: "..."`) before storage, embedding and FTS; reads mask too. Clean an existing store with `wicked-estate redact-store --db <memory.db|knowledge.db>` (WAL truncated, VACUUM, counts only). (#539)
+- **Script blocks and code bindings are redacted structurally (#435, #410).** A secret-named binding in a Vue, Svelte or HTML `<script>` block (`lang="ts"` too) is masked like one in a `.js`/`.ts` file, and `credentials*.vue` / `.svelte` files are indexed as code. A code literal's binding is now read from the syntax tree, so a long type annotation or comment between the name and the value no longer hides it. (#540)
+- Fixed: indexing a large TypeScript repo no longer needs gigabytes per large file. Each call reference now carries only its own import entry, not a copy of the file's whole import map, and source bytes are no longer held for the whole run (#422). (#541)
+- Fixed: after a killed or failed index, the next plain index re-extracts everything, so edges the interrupted run never wrote are restored (#404). (#541)
+- Fixed: an incremental index re-binds references when a same-name definition is added or removed, matching a full index. Deletion-only runs now resolve and prune too (#425). (#541)
+- **COBOL paragraph spans end on their own last line** (#445). `source` and line evidence for a paragraph no longer overlap the paragraphs after it. (#542)
+- **JCL is read as logical statements** (#454, #408). Fixed: (#542)
+  - quoted operands and continuation cards (trailing comma, column-71 string, column-72 comment);
+  - `DD DATA`/`DD *` with `DLM=` (continued, quoted, or ended by the next `//` card);
+  - DSN on continuation cards, now linked: CardDemo has 110 of them;
+  - `EXEC proc,PGM=x` is no longer read as a program call;
+  - unnamed EXEC steps now appear. Step ids no longer contain the card's line number.
+- **COBOL names are case-insensitive** (#408). Lowercase sources (`program-id. pricepgm.`, `call "pricepgm"`) now link: COBOL definition and reference names are stored in uppercase, as the compiler folds them. (#546)
+- **COBOL EXEC SQL reads comments and delimited identifiers** (#408). A `-- END-EXEC` or `EXEC CICS` inside a SQL comment no longer cuts or adds links, and `FROM "APP"."ORDERS"` links the table. (#546)
+- **COBOL dynamic calls see more assignments** (#408): `SET P1 P2 TO ENTRY 'X'` and `MOVE 'X' TO A(I + 1) B`. (#546)
+- resolve: a JS/TS function or variable nested in a function or block is no longer bound by name from outside its scope (#495). (#551)
+- extract: a local value alias (`var Card = Selected`) follows its initializer to the import or local definition instead of parking (#494). (#551)
+- extract: JS write tracking handles loop back-edges, `finally` writes, more than 32 writes, nested pattern defaults, and nested `let` scopes in one walk (#504). (#551)
+- **Added** `knowledge.forget {id | source | scope_prefix}` and `knowledge.ingest {replace_source: true}`: knowledge can be erased and replaced by its exact source, citation-form sources included (#403, #365). (#553)
+- **Added** `knowledge.recall {require: [...]}`: recall only items derived from the required sources, filtered before ranking and the budget (#397). (#553)
+- **Fixed** a `--readonly` server with no memory store refuses `proposal.submit` instead of answering an id for a proposal it never stores (#375). (#553)
+- **Fixed:** `Path` (MCP and CLI) no longer claims "no route exists" when reached symbols have unresolved outgoing references. It reports `unresolved_on_frontier` (additive) and says "not a proven absence" unless that count is 0 (#348, in-freeze slice). (#560)
+
 ## [0.35.8] — 2026-11-20
 
 Patch release on main 190e5b99, carrying 11 PRs since 0.35.7: #507, #509, #510, #512, #514, #517, #518, #521, #524, #525, #526.
