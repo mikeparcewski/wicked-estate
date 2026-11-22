@@ -84,8 +84,10 @@ CREATE INDEX IF NOT EXISTS idx_node_files_file ON node_files(file);
 -- virtual tables cannot expose an integer rowid as a regular column for joins.
 -- Every row's ROWID is the node's sid (nodes.symbol, #420): FTS5 can look a row up only by
 -- rowid, and `symbol` is UNINDEXED, so maintenance deletes go by `rowid = sid` (a delete by
--- symbol text is a scan of the whole table). Stores written before #420 are rebuilt once on the
--- first writer open (meta `fts_rowid` = `sid`, sqlite.rs `migrate_fts_rowids`).
+-- symbol text is a scan of the whole table). A store whose rows are not all keyed so (written
+-- before #420, or by an older binary since) is rebuilt on the next writer open (sqlite.rs
+-- `migrate_fts_rowids`). No trigger guards it: SQLite refuses a trigger on the FTS shadow
+-- tables under SQLITE_DBCONFIG_DEFENSIVE, which node:sqlite and better-sqlite3 turn on (#570).
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
   symbol UNINDEXED,   -- string SymbolId used for join-back via symbols table; not tokenised
   name,               -- simple name
