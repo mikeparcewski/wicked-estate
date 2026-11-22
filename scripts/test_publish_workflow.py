@@ -79,6 +79,13 @@ STUB_SLEEP = """#!/bin/sh
 echo "stub sleep $*: the wait would loop" >&2
 exit 1
 """
+# For the timeout test: sleep "passes", and the clock jumps 16 minutes after the first sleep.
+STUB_SLEEP_PASSES = """#!/bin/sh
+touch "$INDEX_DIR/.slept"
+"""
+STUB_DATE = """#!/bin/sh
+if [ -f "$INDEX_DIR/.slept" ]; then echo 1000960; else echo 1000000; fi
+"""
 
 
 class RegistryWaitTests(unittest.TestCase):
@@ -89,15 +96,15 @@ class RegistryWaitTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/publish.yml").read_text()
         cls.script = step_script(job(workflow, "registry"), "wait until crates.io serves every package (up to 15 min)")
 
-    def run_wait(self, index, tag="v0.35.9"):
+    def run_wait(self, index, tag="v0.35.9", publish=STUB_PUBLISH, stubs=(("curl", STUB_CURL), ("sleep", STUB_SLEEP))):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             (tmp / "scripts").mkdir()
-            (tmp / "scripts/publish.sh").write_text(STUB_PUBLISH)
+            (tmp / "scripts/publish.sh").write_text(publish)
             bin_dir, index_dir = tmp / "bin", tmp / "index"
             bin_dir.mkdir()
             index_dir.mkdir()
-            for name, body in (("curl", STUB_CURL), ("sleep", STUB_SLEEP)):
+            for name, body in stubs:
                 (bin_dir / name).write_text(body)
                 (bin_dir / name).chmod(0o755)
             for crate, versions in index.items():
@@ -149,6 +156,33 @@ class RegistryWaitTests(unittest.TestCase):
         self.assertIn("0.35.10", result.stdout)
         self.assertNotIn("all packages resolve", result.stdout)
 
+    def test_tag_predating_list_versions_stops_with_a_clear_error(self):
+        # The publish.sh of a tag cut before #563: it knows --list only.
+        old = "#!/usr/bin/env bash\n[ \"$1\" = --list ] && echo wicked-estate && exit 0\necho PUBLISHING; exit 3\n"
+        result = self.run_wait(self.PUBLISHED, publish=old)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("::error::scripts/publish.sh at v0.35.9 predates --list-versions", result.stdout)
+        self.assertNotIn("PUBLISHING", result.stdout)
+
+    def test_gives_up_after_15_minutes_naming_what_is_missing(self):
+        index = dict(self.PUBLISHED, **{"wicked-estate-tree-sitter-rpg": [("0.1.2", False)]})
+        stubs = (("curl", STUB_CURL), ("sleep", STUB_SLEEP_PASSES), ("date", STUB_DATE))
+        result = self.run_wait(index, stubs=stubs)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("not yet: wicked-estate-tree-sitter-rpg@0.1.3; next check in 30s", result.stdout)
+        self.assertIn(
+            "::error::crates.io still does not serve every package at its manifest version after 15 minutes "
+            "(missing on the last full check: wicked-estate-tree-sitter-rpg@0.1.3). Publish succeeded; "
+            "re-run failed jobs, or dispatch the tag.",
+            result.stdout,
+        )
+
+    def test_malformed_pair_is_refused(self):
+        bad = STUB_PUBLISH.replace("wicked-estate-core=0.35.9", "wicked-estate-core=")
+        result = self.run_wait(self.PUBLISHED, publish=bad)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("malformed crate=version pair: wicked-estate-core=", result.stdout)
+
 
 class PublishWorkflowTests(unittest.TestCase):
     @classmethod
@@ -174,17 +208,20 @@ class PublishWorkflowTests(unittest.TestCase):
     def test_registry_polls_every_publishable_crate(self):
         registry = job(self.workflow, "registry")
         for text in (
-            "bash scripts/publish.sh --list", 'VERSION="${TAG#v}"',
+            "bash scripts/publish.sh --list-versions", 'VERSION="${TAG#v}"',
             "https://index.crates.io/", '${crate:0:2}/${crate:2:2}/$crate',
-            "curl -fsS --max-time 30", '--arg version "$VERSION"',
+            "curl -fsS --max-time 30", '--arg version "$version"',
             '.vers == $version', '.yanked == false', "sleep 30",
             "15 * 60", "::error::", "re-run failed jobs", "dispatch the tag",
             "exit 1",
         ):
             self.assertIn(text, registry)
-        self.assertIn('for crate in $crates; do', registry)
+        self.assertIn('for pair in $pairs; do', registry)
+        # Each crate at its own version (#563), never every crate at the tag version.
+        self.assertNotIn('--arg version "$VERSION"', registry)
         self.assertIn('TAG: ${{ github.event_name', registry)
-        self.assertNotIn('< <(bash scripts/publish.sh --list)', registry)
+        self.assertNotIn('${{', step_script(registry, 'wait until crates.io serves every package (up to 15 min)'))
+        self.assertNotIn('< <(bash scripts/publish.sh', registry)
 
     def test_release_is_draft_only(self):
         create = next(line for line in self.release.splitlines() if "gh release create" in line)

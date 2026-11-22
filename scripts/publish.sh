@@ -11,6 +11,7 @@
 #   ./scripts/publish.sh             # real publish (uploads to crates.io)
 #   ./scripts/publish.sh --dry-run   # package each crate without uploading
 #   ./scripts/publish.sh --list      # print publishable crates in dependency order
+#   ./scripts/publish.sh --list-versions  # the same, as crate=version (each crate's OWN manifest version)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -45,6 +46,14 @@ CRATES=(
 )
 
 DRY="${1:-}"
+# Reject anything else before doing work: an unknown mode used to fall through to a REAL publish.
+case "$DRY" in
+  "" | --dry-run | --list | --list-versions) ;;
+  *) echo "ERROR: unknown argument: $DRY (use --dry-run, --list or --list-versions)" >&2; exit 2 ;;
+esac
+# --list and --list-versions only print; they never package or upload.
+LISTING=0
+case "$DRY" in --list | --list-versions) LISTING=1 ;; esac
 
 # ── Skip non-publishable crates ─────────────────────────────────────────────────────────────────
 # A crate with `publish = false` in its Cargo.toml (the wicked-estate-memory-api re-export shim and,
@@ -57,8 +66,11 @@ DRY="${1:-}"
 PY="$(command -v python3 || command -v python || true)"
 [ -n "$PY" ] || { echo "ERROR: python3/python required for publish=false detection" >&2; exit 1; }
 
-# Space-padded list of workspace members with `publish = false` (one metadata call; members publish via -p).
-WORKSPACE_NOPUBLISH=" $(cargo metadata --no-deps --format-version 1 | "$PY" -c '
+# One metadata call for the workspace members (they publish via -p).
+WORKSPACE_METADATA="$(cargo metadata --no-deps --format-version 1)"
+
+# Space-padded list of workspace members with `publish = false`.
+WORKSPACE_NOPUBLISH=" $(printf '%s' "$WORKSPACE_METADATA" | "$PY" -c '
 import json, sys
 d = json.load(sys.stdin)
 for p in d["packages"]:
@@ -83,10 +95,25 @@ sys.exit(0 if (isinstance(pub, list) and not pub) else 1)
 ' "$2"
 }
 
+# Print the version cargo metadata (on stdin) gives the named package: its OWN manifest version,
+# with `version.workspace = true` already resolved. The vendored grammars version independently of
+# the workspace (#563), so the crates.io wait in publish.yml must poll each crate at this version.
+# Fails rather than guess.
+package_version() {
+  "$PY" -c '
+import json, sys
+name = sys.argv[1]
+pkgs = [p for p in json.load(sys.stdin)["packages"] if p["name"] == name]
+if len(pkgs) != 1 or not pkgs[0].get("version"):
+    sys.exit("ERROR: cargo metadata has no single package named %s with a version" % name)
+print(pkgs[0]["version"])
+' "$1"
+}
+
 # Vendored grammars are EXCLUDED from the workspace, so `-p` can't address them; publish each by its
 # manifest path (vendor/tree-sitter-<suffix>/Cargo.toml). Other crates are members addressable by `-p`.
 for c in "${CRATES[@]}"; do
-  if [ "$DRY" != "--list" ]; then echo ">>> $c"; fi
+  if [ "$LISTING" -eq 0 ]; then echo ">>> $c"; fi
   # --allow-dirty: `cargo publish` regenerates each crate's Cargo.lock during its build/verify step
   # (deps drift between releases), which trips the git-clean check on a fresh CI checkout. The lock
   # is not part of a library's published package, so the upload still matches the tagged source.
@@ -95,23 +122,33 @@ for c in "${CRATES[@]}"; do
       suffix="${c#wicked-estate-tree-sitter-}"
       manifest="crates/wicked-estate-extract/vendor/tree-sitter-${suffix}/Cargo.toml"
       if manifest_is_nopublish "$manifest" "$c"; then
-        if [ "$DRY" != "--list" ]; then echo "    skip — \`publish = false\` in $manifest (not publishable to crates.io)"; fi
+        if [ "$LISTING" -eq 0 ]; then echo "    skip — \`publish = false\` in $manifest (not publishable to crates.io)"; fi
         continue
       fi
       PUB=(cargo publish --manifest-path "$manifest" --allow-dirty)
+      if [ "$DRY" = "--list-versions" ]; then
+        version="$(cargo metadata --no-deps --format-version 1 --manifest-path "$manifest" | package_version "$c")"
+      fi
       ;;
     *)
       case "$WORKSPACE_NOPUBLISH" in
         *" $c "*)
-          if [ "$DRY" != "--list" ]; then echo "    skip — \`publish = false\` (not publishable to crates.io)"; fi
+          if [ "$LISTING" -eq 0 ]; then echo "    skip — \`publish = false\` (not publishable to crates.io)"; fi
           continue
           ;;
       esac
       PUB=(cargo publish -p "$c" --allow-dirty)
+      if [ "$DRY" = "--list-versions" ]; then
+        version="$(printf '%s' "$WORKSPACE_METADATA" | package_version "$c")"
+      fi
       ;;
   esac
   if [ "$DRY" = "--list" ]; then
     printf '%s\n' "$c"
+    continue
+  fi
+  if [ "$DRY" = "--list-versions" ]; then
+    printf '%s=%s\n' "$c" "$version"
     continue
   fi
   if [ "$DRY" = "--dry-run" ]; then
@@ -143,7 +180,7 @@ for c in "${CRATES[@]}"; do
   fi
 done
 
-if [ "$DRY" = "--list" ]; then exit 0; fi
+if [ "$LISTING" -eq 1 ]; then exit 0; fi
 
 echo
 echo "done. Users can now: cargo install wicked-estate"
