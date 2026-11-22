@@ -335,10 +335,47 @@ class BinariesWorkflowTests(unittest.TestCase):
             target = leg.splitlines()[0]
             self.assertRegex(leg, r"\n\s+macos_min: '\d+\.\d+'\n", f"{target} has no macos_min")
 
-    def test_shipped_macos_binaries_are_checked_against_the_floor(self):
+    # `vtool -show-build` output as printed by Xcode's vtool for a single-arch binary.
+    STUB_VTOOL = """#!/usr/bin/env bash
+f="$2"; b=$(basename "$f")
+case "$b" in wicked-estate) m="$MINOS_CLI" ;; *) m="$MINOS_MCP" ;; esac
+[ "$m" = fail ] && { echo "vtool: cannot read $f" >&2; exit 1; }
+printf '%s\n' "$f:" "Load command 9" "      cmd LC_BUILD_VERSION" "  cmdsize 32" " platform MACOS"
+[ "$m" = none ] || printf '    minos %s\n' "$m"
+printf '%s\n' "      sdk 26.5" "   ntools 1"
+"""
+
+    def run_floor_check(self, want, cli, mcp):
         script = step_script(job(self.binaries, "build"), "minimum macOS recorded in the binaries")
-        self.assertIn("vtool -show-build", script)
-        self.assertIn("matrix.macos_min", script)
+        script = (script.replace("${{ matrix.macos_min }}", want)
+                  .replace("${{ matrix.target }}", "x86_64-apple-darwin")
+                  .replace("${{ steps.package.outputs.dir }}", "check/pkg"))
+        self.assertNotIn("${{", script)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "bin").mkdir()
+            (tmp / "bin/vtool").write_text(self.STUB_VTOOL)
+            (tmp / "bin/vtool").chmod(0o755)
+            (tmp / "check.sh").write_text(script)
+            env = dict(os.environ, PATH=f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}",
+                       MINOS_CLI=cli, MINOS_MCP=mcp)
+            return subprocess.run(["bash", "--noprofile", "--norc", "-e", str(tmp / "check.sh")],
+                                  cwd=tmp, env=env, text=True, capture_output=True, timeout=60)
+
+    def test_floor_check_passes_when_both_binaries_match(self):
+        result = self.run_floor_check("11.0", "11.0", "11.0")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_floor_check_rejects_a_mismatch_in_either_binary(self):
+        for cli, mcp in (("26.0", "11.0"), ("11.0", "14.5")):
+            result = self.run_floor_check("11.0", cli, mcp)
+            self.assertNotEqual(result.returncode, 0, (cli, mcp))
+            self.assertIn("::error::", result.stdout)
+
+    def test_floor_check_rejects_missing_minos_failing_vtool_and_no_floor(self):
+        for want, cli in (("11.0", "none"), ("11.0", "fail"), ("", "11.0")):
+            result = self.run_floor_check(want, cli, "11.0")
+            self.assertNotEqual(result.returncode, 0, (want, cli))
 
 
 if __name__ == '__main__':
