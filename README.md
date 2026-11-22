@@ -143,7 +143,7 @@ wicked-estate path http_handler db_write --db graph.db
 wicked-estate query handleRequest --db graph.db
 wicked-estate source handleRequest --db graph.db
 
-# Most important symbols (PageRank)
+# Most important symbols (PageRank over Calls + Imports edges only)
 wicked-estate rank --db graph.db
 
 # Semantic search (after: wicked-estate index … --embeddings, built with a semantic feature)
@@ -216,7 +216,7 @@ swappable impl behind a seam:
 | `wicked-estate-extract` | tree-sitter + grammar-less extractors + W15 rules engine extractors |
 | `wicked-estate-resolve` | reference resolvers (name/scoped/import-map/relative-import/SCIP/estate) + the LSP client library (ADR-009) |
 | `wicked-estate-store` | storage (SQLite default + in-memory reference) |
-| `wicked-estate-rank` | PageRank importance |
+| `wicked-estate-rank` | PageRank importance and Louvain communities, over `Calls` + `Imports` edges only (SCIP `References` are not counted; see FEATURES.md §6) |
 | `wicked-estate-retrieve` | agent-facing retrieval tools + hybrid/semantic search |
 | `wicked-estate-mcp` | MCP server (`wicked-estate-mcp` binary) |
 | `wicked-estate` | the `wicked-estate` CLI binary |
