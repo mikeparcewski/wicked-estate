@@ -404,3 +404,81 @@ fn a_single_repo_graph_has_no_crossings() {
     let br = blast(db, "src/index.ts");
     assert_eq!(br["crossings"], serde_json::json!([]), "{br}");
 }
+
+/// wicked-estate#572 (coord round 2): the CLI `--json` answers keep every member's coverage for
+/// a project of a dozen members. crew builds per-member link coverage from this array and does
+/// not read `coverage_omitted`, so the CLI bound is a share of the CLI page, not the 1,500-char
+/// MCP reserve (which cut such a project down to about five members).
+#[test]
+fn cli_answers_keep_full_coverage_for_a_dozen_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    let labels: Vec<String> = (0..12).map(|i| format!("member-repo-{i:02}")).collect();
+    for (i, label) in labels.iter().enumerate() {
+        let root = base.join(label);
+        // Each member depends on the previous one by `file:` path and imports one undeclared
+        // package, so its coverage carries links and a boundary (the real compact shape).
+        let (deps, import) = match i {
+            0 => (String::new(), String::new()),
+            _ => (
+                format!(r#","dependencies":{{"{0}":"file:../{0}"}}"#, labels[i - 1]),
+                format!("import {{ f{} }} from '{}';\n", i - 1, labels[i - 1]),
+            ),
+        };
+        write(
+            &root,
+            "package.json",
+            &format!(r#"{{"name":"{label}","version":"1.0.0","types":"src/index.ts"{deps}}}"#),
+        );
+        write(
+            &root,
+            "src/index.ts",
+            &format!(
+                "{import}import {{ u }} from 'undeclared-pkg-{i}';\nexport function f{i}() {{ return u; }}\n"
+            ),
+        );
+        git_init(&root, None);
+        index(base, base.join("m.db").to_str().unwrap(), label, &[]);
+    }
+    let db = base.join("m.db");
+    let db = db.to_str().unwrap();
+    let (ok, out, err) = run(&[
+        "link",
+        "--db",
+        db,
+        "--project",
+        "p",
+        "--labels",
+        &labels.join(","),
+        "--json",
+    ]);
+    assert!(ok, "link: {out}{err}");
+
+    let full_coverage = |v: &serde_json::Value, what: &str| {
+        let link = &v["link"][0];
+        let members: Vec<&str> = link["coverage"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{what}: no coverage: {v}"))
+            .iter()
+            .filter_map(|c| c["label"].as_str())
+            .collect();
+        assert_eq!(members.len(), labels.len(), "{what}: {link}");
+        assert!(link.get("coverage_omitted").is_none(), "{what}: {link}");
+        // The fixture is past the MCP reserve, so this is the case the MCP form would cut.
+        assert!(
+            link.to_string().len() > 1_500,
+            "{what}: fixture too small: {link}"
+        );
+    };
+    full_coverage(&blast(db, "member-repo-00/src/index.ts"), "blast-radius");
+    let (ok, out, err) = run(&[
+        "path",
+        "member-repo-01/src/index.ts",
+        "member-repo-00/src/index.ts",
+        "--json",
+        "--db",
+        db,
+    ]);
+    assert!(ok, "path: {out}{err}");
+    full_coverage(&serde_json::from_str(&out).unwrap(), "path");
+}
