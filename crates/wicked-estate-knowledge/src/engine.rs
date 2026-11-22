@@ -467,7 +467,7 @@ impl KnowledgeEngine {
     /// belongs to `knowledge.replace_source`; other node kinds are never deletion candidates.
     pub fn forget(&mut self, target: &ForgetTarget) -> Result<ForgetReport> {
         self.store.begin_batch()?;
-        let result = self.forget_in_batch(target);
+        let result = self.forget_in_batch(target, None);
         match result.and_then(|report| self.store.commit_batch().map(|_| report)) {
             Ok(report) => Ok(report),
             Err(error) => {
@@ -479,7 +479,13 @@ impl KnowledgeEngine {
 
     /// Shared deletion path. The caller owns the batch, including its commit and rollback, so
     /// replacement ingest cannot accidentally commit the deletion before writing the new doc.
-    fn forget_in_batch(&mut self, target: &ForgetTarget) -> Result<ForgetReport> {
+    /// `within` bounds the match to one whole-segment scope subtree (replacement ingest, #558);
+    /// `None` matches in every scope.
+    fn forget_in_batch(
+        &mut self,
+        target: &ForgetTarget,
+        within: Option<&str>,
+    ) -> Result<ForgetReport> {
         use std::collections::BTreeSet;
 
         if let ForgetTarget::Id(v) | ForgetTarget::Source(v) = target {
@@ -517,7 +523,7 @@ impl KnowledgeEngine {
                 }
                 ForgetTarget::ScopePrefix(prefix) => scope_in_prefix(&kn.scope, prefix),
             };
-            if !matches {
+            if !matches || within.is_some_and(|scope| !scope_in_prefix(&kn.scope, scope)) {
                 continue;
             }
             if is_live_source_structure(&kn) {
@@ -574,6 +580,9 @@ impl KnowledgeEngine {
 
     /// Replace citation-sourced knowledge atomically with a newly ingested document. SQLite's
     /// batches do not nest: use the same deletion routine inside this single outer batch.
+    /// Only knowledge inside the call's `scope` subtree is replaced (#558): the same citation
+    /// ingested under another scope is another learner's copy and stays. An empty scope is the
+    /// root, whose subtree is every scope.
     pub(crate) fn ingest_replacing(
         &mut self,
         title: &str,
@@ -589,7 +598,8 @@ impl KnowledgeEngine {
         }
         self.store.begin_batch()?;
         let result = (|| {
-            let report = self.forget_in_batch(&ForgetTarget::Source(source.to_string()))?;
+            let report =
+                self.forget_in_batch(&ForgetTarget::Source(source.to_string()), Some(scope))?;
             let (doc, _) = self.ingest(title, chunks, scope, source, now)?;
             self.store.commit_batch()?;
             Ok((doc.0, report))

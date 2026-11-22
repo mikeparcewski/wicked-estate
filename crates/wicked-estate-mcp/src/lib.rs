@@ -1548,8 +1548,10 @@ fn knowledge_tool_schemas() -> Vec<Value> {
                         "type": "boolean",
                         "default": false,
                         "description": "Forget existing document knowledge with this exact source \
-                            before ingesting; requires a non-empty source. Returns replaced count. \
-                            Live-source structure is preserved."
+                            inside this call's scope subtree before ingesting (the same source in \
+                            another scope stays; an empty scope covers every scope); requires a \
+                            non-empty source. Returns replaced count. Live-source structure is \
+                            preserved."
                     }
                 }
             }

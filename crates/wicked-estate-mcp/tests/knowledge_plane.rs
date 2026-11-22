@@ -701,6 +701,50 @@ fn ingest_replace_source_removes_old_doc_and_chunk() {
     }
 }
 
+/// #558: replace_source is bound to the call's scope subtree. Two learn runs ingest the same
+/// citation under different scopes; refreshing one leaves the other's copy in place.
+#[test]
+fn ingest_replace_source_keeps_the_same_source_in_another_scope() {
+    let mut r = rig();
+    let source = "src/notes.md";
+    for (scope, word) in [
+        ("learn:a/topic:x", "alphaquasar"),
+        ("learn:b/topic:y", "betaquasar"),
+    ] {
+        r.ok(
+            "knowledge.ingest",
+            json!({"title": "t", "chunks": [word], "source": source, "scope": scope}),
+        );
+    }
+    let result = r.ok(
+        "knowledge.ingest",
+        json!({
+            "title": "t2", "chunks": ["alphapulsar"], "source": source,
+            "scope": "learn:a/topic:x", "replace_source": true
+        }),
+    );
+    assert_eq!(result["replaced"], 2, "only learn:a's doc and chunk");
+    let docs = |r: &Rig, scope: &str| {
+        r.know
+            .count(Some(wicked_estate_knowledge::KClass::Doc), Some(scope))
+            .unwrap()
+    };
+    assert_eq!(docs(&r, "learn:a"), 1);
+    assert_eq!(docs(&r, "learn:b"), 1, "the other scope's copy stays");
+    let recalled = r.ok("knowledge.recall", json!({"query": "betaquasar"}));
+    assert!(
+        recalled["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["body_snippet"]
+                .as_str()
+                .unwrap()
+                .contains("betaquasar")),
+        "{recalled}"
+    );
+}
+
 #[test]
 fn recall_require_filters_before_budget_and_rejects_invalid_deps() {
     use wicked_estate_knowledge::{KClass, KNode};
