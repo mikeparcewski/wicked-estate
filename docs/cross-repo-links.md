@@ -104,8 +104,9 @@ diagnostic points to `wicked-estate link --project <p> --status --json` for the 
 relink command names the project's members that are still in the graph, shell-quoted. A value too
 long to echo (a deep `--db` path, a long project id) is replaced by a quoted placeholder such as
 `'<graph.db>'`, which `link` refuses rather than runs. CLI
-`blast-radius --json` and `path --json` carry the same bounded form. Project state is retained even
-when those fixed fields alone exceed the reserve.
+`blast-radius --json` and `path --json` carry the same bounded form with a larger bound, half of the
+25,000-character CLI page (about 50 members), because crew reads every member's coverage from it.
+Project state is retained even when those fixed fields alone exceed the bound.
 
 A link edge's own confidence is its identity rule's (`path`, `git-source`, `registry-source` 0.75;
 `registry-source(version-only)` 0.6).
