@@ -98,10 +98,12 @@ measures this state after the response cache on every answer, so cache hits stil
 member indexes and emit a `LINK-STALE` warning with the relink command. MCP reserves 1,500 bytes
 for the compact link state and its `LINK-STALE` / `LINK` diagnostics together. When they do not fit,
 member coverage entries are dropped from the end of the longest list first, then stale labels, and
-then a `last_error` longer than 200 characters is cut to that length. `coverage_omitted` and
+then a `last_error` longer than 200 bytes as a JSON string (escapes counted) is cut to fit. `coverage_omitted` and
 `stale_labels_omitted` count the dropped entries, `last_error_truncated` marks the cut error, and a
 diagnostic points to `wicked-estate link --project <p> --status --json` for the full lists. The
-relink command names the project's members that are still in the graph, shell-quoted. CLI
+relink command names the project's members that are still in the graph, shell-quoted. A value too
+long to echo (a deep `--db` path, a long project id) is replaced by a quoted placeholder such as
+`'<graph.db>'`, which `link` refuses rather than runs. CLI
 `blast-radius --json` and `path --json` carry the same bounded form. Project state is retained even
 when those fixed fields alone exceed the reserve.
 

@@ -554,8 +554,9 @@ pub fn answer_statuses(store: &dyn GraphStoreMutExt) -> Vec<LinkStatus> {
 /// list (ties: the first project) loses its last member entry, and that project's object counts the
 /// cut in `coverage_omitted` (absent when nothing was cut; `link --status` stays complete). Once no
 /// coverage is left, the longest `stale_labels` list is cut the same way and counted in
-/// `stale_labels_omitted`, and then a `last_error` longer than 200 chars is cut to that and marked
-/// `last_error_truncated` (wicked-estate#559). The other status fields are never dropped, even
+/// `stale_labels_omitted`, and then a `last_error` whose JSON string is longer than 200 bytes is cut
+/// to fit that and marked `last_error_truncated` (wicked-estate#559; bytes, so escaped control
+/// characters count at their serialized size). The other status fields are never dropped, even
 /// when they alone exceed `budget`. JSON-level counts, not [`LinkStatus`] fields, so the public struct
 /// keeps its shape.
 pub fn bounded_json(statuses: Vec<LinkStatus>, budget: usize) -> serde_json::Value {
@@ -586,21 +587,28 @@ pub fn bounded_json(statuses: Vec<LinkStatus>, budget: usize) -> serde_json::Val
                 longest("stale_labels").map(|i| (i, "stale_labels", "stale_labels_omitted"))
             })
         else {
-            // Last, a long `last_error` is cut to LAST_ERROR_CAP chars, marked truncated.
+            // Last, a long `last_error` is cut to LAST_ERROR_CAP serialized bytes, marked truncated.
             let long = rows.iter().position(|row| {
                 row["last_error"]
                     .as_str()
-                    .is_some_and(|e| e.chars().count() > LAST_ERROR_CAP)
+                    .is_some_and(|e| json_len(e) > LAST_ERROR_CAP)
             });
             let Some(index) = long else {
                 return value;
             };
-            let cut: String = rows[index]["last_error"]
+            let mut cut = String::new();
+            let mut used = 0;
+            for c in rows[index]["last_error"]
                 .as_str()
                 .unwrap_or_default()
                 .chars()
-                .take(LAST_ERROR_CAP)
-                .collect();
+            {
+                used += json_len(c.encode_utf8(&mut [0; 4]));
+                if used > LAST_ERROR_CAP {
+                    break;
+                }
+                cut.push(c);
+            }
             rows[index]["last_error"] = serde_json::json!(cut);
             rows[index]["last_error_truncated"] = serde_json::json!(true);
             continue;
@@ -616,8 +624,14 @@ pub fn bounded_json(statuses: Vec<LinkStatus>, budget: usize) -> serde_json::Val
 
 /// Most names one link diagnostic lists before it counts the rest.
 const DIAG_NAME_CAP: usize = 3;
-/// Longest `last_error` the bounded answer form keeps once the lists are cut (chars).
+/// Longest `last_error` the bounded answer form keeps once the lists are cut (bytes of its JSON
+/// string body, escapes included).
 const LAST_ERROR_CAP: usize = 200;
+
+/// `text`'s length inside a JSON string, escapes included, quotes excluded.
+fn json_len(text: &str) -> usize {
+    serde_json::to_string(text).map_or(text.len(), |j| j.len() - 2)
+}
 
 /// `names`, at most [`DIAG_NAME_CAP`] of them, then `+N more`.
 fn capped_names<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
@@ -656,8 +670,9 @@ fn member_gone(store: &dyn GraphStoreMutExt, label: &str) -> bool {
             || !repo_scope::labels(store).iter().any(|l| l == label))
 }
 
-/// Longest database path a link diagnostic echoes (chars, quoted); a longer one is named
-/// `<graph.db>` so a deep path cannot spend the link budget.
+/// Longest database path a link diagnostic echoes (chars, quoted); a longer one is named by the
+/// quoted placeholder `'<graph.db>'`, so a deep path cannot spend the link budget and a pasted
+/// command stays one inert word (`link` refuses a missing graph, main.rs `require_existing_graph`).
 const DB_ECHO_CAP: usize = 200;
 
 /// The `--db` argument the diagnostics' commands carry.
@@ -666,17 +681,26 @@ fn db_word(db: &str) -> String {
     if word.len() <= DB_ECHO_CAP {
         word
     } else {
-        "<graph.db>".to_string()
+        "'<graph.db>'".to_string()
     }
 }
 
-/// The `LINK:` line counting the member entries the bounded `link` array cut, per project.
-fn omitted_line(cut: &[(String, u64)], db: &str) -> String {
-    let named: Vec<String> = cut.iter().map(|(p, n)| format!("'{p}' ({n})")).collect();
+/// The `LINK:` line counting the member entries the bounded `link` array cut, per project when
+/// `named`, else in total (a form that echoes no project id, for ids too long to repeat).
+fn omitted_line(cut: &[(String, u64)], db: &str, named: bool) -> String {
+    let which = if named {
+        let named: Vec<String> = cut.iter().map(|(p, n)| format!("'{p}' ({n})")).collect();
+        format!(
+            "for project(s) {}",
+            capped_names(named.iter().map(String::as_str))
+        )
+    } else {
+        let total: u64 = cut.iter().map(|(_, n)| n).sum();
+        format!("({total}) across {} project(s)", cut.len())
+    };
     format!(
-        "LINK: member entries omitted for project(s) {}; see `wicked-estate link --db {} \
-         --project <id> --status --json` for the full lists",
-        capped_names(named.iter().map(String::as_str)),
+        "LINK: member entries omitted {which}; see `wicked-estate link --db {} \
+         --project '<id>' --status --json` for the full lists",
         db_word(db)
     )
 }
@@ -737,7 +761,7 @@ pub fn answer_annotation(
     if chars(&lines) > budget / 2 {
         lines = vec![format!(
             "LINK-STALE: {} project(s) have stale links ({}); cross-repo dependents may be \
-             missing or outdated - see `wicked-estate link --db {db_word} --project <id> \
+             missing or outdated - see `wicked-estate link --db {db_word} --project '<id>' \
              --status --json` for the members to relink",
             stale.len(),
             capped_names(stale.iter().map(|s| s.project.as_str()))
@@ -746,7 +770,7 @@ pub fn answer_annotation(
     if chars(&lines) > budget / 2 {
         lines = vec![format!(
             "LINK-STALE: {} project(s) have stale links; see `wicked-estate link --project \
-             <id> --status --json`",
+             '<id>' --status --json`",
             stale.len()
         )];
     }
@@ -762,10 +786,13 @@ pub fn answer_annotation(
         })
         .filter(|(_, n)| *n > 0)
         .collect();
+    // A project list longer than a quarter of the budget is counted, not named, so a long id
+    // cannot crowd out the array that must carry it.
+    let named = omitted_line(&worst, db, true).len() <= budget / 4;
     let reserve = if worst.is_empty() {
         0
     } else {
-        omitted_line(&worst, db).len() + 1
+        omitted_line(&worst, db, named).len() + 1
     };
     let links = bounded_json(statuses, budget.saturating_sub(chars(&lines) + reserve));
     let cut: Vec<(String, u64)> = links
@@ -784,7 +811,7 @@ pub fn answer_annotation(
         })
         .collect();
     if !cut.is_empty() {
-        lines.push(omitted_line(&cut, db));
+        lines.push(omitted_line(&cut, db, named));
     }
     (links, lines)
 }

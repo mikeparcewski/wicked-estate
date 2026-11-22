@@ -1151,6 +1151,10 @@ mod tests {
 
     /// Index `labels` as tiny one-file repos into an in-memory store and link them as project `p`.
     fn linked_probe(root: &std::path::Path, labels: &[String]) -> FreshnessProbe {
+        linked_probe_as(root, "p", labels)
+    }
+
+    fn linked_probe_as(root: &std::path::Path, project: &str, labels: &[String]) -> FreshnessProbe {
         let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
         for label in labels {
             let dir = root.join(label);
@@ -1158,7 +1162,7 @@ mod tests {
             std::fs::write(dir.join("a.ts"), "export function f() {}\n").unwrap();
             crate::index_path_as(&mut store, &dir, Some(label)).unwrap();
         }
-        crate::link::link_project(&mut store, "p", labels).unwrap();
+        crate::link::link_project(&mut store, project, labels).unwrap();
         FreshnessProbe::with_store(":memory:", Some(Box::new(store)))
     }
 
@@ -1316,6 +1320,74 @@ mod tests {
         );
         assert_eq!(content["link"][0]["last_error_truncated"], true);
         assert!(link_lines.iter().any(|d| d.starts_with("LINK-STALE:")));
+        // A placeholder pasted into sh must stay one inert word, never a redirection.
+        for line in &link_lines {
+            assert!(
+                !line.contains(" <graph.db>") && !line.contains(" <id>"),
+                "bare placeholder: {line}"
+            );
+        }
+    }
+
+    /// The link block, its lines and every annotation byte: (used chars, the lines).
+    fn link_block_size(probe: &mut FreshnessProbe) -> (usize, Vec<String>, serde_json::Value) {
+        let mut content = json!({"crossings": []});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        let link_lines: Vec<String> = diags
+            .into_iter()
+            .filter(|d| d.starts_with("LINK-STALE:") || d.starts_with("LINK:"))
+            .collect();
+        let used = content["link"].to_string().len()
+            + link_lines.iter().map(|d| d.len() + 1).sum::<usize>();
+        (used, link_lines, content["link"].clone())
+    }
+
+    /// #559 review round 2: `last_error` is capped by its serialized length, so control
+    /// characters (six bytes each as `\u0001`) cannot carry it past the reserve.
+    #[test]
+    fn link_block_fits_with_control_characters_in_last_error_559() {
+        let root = tempfile::tempdir().unwrap();
+        let labels: Vec<String> = ["provider", "consumer"].map(String::from).to_vec();
+        let mut probe = linked_probe(root.path(), &labels);
+        probe
+            .store
+            .as_mut()
+            .unwrap()
+            .meta_put("link:p:last_error", &"\u{1}".repeat(5_000))
+            .unwrap();
+        let (used, lines, link) = link_block_size(&mut probe);
+        assert!(
+            used <= wicked_estate_retrieve::LINK_RESERVE,
+            "{used} chars: {lines:?} {link}"
+        );
+        assert_eq!(link[0]["last_error_truncated"], true, "{link}");
+    }
+
+    /// #559 review round 2: a long project id with a stale member. The stale line folds to the
+    /// form that names no project, and the omitted-entries line must not echo the id either.
+    #[test]
+    fn link_block_fits_with_a_long_project_id_559() {
+        let root = tempfile::tempdir().unwrap();
+        let labels: Vec<String> = ["provider", "consumer"].map(String::from).to_vec();
+        let project = "q".repeat(700);
+        let mut probe = linked_probe_as(root.path(), &project, &labels);
+        crate::index_path_as(
+            probe.store.as_mut().unwrap().as_mut(),
+            &root.path().join("provider"),
+            Some("provider"),
+        )
+        .unwrap();
+        let (used, lines, link) = link_block_size(&mut probe);
+        assert!(
+            used <= wicked_estate_retrieve::LINK_RESERVE,
+            "{used} chars: {lines:?} {link}"
+        );
+        assert_eq!(link[0]["stale"], true, "{link}");
+        assert!(
+            lines.iter().any(|d| d.starts_with("LINK-STALE:")),
+            "{lines:?}"
+        );
     }
 
     #[test]
