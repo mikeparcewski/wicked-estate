@@ -1601,6 +1601,7 @@ impl GraphRead for SurrealStore {
         })
     }
 
+    // count_unresolved_refs_from keeps the default None: `from` is only in the JSON blob.
     fn unresolved_refs_for_name(&self, name: &str) -> Result<Vec<UnresolvedRef>> {
         let db = self.db.clone();
         let name = name.to_string();

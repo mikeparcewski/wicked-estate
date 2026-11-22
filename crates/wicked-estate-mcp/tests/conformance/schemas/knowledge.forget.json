@@ -1,0 +1,25 @@
+{
+  "name": "knowledge.forget",
+  "description": "Hard-delete document knowledge by exactly one id, citation source or scope subtree; preserve live-source structure and all other kinds.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "source": {
+        "type": "string",
+        "minLength": 1
+      },
+      "scope_prefix": {
+        "type": "string"
+      },
+      "confirm_erase_all": {
+        "type": "boolean",
+        "default": false
+      }
+    }
+  },
+  "captured_from": "wicked-estate-mcp (estate-C6 PR A)"
+}

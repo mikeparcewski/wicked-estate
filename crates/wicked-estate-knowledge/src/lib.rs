@@ -18,7 +18,7 @@ pub mod links;
 pub mod plane;
 pub mod shape;
 pub mod source;
-pub use engine::{KClass, KHit, KNode, KRecalled, KnowledgeEngine};
+pub use engine::{ForgetReport, ForgetTarget, KClass, KHit, KNode, KRecalled, KnowledgeEngine};
 pub use links::{DocLink, LinkDir, LinkEnd, LinkedReplaceReport};
 pub use plane::Visible;
 pub use shape::{
@@ -1040,6 +1040,23 @@ pub trait KnowledgeApi {
         source: &str,
         now: i64,
     ) -> anyhow::Result<String>;
+    /// Erase document knowledge by id, citation source, or scope subtree.
+    fn forget(&mut self, _target: &ForgetTarget) -> anyhow::Result<ForgetReport> {
+        anyhow::bail!("knowledge.forget not available")
+    }
+
+    /// Replace citation-sourced document knowledge, returning the new doc and deletion counts.
+    fn ingest_replacing(
+        &mut self,
+        _title: &str,
+        _chunks: &[String],
+        _scope: &str,
+        _source: &str,
+        _now: i64,
+    ) -> anyhow::Result<(String, ForgetReport)> {
+        anyhow::bail!("knowledge.forget not available")
+    }
+
     /// Promote a knowledge proposal using a stable id so retries upsert the same node: derive its
     /// deps from its `relate[]` / `relate_code[]` endpoints, refuse a declared-deps mismatch, and
     /// apply it invisible-until-complete (journal, edges, node). `code_epochs` holds the live epoch
@@ -1156,15 +1173,18 @@ pub trait KnowledgeApi {
     /// Recall with a declared `visible` set (DES-KNOWLEDGE-DATA-001 §4.3): only knowledge whose
     /// every dep is in it is a candidate, filtered before ranking; each hit carries its `scope`,
     /// `deps` and `untrusted`. The provided default serves an implementer without the plane (no
-    /// deps anywhere): its plain recall, as hits with no deps.
+    /// deps anywhere): its plain recall, as hits with no deps, or no hits when deps are required.
     fn recall_hits(
         &mut self,
         query: &str,
         token_budget: usize,
         scope_prefix: Option<&str>,
-        _visible: &Visible,
+        visible: &Visible,
         now: i64,
     ) -> anyhow::Result<Vec<KnowledgeHit>> {
+        if visible.requires_any() {
+            return Ok(Vec::new());
+        }
         Ok(self
             .recall(query, token_budget, scope_prefix, now)?
             .into_iter()
@@ -1211,6 +1231,23 @@ impl KnowledgeApi for KnowledgeEngine {
     ) -> anyhow::Result<String> {
         let (doc_sym, _) = KnowledgeEngine::ingest(self, title, chunks, scope, source, now)?;
         Ok(doc_sym.0)
+    }
+
+    fn forget(&mut self, target: &ForgetTarget) -> anyhow::Result<ForgetReport> {
+        Ok(KnowledgeEngine::forget(self, target)?)
+    }
+
+    fn ingest_replacing(
+        &mut self,
+        title: &str,
+        chunks: &[String],
+        scope: &str,
+        source: &str,
+        now: i64,
+    ) -> anyhow::Result<(String, ForgetReport)> {
+        Ok(KnowledgeEngine::ingest_replacing(
+            self, title, chunks, scope, source, now,
+        )?)
     }
 
     fn write_node(

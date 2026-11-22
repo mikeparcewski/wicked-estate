@@ -541,6 +541,53 @@ pub fn projects(store: &dyn GraphStoreMutExt) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Compact live status of every linked project, for CLI and transport annotations.
+pub fn answer_statuses(store: &dyn GraphStoreMutExt) -> Vec<LinkStatus> {
+    projects(store)
+        .iter()
+        .filter_map(|project| status(store, project))
+        .map(LinkStatus::compact)
+        .collect()
+}
+
+/// The answers' `link` array, bounded to `budget` chars: while it is longer, the longest coverage
+/// list (ties: the first project) loses its last member entry, and that project's object counts the
+/// cut in `coverage_omitted` (absent when nothing was cut; `link --status` stays complete). The
+/// fixed status fields are never dropped, even when they alone exceed `budget`. A JSON-level count,
+/// not a [`LinkStatus`] field, so the public struct keeps its shape.
+pub fn bounded_json(statuses: Vec<LinkStatus>, budget: usize) -> serde_json::Value {
+    let mut rows: Vec<serde_json::Value> = statuses
+        .iter()
+        .map(|s| serde_json::to_value(s).unwrap_or_default())
+        .collect();
+    let coverage_len = |row: &serde_json::Value| row["coverage"].as_array().map_or(0, Vec::len);
+    loop {
+        let value = serde_json::Value::Array(rows.clone());
+        if value.to_string().len() <= budget {
+            return value;
+        }
+        let longest = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| coverage_len(row) > 0)
+            .max_by(|(ai, a), (bi, b)| {
+                coverage_len(a)
+                    .cmp(&coverage_len(b))
+                    .then_with(|| bi.cmp(ai))
+            })
+            .map(|(index, _)| index);
+        let Some(index) = longest else {
+            return value;
+        };
+        let row = &mut rows[index];
+        if let Some(coverage) = row["coverage"].as_array_mut() {
+            coverage.pop();
+        }
+        let omitted = row["coverage_omitted"].as_u64().unwrap_or(0) + 1;
+        row["coverage_omitted"] = serde_json::json!(omitted);
+    }
+}
+
 /// Remember `project` as linked in this store (so answers can find its status).
 pub fn remember_project(store: &mut dyn GraphStoreMutExt, project: &str) -> Result<()> {
     let mut all = projects(store);
@@ -793,6 +840,45 @@ fn installed_artifact(
         }
         if dir == root || !dir.pop() || !dir.starts_with(root) {
             return None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::*;
+
+    #[test]
+    fn answer_status_coverage_is_bounded_and_counts_every_omission() {
+        let make = |project: &str, count: usize| LinkStatus {
+            project: project.into(),
+            generation: 7,
+            coverage: (0..count)
+                .map(|i| MemberCoverage {
+                    label: format!("member_{i:03}_with_a_long_descriptive_name"),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let statuses = vec![make("long", 12), make("short", 2)];
+        let full = serde_json::to_value(&statuses).unwrap();
+        assert!(full[0].get("coverage_omitted").is_none());
+        let budget = serde_json::to_string(&full).unwrap().len() - 1;
+        let bounded = bounded_json(statuses.clone(), budget);
+        assert!(serde_json::to_string(&bounded).unwrap().len() <= budget);
+        assert_eq!(bounded[0]["coverage_omitted"], 1);
+        assert_eq!(bounded[1]["coverage"].as_array().unwrap().len(), 2);
+        assert!(bounded[1].get("coverage_omitted").is_none());
+
+        let bounded = bounded_json(statuses, 500);
+        assert!(serde_json::to_string(&bounded).unwrap().len() <= 500);
+        for (i, total) in [12, 2].into_iter().enumerate() {
+            let kept = bounded[i]["coverage"].as_array().unwrap().len();
+            let omitted = bounded[i]["coverage_omitted"].as_u64().unwrap_or(0) as usize;
+            assert_eq!(kept + omitted, total);
+            assert_eq!(bounded[i]["generation"], 7);
+            assert_eq!(bounded[i]["stale"], false);
         }
     }
 }

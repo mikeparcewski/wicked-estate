@@ -118,6 +118,9 @@ impl GraphRead for OverlayMemStore {
     fn unresolved_refs_for_name(&self, name: &str) -> Result<Vec<UnresolvedRef>> {
         self.overlay().unresolved_refs_for_name(name)
     }
+    fn count_unresolved_refs_from(&self, from: &[SymbolId]) -> Result<Option<u64>> {
+        self.overlay().count_unresolved_refs_from(from)
+    }
     fn file_digest(&self, file: &str) -> Result<Option<String>> {
         self.overlay().file_digest(file)
     }

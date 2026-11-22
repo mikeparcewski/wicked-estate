@@ -1,0 +1,15 @@
+{
+  "description": "Soft-retire one active memory, keeping it for undo; never recalled.",
+  "inputSchema": {
+    "type": "object",
+    "required": [
+      "id"
+    ],
+    "properties": {
+      "id": {
+        "type": "string"
+      }
+    }
+  },
+  "name": "memory.retire"
+}

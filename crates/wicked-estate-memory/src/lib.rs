@@ -29,11 +29,11 @@ macro_rules! eprintln {
 }
 
 use wicked_estate_core::{
-    Direction, Edge, EdgeKind, NodeKind, ResolutionTier, SymbolId, SymbolQuery,
+    Direction, Edge, EdgeKind, Node, NodeKind, ResolutionTier, SymbolId, SymbolQuery,
 };
 use wicked_estate_memory_core::{
-    Candidate, Facets, Memory, Salience, Scope, budget_pack, facet_admits,
-    salience as compute_salience,
+    Candidate, Facets, MEMORY_NODE_KIND, Memory, RETIRED_MEMORY_NODE_KIND, Salience, Scope,
+    budget_pack, facet_admits, memory_lock, meta_keys, salience as compute_salience,
 };
 use wicked_estate_overlay::XedgeStore;
 use wicked_estate_retrieve::{Embedder, HashEmbedder, hybrid_search};
@@ -45,11 +45,13 @@ mod consolidate;
 #[cfg(feature = "cross")]
 pub mod cross;
 mod memext;
+mod packs;
 /// Proposal-queue operations on the engine (DES-MEM-FACETED-001 §5.0).
 mod proposal;
 mod store;
 pub use consolidate::ConsolidationReport;
 use memext::MemExt;
+pub use packs::{PackApplyReport, PackMemory, PackRef, apply_pack_memories, pack_memories};
 pub use store::MemStore;
 
 /// The `codebase-expedition` skill (SKILL.md), owned by this crate and embedded at compile time so
@@ -168,7 +170,8 @@ impl RecallMode {
 pub enum ScopeFilter<'a> {
     /// Inheritance (the default): memories at the query scope or an ANCESTOR of it — a
     /// leaf-scoped query also sees broader/root-scoped memories — plus every OPERATOR memory
-    /// (`operator:<id>`, how the operator works), which applies under every scope.
+    /// (`operator:<id>`, how the operator works) and locked one-segment org/team memories.
+    /// Facets still gate every admitted memory.
     Ancestors(&'a Scope),
     /// Subtree-inclusive (the `memory.erase`/`memory.coverage` direction, `path_in_prefix`):
     /// memories whose scope equals the prefix or DESCENDS from it (`""` = the root subtree =
@@ -183,12 +186,14 @@ impl ScopeFilter<'_> {
     /// NOTE: `mem_scope` is the memory-domain scope (decoded from the node's `metadata.scope`
     /// JSON via [`Memory::from_node`]), NOT the store's `nodes.scope` column — that column is the
     /// graph-domain predicate and stays `''` for memory nodes.
-    fn admits(&self, mem_scope: &Scope) -> bool {
+    fn admits(&self, mem_scope: &Scope, node: &Node) -> bool {
         match self {
             // An operator memory (`operator:<id>`) is about the person, not a project: every
             // scoped recall inherits it, as it inherits the root.
             ScopeFilter::Ancestors(query_scope) => {
-                mem_scope.is_ancestor_of(query_scope) || mem_scope.is_operator()
+                mem_scope.is_ancestor_of(query_scope)
+                    || mem_scope.is_operator()
+                    || (mem_scope.is_memory_layer() && memory_lock(node).is_some())
             }
             // Allocation-free segment walk (this runs per candidate in the rerank loop) —
             // exact `path_in_prefix` semantics for parse-normalized scopes, see Scope::path_in_prefix.
@@ -208,7 +213,22 @@ impl MemoryEngine {
 
     /// Open a durable engine at `path` (sidecar index at `<path>.memext`; reconciled at open).
     pub fn open(path: &str) -> wicked_estate_core::Result<Self> {
-        let eng = Self::build(Box::new(SqliteStore::open(path)?), MemExt::open(path)?);
+        let store = SqliteStore::open(path)?;
+        use wicked_estate_core::redact::{TEXT_REDACTION_EPOCH, TEXT_REDACTION_EPOCH_KEY};
+        let epoch = store
+            .meta_get(TEXT_REDACTION_EPOCH_KEY)?
+            .and_then(|v| v.parse::<u32>().ok());
+        if !epoch.is_some_and(|e| e >= TEXT_REDACTION_EPOCH)
+            && wicked_estate_core::GraphRead::stats(&store)?.node_count > 0
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "REDACTION-PENDING: {path} holds text written before redaction; run \
+                 `wicked-estate redact-store --db {path}`"
+            );
+        }
+        let eng = Self::build(Box::new(store), MemExt::open(path)?);
         // Crash-recovery: rebuild the sidecar index if it diverged from the authoritative nodes.
         let all = eng.all_memories()?;
         eng.ext.reconcile(&all)?;
@@ -273,11 +293,14 @@ impl MemoryEngine {
     }
 
     /// Hydrate memories from node-ids (used by consolidation candidate queries). Missing/undecodable
-    /// ids are skipped.
+    /// ids and locked nodes are skipped: these candidates are for maintenance only.
     pub(crate) fn hydrate(&self, ids: &[String]) -> wicked_estate_core::Result<Vec<Memory>> {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             if let Some(node) = self.store.get_node(&SymbolId(id.clone()))? {
+                if memory_lock(&node).is_some() {
+                    continue;
+                }
                 if let Some(m) = Memory::from_node(&node) {
                     out.push(m);
                 }
@@ -286,23 +309,133 @@ impl MemoryEngine {
         Ok(out)
     }
 
-    /// All stored memories (decoded) paired with their node. Full scan — fine at local-first scale;
+    /// All active memories (decoded). Full scan — fine at local-first scale;
     /// the indexed `memory_node_ext` projection (DESIGN §4) optimizes this when it lands.
     pub fn all_memories(&self) -> wicked_estate_core::Result<Vec<Memory>> {
-        let nodes = self.store.find_symbols(&SymbolQuery {
+        let nodes = self.memory_nodes(MEMORY_NODE_KIND)?;
+        Ok(nodes.iter().filter_map(Memory::from_node).collect())
+    }
+
+    fn memory_nodes(&self, kind: &str) -> wicked_estate_core::Result<Vec<Node>> {
+        self.store.find_symbols(&SymbolQuery {
             text: None,
             exact_name: None,
-            kinds: vec![NodeKind::Other("memory".into())],
+            kinds: vec![NodeKind::Other(kind.into())],
             language: None,
             limit: None,
             scope_prefix: None,
-        })?;
-        Ok(nodes.iter().filter_map(Memory::from_node).collect())
+        })
+    }
+
+    // Only lifecycle management decodes retired nodes. Keep Memory::from_node active-only so
+    // every retrieval and consolidation hydration shares the same exclusion gate. An undecodable
+    // retired node is skipped (`None`), exactly as `all_memories` skips an undecodable active one,
+    // so one bad row never blocks the retired list, a restore, or an erase.
+    fn retired_memory(node: &Node) -> Option<(Memory, i64)> {
+        if node.kind != NodeKind::Other(RETIRED_MEMORY_NODE_KIND.into()) {
+            return None;
+        }
+        let retired_at = node
+            .metadata
+            .get(meta_keys::RETIRED_AT)
+            .and_then(|v| v.as_i64())?;
+        Some((Self::retired_body(node)?, retired_at))
+    }
+
+    // The memory a retired node holds, without requiring `retired_at`: erasure only needs the body,
+    // so a retired row whose timestamp does not decode can still be erased for good.
+    fn retired_body(node: &Node) -> Option<Memory> {
+        if node.kind != NodeKind::Other(RETIRED_MEMORY_NODE_KIND.into()) {
+            return None;
+        }
+        let mut active = node.clone();
+        active.kind = NodeKind::Other(MEMORY_NODE_KIND.into());
+        Memory::from_node(&active)
+    }
+
+    /// Soft-retire one active memory by id or SymbolId string. Retains embeddings and edges.
+    /// Returns None for an unknown or already-retired memory.
+    pub fn retire(&mut self, id: &str, now: i64) -> wicked_estate_core::Result<Option<SymbolId>> {
+        if id.is_empty() {
+            return Err(wicked_estate_core::Error::Invalid(
+                "retire: id must not be empty".into(),
+            ));
+        }
+        for mut node in self.memory_nodes(MEMORY_NODE_KIND)? {
+            let Some(memory) = Memory::from_node(&node) else {
+                continue;
+            };
+            if memory.id != id && node.symbol.0 != id {
+                continue;
+            }
+            Self::refuse_locked(&node)?;
+            node.kind = NodeKind::Other(RETIRED_MEMORY_NODE_KIND.into());
+            node.metadata
+                .insert(meta_keys::RETIRED_AT.into(), now.into());
+            let sym = node.symbol.clone();
+            self.store.upsert_nodes(&[node])?;
+            self.ext.remove(std::slice::from_ref(&sym.0))?;
+            return Ok(Some(sym));
+        }
+        Ok(None)
+    }
+
+    /// Restore one retired memory by id or SymbolId string, preserving its original identity.
+    pub fn unretire(&mut self, id: &str) -> wicked_estate_core::Result<Option<SymbolId>> {
+        if id.is_empty() {
+            return Err(wicked_estate_core::Error::Invalid(
+                "unretire: id must not be empty".into(),
+            ));
+        }
+        for mut node in self.memory_nodes(RETIRED_MEMORY_NODE_KIND)? {
+            let Some((memory, _)) = Self::retired_memory(&node) else {
+                continue;
+            };
+            if memory.id != id && node.symbol.0 != id {
+                continue;
+            }
+            Self::refuse_locked(&node)?;
+            node.kind = NodeKind::Other(MEMORY_NODE_KIND.into());
+            node.metadata.remove(meta_keys::RETIRED_AT);
+            let sym = node.symbol.clone();
+            self.store.upsert_nodes(&[node])?;
+            self.ext.upsert(&memory)?;
+            return Ok(Some(sym));
+        }
+        Ok(None)
+    }
+
+    /// Management inventory of retired memories; never used as retrieval candidates.
+    pub fn retired(
+        &self,
+        scope_prefix: Option<&str>,
+    ) -> wicked_estate_core::Result<Vec<(Memory, i64)>> {
+        let mut retired = Vec::new();
+        for node in self.memory_nodes(RETIRED_MEMORY_NODE_KIND)? {
+            let Some((memory, retired_at)) = Self::retired_memory(&node) else {
+                continue;
+            };
+            if scope_prefix.is_none_or(|prefix| memory.scope.path_in_prefix(prefix)) {
+                retired.push((memory, retired_at));
+            }
+        }
+        Ok(retired)
+    }
+
+    fn erasure_memories(&self) -> wicked_estate_core::Result<Vec<Memory>> {
+        let mut memories = self.all_memories()?;
+        memories.extend(
+            self.memory_nodes(RETIRED_MEMORY_NODE_KIND)?
+                .iter()
+                .filter_map(Self::retired_body),
+        );
+        Ok(memories)
     }
 
     /// Embed text with the engine's embedder (used by consolidation).
     pub(crate) fn embed_for(&self, text: &str) -> Vec<f32> {
-        self.embedder.embed(text)
+        self.embedder
+            .embed(&wicked_estate_core::redact::redact_free_text(text))
     }
 
     /// Fetch a node by id.
@@ -310,16 +443,36 @@ impl MemoryEngine {
         &self,
         id: &SymbolId,
     ) -> wicked_estate_core::Result<Option<wicked_estate_core::Node>> {
-        self.store.get_node(id)
+        Ok(self
+            .store
+            .get_node(id)?
+            .map(|node| wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node)))
     }
 
     /// Right-to-erasure (FR-15/AC-10): hard-delete every memory whose scope is within `scope_prefix`,
     /// from the graph + FTS + vector + the sidecar index. Returns the count erased. **Memory-kind
-    /// guarded:** only `Other("memory")` nodes are considered (via `all_memories`), so code/infra
+    /// guarded:** only active and retired memory nodes are considered, so code/infra
     /// nodes sharing a scope are never touched. Idempotent.
     pub fn erase(&mut self, scope_prefix: &str) -> wicked_estate_core::Result<usize> {
+        let mut locked = Vec::new();
+        for kind in [MEMORY_NODE_KIND, RETIRED_MEMORY_NODE_KIND] {
+            for node in self.memory_nodes(kind)? {
+                let path = node.metadata.get(meta_keys::SCOPE).and_then(|v| v.as_str());
+                if path.is_some_and(|path| {
+                    wicked_estate_core::scope::path_in_prefix(path, scope_prefix)
+                }) {
+                    if let Err(error) = Self::refuse_locked(&node) {
+                        locked.push(error.to_string());
+                    }
+                }
+            }
+        }
+        if !locked.is_empty() {
+            locked.sort();
+            return Err(wicked_estate_core::Error::Invalid(locked.join("; ")));
+        }
         let victims: Vec<Memory> = self
-            .all_memories()?
+            .erasure_memories()?
             .into_iter()
             .filter(|m| m.scope.path_in_prefix(scope_prefix))
             .collect();
@@ -335,8 +488,20 @@ impl MemoryEngine {
     /// guarded like [`Self::erase`]: a code/infra node id never matches. Returns the erased
     /// memory's `SymbolId`, or `None` when no memory has that id.
     pub fn erase_id(&mut self, id: &str) -> wicked_estate_core::Result<Option<SymbolId>> {
+        for symbol in [
+            SymbolId(id.into()),
+            wicked_estate_core::Symbol::synthetic("mem", id).id(),
+        ] {
+            if let Some(node) = self.store.get_node(&symbol)? {
+                if matches!(&node.kind, NodeKind::Other(k)
+                    if k == MEMORY_NODE_KIND || k == RETIRED_MEMORY_NODE_KIND)
+                {
+                    Self::refuse_locked(&node)?;
+                }
+            }
+        }
         let Some(victim) = self
-            .all_memories()?
+            .erasure_memories()?
             .into_iter()
             .find(|m| m.id == id || m.symbol().0 == id)
         else {
@@ -368,12 +533,52 @@ impl MemoryEngine {
             .len())
     }
 
+    fn refuse_locked(node: &Node) -> wicked_estate_core::Result<()> {
+        if let Some(lock) = memory_lock(node) {
+            let id = node
+                .symbol
+                .as_str()
+                .rsplit(' ')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(':');
+            return Err(wicked_estate_core::Error::Invalid(format!(
+                "memory_locked: {id} {}@{}",
+                lock.pack, lock.version
+            )));
+        }
+        Ok(())
+    }
+
+    /// The shared ordinary-write gate: node ownership first, then reserved layer placement.
+    fn check_lock(&self, mem: &Memory) -> wicked_estate_core::Result<()> {
+        if let Some(node) = self.store.get_node(&mem.symbol())? {
+            Self::refuse_locked(&node)?;
+        }
+        if mem.scope.is_memory_layer() {
+            return Err(wicked_estate_core::Error::Invalid(format!(
+                "memory_locked: {} is an org/team layer scope; only a verified pack writes there",
+                mem.scope.as_path()
+            )));
+        }
+        Ok(())
+    }
+
+    fn is_locked(&self, id: &SymbolId) -> wicked_estate_core::Result<bool> {
+        Ok(self
+            .store
+            .get_node(id)?
+            .is_some_and(|node| memory_lock(&node).is_some()))
+    }
+
     /// Capture a memory: cheap, synchronous, immediately recallable (node + embedding).
     pub fn capture(&mut self, mem: &Memory) -> wicked_estate_core::Result<()> {
+        self.check_lock(mem)?;
         let node = mem.to_node();
         let sym = mem.symbol();
         self.store.upsert_nodes(&[node])?;
-        let vec = self.embedder.embed(&mem.content);
+        let text = wicked_estate_core::redact::redact_free_text(&mem.content);
+        let vec = self.embedder.embed(&text);
         self.store.set_embedding(&sym, &vec)?;
         self.ext.upsert(mem)?; // keep the sidecar index in sync (PR-1)
         Ok(())
@@ -683,7 +888,7 @@ impl MemoryEngine {
             // `Ancestors` (inheritance, the default) or `Subtree` (the erase/coverage
             // `path_in_prefix` predicate). See `ScopeFilter::admits` for the domain note
             // (memory scope lives in `metadata.scope`, not the `nodes.scope` column).
-            if !scope.admits(&mem.scope) {
+            if !scope.admits(&mem.scope, &node) {
                 continue;
             }
             // Facet visibility AND-composed with scope at the SAME gate (DES-MEM-FACETED-001 §4.3):
@@ -764,6 +969,425 @@ impl MemoryEngine {
 mod tests {
     use super::*;
     use wicked_estate_memory_core::{MemKind, Tier};
+
+    #[test]
+    fn locked_nodes_survive_every_maintenance_rewrite_byte_identically() {
+        use wicked_estate_memory_core::{MemoryApi, WORKING_TTL_SECS};
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let scope = Scope::parse("project:locks");
+        let mut originals = Vec::new();
+        for (kind, tier) in [
+            (MemKind::Episode, Tier::Episodic),
+            (MemKind::Working, Tier::Working),
+            (MemKind::Fact, Tier::Semantic),
+            (MemKind::Entity, Tier::Semantic),
+            (MemKind::Archive, Tier::Archival),
+        ] {
+            let mut mem = Memory::new(kind, tier, scope.clone(), "Alice prefers quartz.", 1);
+            mem.reinforce_pos = 10;
+            mem.reinforce_total = 10;
+            let mut node = mem.to_node();
+            node.metadata.insert(
+                "lock".into(),
+                serde_json::json!({"pack": "fixture", "layer": "org", "version": "v1"}),
+            );
+            // A stale summary would normally be removed by the expiry repair pass.
+            if kind == MemKind::Archive {
+                node.metadata
+                    .insert("source_ids".into(), serde_json::json!(["missing"]));
+            }
+            eng.store.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+            eng.ext.upsert(&mem).unwrap();
+            originals.push(node);
+        }
+        let now = 100 * WORKING_TTL_SECS;
+        assert!(eng.recall_episodic_batch(&scope).unwrap().is_empty());
+        let cluster = eng.all_memories().unwrap();
+        for memory in &cluster {
+            assert_eq!(eng.capture_facts(memory, None, now).unwrap(), 0);
+        }
+        assert_eq!(eng.archive_cluster(&scope, &cluster, None, now).unwrap(), 0);
+        assert_eq!(eng.promote_skills(&scope, 1, 0.0, now).unwrap(), 0);
+        assert_eq!(eng.archive(&scope, 0, 1.0, now).unwrap(), 0);
+        MemoryApi::reflect(&mut eng, &scope.as_path(), now).unwrap();
+        for node in &originals {
+            eng.reinforce(&node.symbol, true, now).unwrap();
+            assert!(
+                eng.retire(&node.symbol.0, now)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("memory_locked")
+            );
+            assert_eq!(
+                serde_json::to_value(eng.node(&node.symbol).unwrap()).unwrap(),
+                serde_json::to_value(Some(node)).unwrap()
+            );
+        }
+        assert_eq!(eng.count().unwrap(), originals.len());
+    }
+
+    #[test]
+    fn reflect_skips_a_pre_lock_memory_in_a_layer_scope_instead_of_failing() {
+        use wicked_estate_memory_core::MemoryApi;
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        // Written before locks existed: an unlocked episode at a one-segment org scope.
+        let legacy = Memory::new(
+            MemKind::Episode,
+            Tier::Episodic,
+            Scope::parse("org:acme"),
+            "Alice prefers quartz.",
+            1,
+        );
+        let node = legacy.to_node();
+        eng.store.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+        eng.ext.upsert(&legacy).unwrap();
+        assert_eq!(eng.capture_facts(&legacy, None, 2).unwrap(), 0);
+        assert_eq!(
+            eng.archive_cluster(&Scope::root(), std::slice::from_ref(&legacy), None, 2)
+                .unwrap(),
+            0
+        );
+        MemoryApi::reflect(&mut eng, "", 2).unwrap();
+        assert_eq!(
+            serde_json::to_value(eng.node(&legacy.symbol()).unwrap()).unwrap(),
+            serde_json::to_value(Some(&node)).unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_locks_and_locked_retired_nodes_fail_closed() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!({"pack": "broken"}),
+            serde_json::json!({"pack": "x", "layer": "user", "version": "v1"}),
+        ] {
+            let mem = Memory::new(MemKind::Fact, Tier::Semantic, Scope::root(), "quartz", 1);
+            let mut node = mem.to_node();
+            node.metadata.insert("lock".into(), value);
+            assert_eq!(memory_lock(&node).unwrap().pack, "?");
+            eng.store.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+            assert!(
+                eng.capture(&mem)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("memory_locked")
+            );
+            assert!(
+                eng.erase_id(&mem.id)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("memory_locked")
+            );
+            assert!(
+                eng.retire(&mem.id, 2)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("memory_locked")
+            );
+            node.kind = NodeKind::Other(RETIRED_MEMORY_NODE_KIND.into());
+            node.metadata.insert(meta_keys::RETIRED_AT.into(), 2.into());
+            eng.store.upsert_nodes(&[node]).unwrap();
+            assert!(
+                eng.unretire(&mem.id)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("memory_locked")
+            );
+        }
+        assert!(
+            eng.erase("")
+                .unwrap_err()
+                .to_string()
+                .contains("memory_locked")
+        );
+    }
+
+    #[test]
+    fn memory_proposal_approval_obeys_capture_lock_checks() {
+        use std::collections::BTreeMap;
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let id = eng
+            .submit_proposal(
+                "memory",
+                serde_json::json!({"content": "quartz"}),
+                Facets::default(),
+                BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+        let mem = Memory::new(MemKind::Fact, Tier::Semantic, Scope::root(), "original", 1)
+            .with_id(format!("proposal:{id}"));
+        let mut node = mem.to_node();
+        node.metadata.insert(
+            "lock".into(),
+            serde_json::json!({"pack": "fixture", "layer": "org", "version": "v1"}),
+        );
+        eng.store.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+        assert!(
+            eng.approve_proposal(&id, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("memory_locked")
+        );
+        assert_eq!(
+            eng.list_proposals(None, None).unwrap()[0].state,
+            wicked_estate_memory_core::ProposalState::Pending
+        );
+        assert_eq!(
+            serde_json::to_value(eng.node(&node.symbol).unwrap()).unwrap(),
+            serde_json::to_value(Some(&node)).unwrap()
+        );
+    }
+
+    #[test]
+    fn retire_hides_every_recall_lane_and_restores_identity_and_sidecar() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let scope = Scope::parse("project:retire");
+        let mem = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            scope.clone(),
+            "retire quartz",
+            100,
+        );
+        let seed = wicked_estate_core::Symbol::synthetic("code", "seed").id();
+        eng.capture_about(&mem, std::slice::from_ref(&seed))
+            .unwrap();
+        let original = eng.node(&mem.symbol()).unwrap().unwrap();
+        let vector = eng.embed_for(&mem.content);
+        assert_eq!(eng.ext.count().unwrap(), 1);
+        assert_eq!(eng.retire(&mem.id, 101).unwrap(), Some(mem.symbol()));
+        let retired = eng.node(&mem.symbol()).unwrap().unwrap();
+        assert!(Memory::from_node(&retired).is_none());
+        assert_eq!(retired.metadata["retired_at"], 101);
+        assert_eq!(eng.count().unwrap(), 0);
+        assert!(eng.all_memories().unwrap().is_empty());
+        assert_eq!(eng.ext.count().unwrap(), 0);
+        assert!(eng.ext.ids_in_tier(Tier::Semantic).unwrap().is_empty());
+        assert!(eng.ext.fact_ids_reinforced(0).unwrap().is_empty());
+        assert!(eng.ext.aged_ids(&[Tier::Semantic], 200).unwrap().is_empty());
+        assert!(eng.hydrate(&[mem.symbol().0.clone()]).unwrap().is_empty());
+        // The vector and about edge survive the kind change; hydration must reject both lanes.
+        assert!(
+            eng.store
+                .nearest(&vector, 10)
+                .unwrap()
+                .iter()
+                .any(|(id, _)| id == &mem.symbol())
+        );
+        assert_eq!(
+            eng.about_seed_ids(std::slice::from_ref(&seed)).unwrap(),
+            vec![mem.symbol()]
+        );
+        for mode in [
+            RecallMode::KeywordOnly,
+            RecallMode::VectorOnly,
+            RecallMode::GraphOnly,
+            RecallMode::Hybrid,
+        ] {
+            let hits = eng
+                .recall_mode(
+                    &mem.content,
+                    ScopeFilter::Ancestors(&scope),
+                    std::slice::from_ref(&seed),
+                    500,
+                    102,
+                    mode,
+                )
+                .unwrap();
+            assert!(hits.is_empty(), "retired memory leaked through {mode:?}");
+        }
+        assert_eq!(eng.retire(&mem.symbol().0, 103).unwrap(), None);
+        assert_eq!(eng.retire("unknown", 103).unwrap(), None);
+        let listed = eng.retired(Some("project:retire")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].0.symbol(), listed[0].1), (mem.symbol(), 101));
+        assert!(eng.retired(Some("project:other")).unwrap().is_empty());
+        assert_eq!(eng.unretire(&mem.symbol().0).unwrap(), Some(mem.symbol()));
+        assert_eq!(eng.unretire(&mem.id).unwrap(), None);
+        assert_eq!(eng.ext.count().unwrap(), 1);
+        assert_eq!(
+            eng.node(&mem.symbol()).unwrap().unwrap().metadata,
+            original.metadata
+        );
+        assert!(eng.retired(None).unwrap().is_empty());
+        let hits = eng
+            .recall_mode(
+                &mem.content,
+                ScopeFilter::Ancestors(&scope),
+                &[seed],
+                500,
+                104,
+                RecallMode::Hybrid,
+            )
+            .unwrap();
+        assert_eq!(hits[0].id, mem.symbol());
+    }
+
+    #[test]
+    fn retired_memories_survive_reflect_and_working_expiry_without_distillation() {
+        use wicked_estate_memory_core::{MemoryApi, WORKING_TTL_SECS};
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let scope = Scope::parse("project:retire");
+        for (kind, tier, content) in [
+            (MemKind::Episode, Tier::Episodic, "Alice prefers quartz"),
+            (MemKind::Working, Tier::Working, "temporary quartz"),
+            (MemKind::Fact, Tier::Semantic, "retired quartz fact"),
+        ] {
+            let mem = Memory::new(kind, tier, scope.clone(), content, 100);
+            eng.capture(&mem).unwrap();
+            eng.retire(&mem.id, 101).unwrap();
+        }
+        assert!(eng.recall_episodic_batch(&scope).unwrap().is_empty());
+        let reflected =
+            MemoryApi::reflect(&mut eng, &scope.as_path(), 100 + WORKING_TTL_SECS).unwrap();
+        assert_eq!(reflected.node_count, 0);
+        assert!(reflected.distilled_facts.is_empty());
+        assert_eq!(MemoryApi::coverage(&eng, None).unwrap().total, 0);
+        assert!(MemoryApi::list(&eng, None).unwrap().is_empty());
+        assert_eq!(
+            MemoryApi::list_retired(&eng, None).unwrap().unwrap().len(),
+            3
+        );
+    }
+
+    #[test]
+    fn an_undecodable_retired_node_never_blocks_list_restore_or_erase() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let scope = Scope::parse("project:retire");
+        let good = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            scope.clone(),
+            "good quartz",
+            1,
+        );
+        let bad = Memory::new(MemKind::Fact, Tier::Semantic, scope, "bad quartz", 1);
+        eng.capture(&good).unwrap();
+        eng.capture(&bad).unwrap();
+        eng.retire(&bad.id, 2).unwrap();
+        eng.retire(&good.id, 2).unwrap();
+        let mut node = eng.store.get_node(&bad.symbol()).unwrap().unwrap();
+        node.metadata
+            .insert(meta_keys::RETIRED_AT.into(), "not a time".into());
+        eng.store.upsert_nodes(&[node]).unwrap();
+        let listed = eng.retired(None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0.symbol(), good.symbol());
+        assert_eq!(eng.unretire(&good.id).unwrap(), Some(good.symbol()));
+        // Erasure decodes the body without `retired_at`: the bad row is removed for good too.
+        assert_eq!(eng.erase("project:retire").unwrap(), 2);
+        assert!(eng.store.get_node(&bad.symbol()).unwrap().is_none());
+        assert!(eng.store.get_node(&good.symbol()).unwrap().is_none());
+    }
+
+    #[test]
+    fn erase_by_id_removes_a_retired_row_whose_retired_at_does_not_decode() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let bad = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            Scope::root(),
+            "bad quartz",
+            1,
+        );
+        eng.capture(&bad).unwrap();
+        eng.retire(&bad.id, 2).unwrap();
+        let mut node = eng.store.get_node(&bad.symbol()).unwrap().unwrap();
+        node.metadata.remove(meta_keys::RETIRED_AT);
+        eng.store.upsert_nodes(&[node]).unwrap();
+        assert!(eng.retired(None).unwrap().is_empty());
+        assert_eq!(eng.erase_id(&bad.id).unwrap(), Some(bad.symbol()));
+        assert!(eng.store.get_node(&bad.symbol()).unwrap().is_none());
+    }
+
+    #[test]
+    fn retire_survives_reopen_and_reconciles_only_active_sidecar_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let path = path.to_str().unwrap();
+        let mem = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            Scope::root(),
+            "durable quartz",
+            1,
+        );
+        {
+            let mut eng = MemoryEngine::open(path).unwrap();
+            eng.capture(&mem).unwrap();
+            eng.retire(&mem.id, 2).unwrap();
+            // Simulate a crash between the authoritative write and sidecar removal.
+            eng.ext.upsert(&mem).unwrap();
+        }
+        let mut eng = MemoryEngine::open(path).unwrap();
+        assert_eq!(eng.ext.count().unwrap(), 0);
+        assert_eq!(eng.retired(None).unwrap().len(), 1);
+        assert_eq!(eng.unretire(&mem.id).unwrap(), Some(mem.symbol()));
+        assert_eq!(eng.ext.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn durable_capture_redacts_database_wal_and_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let scope = Scope::root();
+        {
+            let mut eng = MemoryEngine::open(path.to_str().unwrap()).unwrap();
+            eng.capture(&Memory::new(
+                MemKind::Fact,
+                Tier::Semantic,
+                scope.clone(),
+                "redaction fixture DB_PASSWORD=hunter2-example AKIAIOSFODNN7EXAMPLE",
+                1,
+            ))
+            .unwrap();
+            let hits = eng
+                .recall(
+                    "redaction fixture",
+                    ScopeFilter::Ancestors(&scope),
+                    &[],
+                    500,
+                    2,
+                )
+                .unwrap();
+            assert!(!hits.is_empty());
+            for hit in hits {
+                assert!(!hit.content.contains("hunter2-example"));
+                assert!(!hit.content.contains("AKIAIOSFODNN7EXAMPLE"));
+            }
+            eng.submit_proposal(
+                "memory",
+                serde_json::json!({"content": "password: \"hunter2-example\""}),
+                Facets::default(),
+                std::collections::BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+            let proposals = eng.list_proposals(None, None).unwrap();
+            assert_eq!(proposals.len(), 1);
+            assert!(!proposals[0].payload.to_string().contains("hunter2-example"));
+            assert_capture_files_clean(&path);
+        }
+        assert_capture_files_clean(&path);
+    }
+
+    fn assert_capture_files_clean(path: &std::path::Path) {
+        for path in [
+            path.to_path_buf(),
+            std::path::PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => panic!("read fixture: {e}"),
+            };
+            for value in ["hunter2-example", "AKIAIOSFODNN7EXAMPLE"] {
+                assert!(!bytes.windows(value.len()).any(|w| w == value.as_bytes()));
+            }
+        }
+    }
 
     #[test]
     fn with_backend_constructor_is_backend_agnostic() {
@@ -873,7 +1497,7 @@ mod tests {
     fn identifier_query_ranks_adjacent_phrase_above_scattered_unigrams() {
         let mut eng = MemoryEngine::in_memory().unwrap();
         let now = 5;
-        let scope = Scope::parse("org:acme");
+        let scope = Scope::parse("org:acme/unit:eng");
         for i in 0..4 {
             eng.capture(&Memory::new(
                 MemKind::Fact,
@@ -940,7 +1564,7 @@ mod tests {
             let mut eng = MemoryEngine::in_memory()
                 .unwrap()
                 .with_embedder(Box::new(ConstEmbedder { semantic }));
-            let scope = Scope::parse("org:acme");
+            let scope = Scope::parse("org:acme/unit:eng");
             eng.capture(&Memory::new(
                 MemKind::Fact,
                 Tier::Semantic,

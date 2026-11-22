@@ -62,10 +62,43 @@ impl KClass {
             _ => None,
         }
     }
-    /// Is `kind` one of the knowledge classes? (the kind-guard predicate, shared with `erase`).
+    /// Is `kind` one of the knowledge classes? (the kind-guard predicate, shared with `forget`).
     pub fn is_knowledge_kind(k: &str) -> bool {
         Self::from_kind(k).is_some()
     }
+}
+
+/// The exact knowledge item, citation source, or scope subtree to erase.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ForgetTarget {
+    /// A node uuid or full estate SymbolId string.
+    Id(String),
+    /// Exact `source` metadata match, including file citations and URLs.
+    Source(String),
+    /// A whole-segment scope subtree; the empty prefix selects all scopes.
+    ScopePrefix(String),
+}
+
+/// Hard-deletion counts; live-source structure is managed only by `knowledge.replace_source`.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[non_exhaustive]
+pub struct ForgetReport {
+    /// Knowledge nodes removed, including a document's derived chunks.
+    pub forgotten: usize,
+    /// Matched live-source nodes preserved for `knowledge.replace_source`.
+    pub skipped_live_source: usize,
+}
+
+/// Is this node live-source structure, i.e. exactly what `knowledge.replace_source` owns and
+/// tombstones: a doc or section under a `source:<id>` scope (source.rs `replace_source_in_batch`)?
+/// `knowledge.forget` never deletes it; the source's next generation does.
+fn is_live_source_structure(kn: &KNode) -> bool {
+    matches!(kn.class, KClass::Doc | KClass::Section)
+        && Scope::parse(&kn.scope)
+            .0
+            .first()
+            .is_some_and(|seg| seg.kind == crate::plane::SOURCE_KIND)
 }
 
 /// Knowledge metadata keys (the opaque ExtensionData slot — estate-core never reads these).
@@ -145,11 +178,13 @@ impl KNode {
         m.insert(meta_keys::SCOPE.into(), self.scope.clone().into());
         m.insert(meta_keys::SOURCE.into(), self.source.clone().into());
         m.insert(meta_keys::CREATED_AT.into(), self.created_at.into());
-        node
+        wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node)
     }
 
     /// Reconstruct from an estate `Node` written by [`KNode::to_node`]. `None` if not a knowledge node.
     pub fn from_node(node: &Node) -> Option<KNode> {
+        let redacted = wicked_estate_core::redact::redact_text_node(node);
+        let node = redacted.as_ref().unwrap_or(node);
         let NodeKind::Other(k) = &node.kind else {
             return None;
         };
@@ -300,7 +335,20 @@ impl KnowledgeEngine {
 
     /// Open a durable engine at `path` — knowledge's OWN file (NOT the code/memory db).
     pub fn open(path: &str) -> Result<Self> {
-        Ok(Self::with_store(SqliteStore::open(path)?))
+        let store = SqliteStore::open(path)?;
+        use wicked_estate_core::redact::{TEXT_REDACTION_EPOCH, TEXT_REDACTION_EPOCH_KEY};
+        let epoch = store
+            .meta_get(TEXT_REDACTION_EPOCH_KEY)?
+            .and_then(|v| v.parse::<u32>().ok());
+        if !epoch.is_some_and(|e| e >= TEXT_REDACTION_EPOCH) && store.stats()?.node_count > 0 {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "REDACTION-PENDING: {path} holds text written before redaction; run \
+                 `wicked-estate redact-store --db {path}`"
+            );
+        }
+        Ok(Self::with_store(store))
     }
 
     fn with_store(store: SqliteStore) -> Self {
@@ -359,7 +407,8 @@ impl KnowledgeEngine {
 
     /// The engine's embedding of `text` (the vector `write` stores).
     pub(crate) fn embed(&self, text: &str) -> Vec<f32> {
-        self.embedder.embed(text)
+        self.embedder
+            .embed(&wicked_estate_core::redact::redact_free_text(text))
     }
 
     /// Write ONE knowledge node carrying `deps` and the untrusted flag (DES-KNOWLEDGE-DATA-001
@@ -373,8 +422,9 @@ impl KnowledgeEngine {
         let sym = k.symbol();
         let mut node = k.to_node();
         crate::plane::stamp(&mut node, deps, untrusted);
+        let node = wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node);
         self.store.upsert_nodes(&[node])?;
-        let vec = self.embedder.embed(&k.content);
+        let vec = self.embed(&k.content);
         self.store.set_embedding(&sym, &vec)?;
         Ok(sym)
     }
@@ -384,7 +434,7 @@ impl KnowledgeEngine {
     pub fn write(&mut self, k: &KNode) -> Result<SymbolId> {
         let sym = k.symbol();
         self.store.upsert_nodes(&[k.to_node()])?;
-        let vec = self.embedder.embed(&k.content);
+        let vec = self.embed(&k.content);
         self.store.set_embedding(&sym, &vec)?;
         Ok(sym)
     }
@@ -413,9 +463,149 @@ impl KnowledgeEngine {
         Ok((doc_sym, chunk_syms))
     }
 
+    /// Erase knowledge and its owned links in one knowledge-store batch. Live-source structure
+    /// belongs to `knowledge.replace_source`; other node kinds are never deletion candidates.
+    pub fn forget(&mut self, target: &ForgetTarget) -> Result<ForgetReport> {
+        self.store.begin_batch()?;
+        let result = self.forget_in_batch(target);
+        match result.and_then(|report| self.store.commit_batch().map(|_| report)) {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                self.store.rollback_batch()?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Shared deletion path. The caller owns the batch, including its commit and rollback, so
+    /// replacement ingest cannot accidentally commit the deletion before writing the new doc.
+    fn forget_in_batch(&mut self, target: &ForgetTarget) -> Result<ForgetReport> {
+        use std::collections::BTreeSet;
+
+        if let ForgetTarget::Id(v) | ForgetTarget::Source(v) = target {
+            if v.trim().is_empty() {
+                return Err(wicked_estate_core::Error::Invalid(
+                    "knowledge.forget: an id or source target must be non-empty".into(),
+                ));
+            }
+        }
+
+        let nodes = self.store.find_symbols(&SymbolQuery {
+            kinds: [KClass::Doc, KClass::Section, KClass::Chunk, KClass::Concept]
+                .iter()
+                .map(|class| NodeKind::Other(class.as_kind().into()))
+                .collect(),
+            ..SymbolQuery::default()
+        })?;
+        let mut ids = BTreeSet::new();
+        let mut docs = Vec::new();
+        let mut skipped = BTreeSet::new();
+        for node in &nodes {
+            let Some(kn) = KNode::from_node(node) else {
+                continue;
+            };
+            let matches = match target {
+                ForgetTarget::Id(id) => {
+                    node.symbol.as_str() == id.as_str()
+                        || Symbol::synthetic(kn.class.as_kind(), id.as_str()).id() == node.symbol
+                }
+                ForgetTarget::Source(source) => {
+                    node.metadata
+                        .get(meta_keys::SOURCE)
+                        .and_then(|value| value.as_str())
+                        == Some(source.as_str())
+                }
+                ForgetTarget::ScopePrefix(prefix) => scope_in_prefix(&kn.scope, prefix),
+            };
+            if !matches {
+                continue;
+            }
+            if is_live_source_structure(&kn) {
+                if matches!(target, ForgetTarget::Id(_)) {
+                    return Err(wicked_estate_core::Error::Invalid(format!(
+                        "knowledge.forget refused for {}: live-source structure is owned by \
+                         knowledge.replace_source",
+                        node.symbol
+                    )));
+                }
+                skipped.insert(node.symbol.clone());
+                continue;
+            }
+            ids.insert(node.symbol.clone());
+            if kn.class == KClass::Doc {
+                docs.push(node.symbol.clone());
+            }
+        }
+        // Ingest's chunks depend on their doc. One hop, restricted to chunk-kind endpoints;
+        // never traverse arbitrary relations or cascade into another kind.
+        for doc in docs {
+            for edge in self.store.neighbors(&doc, Direction::Dependents)? {
+                if !matches!(&edge.kind, EdgeKind::Other(rel) if rel == "derived_from") {
+                    continue;
+                }
+                let Some(node) = self.store.get_node(&edge.source)? else {
+                    continue;
+                };
+                let Some(kn) = KNode::from_node(&node) else {
+                    continue;
+                };
+                if kn.class == KClass::Chunk {
+                    ids.insert(node.symbol);
+                }
+            }
+        }
+        let ids: Vec<SymbolId> = ids.into_iter().collect();
+        let forgotten = self.store.remove_nodes(&ids)?;
+        if let Some(xedge) = &self.xedge {
+            for id in &ids {
+                // XEdge::about (the existing knowledge writer) uses the memory engine label.
+                for engine in ["knowledge", "memory"] {
+                    xedge.delete_by_src_id(engine, &id.0)?;
+                }
+            }
+            let owners: Vec<String> = ids.iter().map(|id| id.0.clone()).collect();
+            xedge.delete_typed_by_owners(&owners)?;
+        }
+        Ok(ForgetReport {
+            forgotten,
+            skipped_live_source: skipped.len(),
+        })
+    }
+
+    /// Replace citation-sourced knowledge atomically with a newly ingested document. SQLite's
+    /// batches do not nest: use the same deletion routine inside this single outer batch.
+    pub(crate) fn ingest_replacing(
+        &mut self,
+        title: &str,
+        chunks: &[String],
+        scope: &str,
+        source: &str,
+        now: i64,
+    ) -> Result<(String, ForgetReport)> {
+        if source.trim().is_empty() {
+            return Err(wicked_estate_core::Error::Invalid(
+                "replace_source requires a non-empty source".into(),
+            ));
+        }
+        self.store.begin_batch()?;
+        let result = (|| {
+            let report = self.forget_in_batch(&ForgetTarget::Source(source.to_string()))?;
+            let (doc, _) = self.ingest(title, chunks, scope, source, now)?;
+            self.store.commit_batch()?;
+            Ok((doc.0, report))
+        })();
+        if result.is_err() {
+            self.store.rollback_batch()?;
+        }
+        result
+    }
+
     /// Fetch a node by id.
     pub fn node(&self, id: &SymbolId) -> Result<Option<Node>> {
-        self.store.get_node(id)
+        Ok(self
+            .store
+            .get_node(id)?
+            .map(|node| wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node)))
     }
 
     /// Count knowledge nodes (optionally of one class, optionally within a scope subtree).
@@ -495,6 +685,7 @@ impl KnowledgeEngine {
         };
         stored_ok
             && scope_deps(scope).iter().all(|d| visible.contains(d))
+            && (!visible.requires_any() || visible.matches_required(&effective_deps(node)))
             // An approval still in flight (its journal exists) is invisible until complete.
             && !self.applying(&node.symbol)
     }
@@ -834,6 +1025,290 @@ fn dangling_err(which: &str, id: &SymbolId) -> wicked_estate_core::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forget_id_cascades_chunks_and_is_idempotent() {
+        let mut eng = KnowledgeEngine::in_memory().unwrap();
+        let (doc, chunks) = eng
+            .ingest(
+                "old document",
+                &["obsolete quasar".into()],
+                "topic:sqlite",
+                "s",
+                1,
+            )
+            .unwrap();
+        let report = eng.forget(&ForgetTarget::Id(doc.0.clone())).unwrap();
+        assert_eq!(report.forgotten, 2);
+        assert!(eng.node(&doc).unwrap().is_none());
+        assert!(eng.node(&chunks[0]).unwrap().is_none());
+        assert!(
+            eng.recall("obsolete quasar", 1000, None, 2)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(eng.forget(&ForgetTarget::Id(doc.0)).unwrap().forgotten, 0);
+
+        let kn = KNode::new(KClass::Concept, "uuid target", "", "", 1);
+        let id = eng.write(&kn).unwrap();
+        assert_eq!(eng.forget(&ForgetTarget::Id(kn.id)).unwrap().forgotten, 1);
+        assert!(eng.node(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn forget_exact_citation_source_and_scope_keep_other_kinds_and_siblings() {
+        let mut eng = KnowledgeEngine::in_memory().unwrap();
+        let citation = "repo:packages/crew/src/core/adapter.ts";
+        let first = eng
+            .write(&KNode::new(
+                KClass::Chunk,
+                "first",
+                "topic:sqlite",
+                citation,
+                1,
+            ))
+            .unwrap();
+        let sibling = eng
+            .write(&KNode::new(
+                KClass::Chunk,
+                "sibling",
+                "topic:sqlite-wal",
+                "other",
+                1,
+            ))
+            .unwrap();
+        let child = eng
+            .write(&KNode::new(
+                KClass::Concept,
+                "child",
+                "topic:sqlite/section:wal",
+                "other",
+                1,
+            ))
+            .unwrap();
+        let mut protected = Vec::new();
+        for kind in [
+            NodeKind::Function,
+            NodeKind::Other("memory".into()),
+            NodeKind::Other(crate::source::SOURCE_MANIFEST_KIND.into()),
+            NodeKind::Other(crate::shape::APPLY_JOURNAL_KIND.into()),
+        ] {
+            let mut node =
+                KNode::new(KClass::Chunk, "protected", "topic:sqlite", citation, 1).to_node();
+            node.kind = kind;
+            protected.push(node.symbol.clone());
+            eng.store.upsert_nodes(&[node]).unwrap();
+        }
+        let report = eng.forget(&ForgetTarget::Source(citation.into())).unwrap();
+        assert_eq!(report.forgotten, 1);
+        assert!(eng.node(&first).unwrap().is_none());
+        let report = eng
+            .forget(&ForgetTarget::ScopePrefix("topic:sqlite".into()))
+            .unwrap();
+        assert_eq!(report.forgotten, 1);
+        assert!(eng.node(&child).unwrap().is_none());
+        assert!(eng.node(&sibling).unwrap().is_some());
+        for id in protected {
+            let report = eng.forget(&ForgetTarget::Id(id.0.clone())).unwrap();
+            assert_eq!(report.forgotten, 0);
+            assert!(eng.node(&id).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn forget_preserves_live_source_structure_and_counts_skips() {
+        let mut eng = KnowledgeEngine::in_memory().unwrap();
+        let node = KNode::new(KClass::Section, "live catalog", "source:s1/doc:t", "s1", 1);
+        let id = eng.write(&node).unwrap();
+        let error = eng
+            .forget(&ForgetTarget::Id(id.0.clone()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("knowledge.replace_source"), "{error}");
+        for target in [
+            ForgetTarget::Source("s1".into()),
+            ForgetTarget::ScopePrefix("".into()),
+        ] {
+            let report = eng.forget(&target).unwrap();
+            assert_eq!(report.forgotten, 0);
+            assert_eq!(report.skipped_live_source, 1);
+            assert!(eng.node(&id).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn forget_deletes_outgoing_xedges_and_owned_typed_links_only() {
+        use wicked_estate_overlay::{Endpoint, TypedXEdge, XEdge};
+
+        let xedge = std::sync::Arc::new(XedgeStore::in_memory().unwrap());
+        let mut eng = KnowledgeEngine::in_memory()
+            .unwrap()
+            .with_xedge_store(std::sync::Arc::clone(&xedge));
+        let id = eng
+            .write(&KNode::new(KClass::Chunk, "old", "", "s", 1))
+            .unwrap();
+        // Match the legacy about-link writer's memory engine spelling.
+        xedge
+            .put_edge(&XEdge::about(id.0.as_str(), "code", 0))
+            .unwrap();
+        xedge
+            .put_edge(&XEdge {
+                source: Endpoint::new("knowledge", id.0.as_str(), 0),
+                target: Endpoint::new("estate", "code", 0),
+                rel: "about".into(),
+                confidence: 1.0,
+                provenance: "test".into(),
+            })
+            .unwrap();
+        for owner in [id.0.as_str(), "surviving-owner"] {
+            xedge
+                .put_typed(&TypedXEdge {
+                    source: Endpoint::new("knowledge", id.0.as_str(), 0),
+                    target: Endpoint::new("estate", "code", 0),
+                    rel: "describes".into(),
+                    owner: owner.to_string(),
+                    confidence: 1.0,
+                    meta: "{}".into(),
+                })
+                .unwrap();
+        }
+        eng.forget(&ForgetTarget::Id(id.0.clone())).unwrap();
+        for engine in ["memory", "knowledge"] {
+            assert!(
+                xedge
+                    .reader()
+                    .out_edges(engine, &id.0, &[])
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(xedge.reader().typed_by_owner(&id.0).unwrap().is_empty());
+        assert_eq!(
+            xedge
+                .reader()
+                .typed_by_owner("surviving-owner")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn required_deps_filter_before_ranking_and_budget_and_include_scope_deps() {
+        let mut eng = KnowledgeEngine::in_memory()
+            .unwrap()
+            .with_embedder(Box::new(HashEmbedder::new(256)));
+        let a = eng
+            .write_with_deps(
+                &KNode::new(KClass::Chunk, "quasar distant needle", "", "A", 1),
+                &["source:s1".into()],
+                false,
+            )
+            .unwrap();
+        let b = eng
+            .write_with_deps(
+                &KNode::new(KClass::Chunk, "needle distant quasar", "source:s1", "B", 1),
+                &["source:s2".into()],
+                false,
+            )
+            .unwrap();
+        let c = eng
+            .write_with_deps(
+                &KNode::new(KClass::Chunk, "quasar needle", "", "C", 1),
+                &["source:s2".into()],
+                false,
+            )
+            .unwrap();
+        let visible = Visible::from_deps(["source:s1", "source:s2"]).unwrap();
+        let baseline = eng
+            .recall_visible("quasar needle", 1000, None, &visible, 2)
+            .unwrap();
+        assert_eq!(baseline[0].id, c, "fixture C must rank highest");
+        let required = visible.with_required(["source:s1"]).unwrap();
+        let hits = eng
+            .recall_visible("quasar needle", 1000, None, &required, 2)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().any(|h| h.id == a));
+        assert!(hits.iter().any(|h| h.id == b));
+        // C costs 3 tokens; A and B each cost 5. At 5 tokens, an unfiltered C would leave
+        // no room for either required-source item. Filtering only after packing returns empty.
+        let tight = eng
+            .recall_visible("quasar needle", 5, None, &required, 2)
+            .unwrap();
+        assert_eq!(tight.len(), 1);
+        assert!(tight.iter().all(|h| h.id == a || h.id == b));
+    }
+
+    #[test]
+    fn durable_write_and_ingest_redact_database_wal_and_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("knowledge.db");
+        {
+            let mut eng = KnowledgeEngine::open(path.to_str().unwrap()).unwrap();
+            let text = "redaction fixture DB_PASSWORD=hunter2-example AKIAIOSFODNN7EXAMPLE";
+            eng.write(&KNode::new(
+                KClass::Concept,
+                text,
+                "wiki:test",
+                "test.md",
+                1,
+            ))
+            .unwrap();
+            eng.ingest(
+                "redaction fixture",
+                &[text.into()],
+                "wiki:test",
+                "test.md",
+                1,
+            )
+            .unwrap();
+            let hits = eng.recall("redaction fixture", 2000, None, 2).unwrap();
+            assert!(!hits.is_empty());
+            for hit in hits {
+                assert!(!hit.content.contains("hunter2-example"));
+                assert!(!hit.content.contains("AKIAIOSFODNN7EXAMPLE"));
+            }
+            assert_text_files_clean(&path);
+        }
+        assert_text_files_clean(&path);
+    }
+
+    fn assert_text_files_clean(path: &std::path::Path) {
+        for path in [
+            path.to_path_buf(),
+            std::path::PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => panic!("read fixture: {e}"),
+            };
+            for value in ["hunter2-example", "AKIAIOSFODNN7EXAMPLE"] {
+                assert!(!bytes.windows(value.len()).any(|w| w == value.as_bytes()));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_knowledge_reads_mask_content_and_source() {
+        let mut node = KNode::new(KClass::Chunk, "safe", "wiki:test", "test.md", 1).to_node();
+        node.name = "DB_PASSWORD=hunter2-example".into();
+        node.metadata
+            .insert(meta_keys::CONTENT.into(), node.name.clone().into());
+        node.metadata
+            .insert(meta_keys::SOURCE.into(), "token=hunter2-example".into());
+        let served = KNode::from_node(&node).unwrap();
+        assert!(!served.content.contains("hunter2-example"));
+        assert!(!served.source.contains("hunter2-example"));
+        node.metadata.remove(meta_keys::CONTENT);
+        assert!(
+            !KNode::from_node(&node)
+                .unwrap()
+                .content
+                .contains("hunter2-example")
+        );
+    }
 
     #[test]
     fn ingest_then_recall_round_trips() {

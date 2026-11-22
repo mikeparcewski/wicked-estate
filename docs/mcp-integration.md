@@ -27,15 +27,55 @@ The server is invoked the same way everywhere:
 Use an **absolute** DB path — clients launch the server with an unpredictable working directory.
 (Alternatively set `WICKED_ESTATE_DB` in the server's `env`; `--db` takes precedence.)
 
-It exposes **33 tools across 3 domains** plus `SemanticSearch` when embeddings are present:
+It exposes **36 tools across 3 domains** plus `SemanticSearch` when embeddings are present:
 
 **Estate (12 tools):** `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `Path`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `rules.recall`, `RankHotspots`, `Communities`, `Lineage`
 
-**Memory (7 tools):** `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.learn`, `memory.coverage`, `memory.list`
+**Memory (9 tools):** `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.retire`, `memory.unretire`, `memory.learn`, `memory.coverage`, `memory.list`
 
 **Proposal queue (4 tools, memory domain):** `proposal.submit`, `proposal.list`, `proposal.approve`, `proposal.reject`
 
-**Knowledge (10 tools):** `knowledge.ingest`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`, `knowledge.replace_source`, `knowledge.source_catalog`, `knowledge.neighbors`
+**Knowledge (11 tools):** `knowledge.ingest`, `knowledge.forget`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`, `knowledge.replace_source`, `knowledge.source_catalog`, `knowledge.neighbors`
+
+`knowledge.forget` takes exactly one of `id` (uuid or full SymbolId), `source` (an exact citation
+string, including file paths and URLs), or `scope_prefix` (a whole-segment subtree). An empty prefix
+requires `confirm_erase_all: true`. It returns `{forgotten, skipped_live_source}`; deleting a document
+also deletes its derived chunks and owned links. Only knowledge kinds are eligible. Live-source
+structure is refused by id and otherwise skipped and counted: refresh that structure with
+`knowledge.replace_source`, which accepts registry ids and covers live data sources only.
+
+To refresh citation-sourced documents, call `knowledge.ingest` with `replace_source: true` and a
+non-empty `source`; it replaces knowledge with that exact source and returns `{doc_id, replaced}`.
+An omitted or false flag keeps the existing append behavior. `source_rev` and `observed_at` remain
+accepted but are not stored. An emptied topic can use `knowledge.forget {"source": "..."}`.
+
+`knowledge.recall` accepts `require: ["source:<id>"]` alongside `visible`. Every required dep must
+be visible and present in the item's effective deps (stored deps plus scope deps). Both filters run
+before ranking and token budgeting, so other sources cannot consume a source-pinned recall's budget.
+Omitted or null `require` imposes no requirement; malformed entries or deps outside `visible` are
+invalid params.
+
+`--readonly` hides and refuses `knowledge.forget`. `proposal.submit` remains available when its
+memory store exists; when that store is missing, submission is refused with the missing path and
+instructions to start a writable server once or select an existing store. Reads still serve empty,
+and the read-only server creates no store.
+
+Memory locks are owned by verified governance packs. Ordinary `memory.capture` writes into a
+one-segment `org:` or `team:` scope, writes to locked ids, `memory.retire` / `memory.unretire` and
+`memory.erase` of locked nodes fail with JSON-RPC -32603 and `memory_locked`. A subtree erase
+containing any locked node refuses the whole erase and names the locked ids. Reflection,
+consolidation and Working expiry skip locked nodes. Recall inherits locked one-segment org/team
+memories across projects, then applies the normal facet gate.
+
+`memory.list {"admit_for":{"scope":"project:x","intent":{"project":"p1"}}}` applies
+exactly recall's ancestor/operator/locked-layer scope admission and facet gate, without query
+retrieval, ranking or a token budget. Combining `admit_for` with `scope_prefix` or `retired:true`,
+or supplying a malformed scope/intent, is -32602. An implementer without admission support returns
+-32601. Omit `admit_for` for the complete management inventory.
+
+The pack write and verification functions (`apply_pack_memories`, `pack_memories`) are library-only
+in `wicked-estate-memory`; they add no MCP tools (the count remains 35, including 9 memory tools).
+Signature verification and sync belong to the governance caller.
 
 ---
 

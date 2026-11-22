@@ -1023,11 +1023,11 @@ impl RetrievalTool for TraverseGraph {
 ///               "confidence": 1.0, "provenance": "parsed",
 ///               "resolved_by": "scip-rust" }, … ],
 ///   "found": true, "depth_bounded": false, "node_bounded": false,
-///   "unresolved": null }
+///   "unresolved": null, "unresolved_on_frontier": null }
 /// ```
-/// `found: false` with both bound flags clear is a **proven** absence. With either flag set it
-/// is a **bounded** one and the diagnostics say so — conflating the two is the R3 failure the
-/// agent-behavior rules forbid.
+/// `found: false` with both bound flags clear and `unresolved_on_frontier: 0` is a **proven**
+/// absence. With either flag set it is a **bounded** one; a positive or unknown unresolved count
+/// means absence in the RESOLVED graph only. The diagnostics distinguish these cases (R3).
 #[derive(Debug, Default)]
 pub struct Path;
 
@@ -1043,16 +1043,18 @@ impl RetrievalTool for Path {
          intermediate functions and open only those files. Use this instead of reconstructing \
          a route from TraverseGraph's edge list. `from` and `to` accept a symbol name or a \
          SymbolId. `found: false` is a PROVEN absence only when `depth_bounded` and \
-         `node_bounded` are both false; when either is set, raise `depth` / `max_nodes` (the \
+         `node_bounded` are both false and `unresolved_on_frontier` is 0 (a positive count \
+         means unresolved call sites on the reached set could carry a route; null means the \
+         store cannot tell); when either bound flag is set, raise `depth` / `max_nodes` (the \
          defaults are smaller than the CLI's) before concluding anything from the absence."
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
         // Builds every reply that is decided BEFORE resolution — the unusable-operand
         // branches below — and requires the reason, so none of them can hand-build
-        // `unresolved: null`, the wire shape the spec licenses a reader to treat as "no route
-        // exists in the graph". Replies decided AFTER resolution come from the terminal
-        // return at the end of this function, where the same five keys are built from
+        // `unresolved: null`. Proven absence also requires a known zero unresolved frontier
+        // count (estate#348). Replies decided AFTER resolution come from the terminal
+        // return at the end of this function, where the same keys are built from
         // `PathResult`'s own earned values. Round 1 fixed `depth: 0` emitting an unearned
         // proven absence; round 2 found the same class one branch over, which is what moving
         // the pre-resolution branches behind one constructor prevents (CLAUDE.md §11).
@@ -1063,6 +1065,7 @@ impl RetrievalTool for Path {
             content: json!({
                 "hops": [], "found": false,
                 "depth_bounded": false, "node_bounded": false,
+                "unresolved_on_frontier": null,
                 "unresolved": unresolved,
                 "resolved": false, "query": null, "suggestions": [],
                 "suggestions_truncated": false, "crossings": [],
@@ -1153,10 +1156,22 @@ impl RetrievalTool for Path {
                     result.depth_bounded, result.node_bounded
                 ));
             } else {
-                diag.push(format!(
-                    "Path: no route from '{from}' to '{to}'; the whole reachable set was \
-                     searched, so no route exists"
-                ));
+                diag.push(match result.unresolved_on_frontier {
+                    Some(0) => format!(
+                        "Path: no route from '{from}' to '{to}'; the whole reachable set was \
+                         searched, so no route exists"
+                    ),
+                    Some(n) => format!(
+                        "Path: no route from '{from}' to '{to}' in the RESOLVED graph; {n} \
+                         unresolved reference site(s) from reached symbols could carry one, \
+                         so this is not a proven absence"
+                    ),
+                    None => format!(
+                        "Path: no route from '{from}' to '{to}' in the RESOLVED graph; the \
+                         unresolved references on the reached set could not be counted here, so \
+                         this is not a proven absence"
+                    ),
+                });
             }
         }
 
@@ -1189,6 +1204,7 @@ impl RetrievalTool for Path {
             "found": result.found,
             "depth_bounded": result.depth_bounded,
             "node_bounded": result.node_bounded,
+            "unresolved_on_frontier": result.unresolved_on_frontier,
             "unresolved": result.unresolved.map(|u| u.as_str()),
             "resolved": true, "query": null, "suggestions": [],
             "suggestions_truncated": false,
@@ -1225,7 +1241,8 @@ impl RetrievalTool for Path {
 /// **Response `content` shape**
 /// ```json
 /// { "dependents": [ { "symbol": "…", "name": "…", "kind": "…", "file": "…",
-///                     "line": 11, "line_1based": 12, "depth": 1 }, … ],
+///                     "line": 11, "line_1based": 12, "depth": 1,
+///                     "via": [{"id": "…", "kind": "calls"}], "via_omitted": 0 }, … ],
 ///   "total": 5, "truncated": false, "next_cursor": null,
 ///   "page": { "from": 0, "count": 5, "total": 5 },
 ///   "unresolved_callers": 2,
@@ -1321,13 +1338,14 @@ impl RetrievalTool for BlastRadius {
         let mut subgraph = wicked_estate_core::Subgraph::default();
         let mut start_nodes: Vec<Node> = Vec::new();
         let mut dependent_nodes: Vec<Node> = Vec::new();
-        let mut dependent_depths: HashMap<String, u32> = HashMap::new();
+        let mut dependent_depths: BTreeMap<String, u32> = BTreeMap::new();
         let mut seen_nodes: HashSet<SymbolId> = HashSet::new();
         let mut crossing_set = wicked_estate_core::crossing::CrossingSet::default();
         // The dependency evidence behind the answer, deduped across walks (two same-named
         // starts can share a caller) — the CLI's `blast_radius_by_name` rule, so both surfaces
         // state one confidence for one answer.
         let mut evidence: HashMap<(SymbolId, SymbolId, EdgeKind), f32> = HashMap::new();
+        let mut row_edges = HashMap::new();
         for start in &starts {
             let mut sub = store.traverse(start, &spec)?;
             let start_node = store.get_node(start)?;
@@ -1355,6 +1373,11 @@ impl RetrievalTool for BlastRadius {
                 .chain(std::iter::once(start))
                 .collect();
             for e in &sub.edges {
+                if rows.contains(&e.source) {
+                    row_edges
+                        .entry((e.source.clone(), e.target.clone(), e.kind.clone()))
+                        .or_insert_with(|| e.clone());
+                }
                 if !matches!(e.kind, EdgeKind::Contains | EdgeKind::Defines)
                     && rows.contains(&e.source)
                     && reached.contains(&e.target)
@@ -1426,6 +1449,13 @@ impl RetrievalTool for BlastRadius {
         // envelope and each row carries its own `via_crossing`.
         let (crossings, crossings_total, via) =
             crossing_set.finish(wicked_estate_core::crossing::CROSSINGS_CAP);
+        let start_ids = starts.iter().map(|s| s.0.clone()).collect();
+        let predecessor_edges = wicked_estate_core::crossing::predecessor_edges(
+            &row_edges.into_values().collect::<Vec<_>>(),
+            &dependent_depths,
+            &start_ids,
+            wicked_estate_core::crossing::VIA_CAP,
+        );
         let mut dependents: Vec<Value> = dependent_nodes
             .iter()
             .map(|n| {
@@ -1441,6 +1471,10 @@ impl RetrievalTool for BlastRadius {
                     "line": n.location.span.start_line,
                     "line_1based": line_1based(n),
                     "depth": depth,
+                    "via": predecessor_edges.get(n.symbol.as_str())
+                        .map(|(edges, _)| edges.as_slice()).unwrap_or(&[]),
+                    "via_omitted": predecessor_edges.get(n.symbol.as_str())
+                        .map_or(0, |(_, omitted)| *omitted),
                 });
                 if let Some(c) = via.get(n.symbol.as_str()) {
                     row["via_crossing"] = json!(c);
@@ -1520,6 +1554,7 @@ impl RetrievalTool for BlastRadius {
         let diag_len: usize = diag.iter().map(|d| d.len() + 1).sum::<usize>() + coverage_note.len();
         let envelope_overhead = 640
             + DIAGNOSTICS_RESERVE
+            + LINK_RESERVE
             + diag_len
             + crossings_json.to_string().len()
             + serde_json::to_string(&summary)
@@ -2153,6 +2188,9 @@ pub const R4_CHAR_BUDGET: usize = 25_000;
 /// Every capped tool reserves it (`cap_rows_to_budget`); a transport that sizes its own reply
 /// (the CLI's `blast-radius`) reserves it too.
 pub const TRANSPORT_RESERVE: usize = 700;
+
+/// Room BlastRadius leaves for the live project-link block added by the transport after caching.
+pub const LINK_RESERVE: usize = 1_500;
 
 /// Headroom for Lineage's non-array keys: `total`, `truncated`, the three #222 horizon keys,
 /// `confidence` (two f32s rendered at full precision plus `edge_count`), the `flows` key, and the
@@ -4199,6 +4237,49 @@ mod tests {
     }
 
     #[test]
+    fn path_reached_unresolved_site_is_not_a_proven_absence() {
+        use wicked_estate_core::UnresolvedRef;
+
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("start", "start", NodeKind::Function, "src/lib.rs", 0),
+                make_node("mid", "mid", NodeKind::Function, "src/lib.rs", 0),
+                make_node("goal", "goal", NodeKind::Function, "src/lib.rs", 0),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[make_call_edge("start", "mid")])
+            .unwrap();
+        store
+            .upsert_unresolved_refs(&[UnresolvedRef::new(
+                SymbolId("mid".into()),
+                "goal_like",
+                EdgeKind::Calls,
+                Location::new("src/lib.rs", Span::ZERO),
+            )])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let res = Path
+            .invoke(&store, &json!({"from": "start", "to": "goal"}))
+            .unwrap();
+        assert_eq!(res.content["found"], false);
+        assert_eq!(res.content["unresolved_on_frontier"], 1);
+        assert!(
+            !res.diagnostics
+                .iter()
+                .any(|d| d.contains("no route exists"))
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("not a proven absence"))
+        );
+    }
+
+    #[test]
     fn path_bounded_absence_says_so_and_proven_absence_does_not() {
         let store = path_chain_store(6, 0);
         let bounded = Path
@@ -4226,6 +4307,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(proven.content["found"], false);
+        assert_eq!(proven.content["unresolved_on_frontier"], 0);
         assert_eq!(proven.content["depth_bounded"], false);
         assert!(
             proven
@@ -4552,7 +4634,8 @@ mod tests {
         assert_eq!(
             expected.unwrap(),
             // (#358) `query`/`resolved`/`suggestions`/`suggestions_truncated`: the name-miss keys,
-            // on every reply so a parser never meets a key set it has not seen.
+            // on every reply so a parser never meets a key set it has not seen. (#348)
+            // `unresolved_on_frontier`: an int or null on every reply, additive.
             vec![
                 "crossings".to_string(),
                 "depth_bounded".to_string(),
@@ -4564,6 +4647,7 @@ mod tests {
                 "suggestions".to_string(),
                 "suggestions_truncated".to_string(),
                 "unresolved".to_string(),
+                "unresolved_on_frontier".to_string(),
             ]
         );
     }
@@ -4737,6 +4821,32 @@ mod tests {
             2,
             "endpoints come from the traversal; only operand resolution may call get_node"
         );
+    }
+
+    /// estate#348: a store that cannot count unresolved references by source (the trait default,
+    /// which `GetNodeCounter` keeps) never yields a proven absence, and the key is present as null.
+    #[test]
+    fn path_unknown_unresolved_count_is_not_a_proven_absence() {
+        let inner = path_chain_store(6, 0);
+        let counting = GetNodeCounter {
+            inner: &inner,
+            get_node_calls: std::cell::Cell::new(0),
+        };
+        // Reverse direction over the chain: nothing to find and nothing cut off.
+        let res = Path
+            .invoke(
+                &counting,
+                &json!({"from": "name_f6_", "to": "name_f0_", "depth": 16}),
+            )
+            .unwrap();
+        assert_eq!(res.content["found"], false);
+        assert_eq!(res.content["depth_bounded"], false);
+        assert_eq!(res.content["node_bounded"], false);
+        assert!(res.content.get("unresolved_on_frontier").is_some());
+        assert!(res.content["unresolved_on_frontier"].is_null());
+        let diag = res.diagnostics.join("\n");
+        assert!(!diag.contains("no route exists"), "{diag}");
+        assert!(diag.contains("not a proven absence"), "{diag}");
     }
 
     // ── TraverseGraph ────────────────────────────────────────────────────────
@@ -5127,6 +5237,39 @@ mod tests {
         store.upsert_edges(&edges).unwrap();
         store.commit_batch().unwrap();
         store
+    }
+
+    #[test]
+    fn blast_radius_diamond_rows_carry_all_predecessor_edges() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let nodes: Vec<Node> = ["t", "a", "b", "c"]
+            .iter()
+            .map(|id| make_node(id, id, NodeKind::Function, "diamond.rs", 0))
+            .collect();
+        store.upsert_nodes(&nodes).unwrap();
+        store
+            .upsert_edges(&[
+                make_call_edge("a", "t"),
+                make_call_edge("b", "t"),
+                make_call_edge("c", "a"),
+                make_call_edge("c", "b"),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+        let r = BlastRadius.invoke(&store, &json!({"symbol": "t"})).unwrap();
+        let rows = r.content["dependents"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        for id in ["a", "b", "c"] {
+            let row = rows.iter().find(|row| row["symbol"] == id).unwrap();
+            let expected = if id == "c" {
+                json!([{"id": "a", "kind": "calls"}, {"id": "b", "kind": "calls"}])
+            } else {
+                json!([{"id": "t", "kind": "calls"}])
+            };
+            assert_eq!(row["via"], expected, "{row}");
+            assert_eq!(row["via_omitted"], 0, "{row}");
+        }
     }
 
     /// X1 review K1: the MCP answer carries the crossing a walk traversed and names it on the

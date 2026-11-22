@@ -331,6 +331,39 @@ fn capabilities_forces_client_side_traversal_when_cross_on() {
     );
 }
 
+// ── count_unresolved_refs_from (HOME-ONLY while cross is off) ───────────────
+
+/// estate#348: with cross on, a walk can reach foreign nodes whose unresolved sites this reader
+/// cannot count, so the count is unknown (`None`), never the home store's `Some(0)` — which
+/// would let Path claim a proven absence. With cross off it is the home store's answer.
+#[test]
+fn unresolved_count_is_unknown_when_cross_is_on() {
+    let home = home_estate_with_code(&[code_node("processPayment")]);
+    let xedge = XedgeStore::in_memory().unwrap();
+    let others = pools(vec![]);
+    let ids = [code_id("processPayment")];
+
+    let cross_off = OverlayReader::new(
+        &home,
+        "estate",
+        xedge.reader(),
+        Arc::clone(&others),
+        vec![],
+        CrossBudget::default(),
+    );
+    assert_eq!(cross_off.count_unresolved_refs_from(&ids).unwrap(), Some(0));
+
+    let cross_on = OverlayReader::new(
+        &home,
+        "estate",
+        xedge.reader(),
+        Arc::clone(&others),
+        vec!["about".to_string()],
+        CrossBudget::default(),
+    );
+    assert_eq!(cross_on.count_unresolved_refs_from(&ids).unwrap(), None);
+}
+
 // ── 23-method count guard ────────────────────────────────────────────────────
 
 /// A compile-time witness that `OverlayReader` implements the FULL `GraphRead` trait — every one of

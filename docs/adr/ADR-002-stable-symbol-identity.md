@@ -158,8 +158,9 @@ Still open:
   descriptors — a scheme change (pinned inside `identity_field_object_literal_residual`).
 - TS/JS computed-name fields (`[k] = { … }`) stay uncaptured; their literal members still nest
   under the class and merge with same-named real methods (pinned, same test).
-- Overloads within one type still collapse: `disambiguator` stays `None` (pinned by
-  `identity_disambiguator_is_none`).
+- Overloads in C/C++ still collapse: `disambiguator` stays `None`. Java, C#, Apex, Kotlin and
+  Scala use the ordinal convention in the #377 amendment below. TypeScript keeps one runtime
+  identity (pinned by `identity_disambiguator_is_none`).
 - Rust: two trait impls on ONE type merge (`Ta for Foo` / `Tb for Foo` both anchor under `Foo#`
   — `rust_same_type_trait_impls_collision_known_defect`); unanchorable impl targets (`&Foo`,
   tuples, `dyn Trait`) match no anchor branch and their methods stay module-flat.
@@ -297,12 +298,49 @@ which is why the store fix still landed first.
 
 ### Explicitly still open (do NOT read this amendment as fixing them)
 
-- **The overload disambiguator.** Overloads within one type/scope still collapse into one id —
+- **The C/C++ overload disambiguator.** Overloads within one type/scope still collapse into one id —
   `helper()` and `helper(int)` share `…/ns#helper().` — because `disambiguator` stays `None`
-  (pinned: `identity_disambiguator_is_none`). Fixing it (parameter-type hash) is a SCHEME
+  (TypeScript's separate runtime-identity convention is pinned by
+  `identity_disambiguator_is_none`). Fixing it (parameter-type hash) is a SCHEME
   CHANGE with full migration fallout, and it is the true fix under the R2-COR-1 cross-kind
   pin's fixture. M4/Option A did not touch it.
 - **The C/C++ cross-grammar seam** (`.h`→ts-cpp vs `.c`→ts-c: no unification; see the residual
   bullet above).
 - The D6d emission-shape residuals recorded in `cpp.scm` (TU-scope most-vexing-parse,
   preproc-inside-body leak, un-braced `extern "C"`, pointer-returning prototypes).
+
+## Amendment 2026-11 — definition evidence and ordinal overloads (#377)
+
+Java, C#, Apex, Kotlin and Scala emitting, non-`.decl`, Method-suffixed definitions in one file
+that mint the same logical symbol at different ranges are overload contributions. After capture
+deduplication, source order assigns the first `name().` and later contributions `name(+1).`,
+`name(+2).`, etc., using the SCIP ordinal disambiguator convention. Non-overloaded symbols keep
+their ids. Reordering overloads shifts the ordinals; adding unrelated lines does not. Parameter
+types do not enter identity. Contains edges, reference attribution and flow endpoints use each
+definition's disambiguated id.
+
+The name, scoped-name and import-map resolver tiers treat ids differing only by a trailing numeric
+`(+N).` as one logical candidate. They emit an edge to every surviving member of that family with
+`metadata.overloads` recording its size. Different owners remain ambiguous.
+
+TypeScript/TSX/JavaScript keep one runtime identity for overload signatures and implementations.
+C/C++ retain M4's single identity for prototypes and definitions across files. Their overload
+identity is unchanged by this amendment.
+
+TypeScript and TSX identifier-named `namespace` and `module` declarations now emit Namespace nodes
+with Type-suffixed ids. A namespace `N` is `N#`, and its members nest under it (`N#g().`). This
+changes existing namespace members' ids from module-flat to type-nested. String-named ambient
+modules remain uncaptured. A namespace and interface of the same name contribute to one id.
+
+In every language, same-file definitions of different kinds still sharing an id (`class` +
+`interface`, `namespace` + `interface`) carry `merged_kinds`: the distinct capture kinds in source
+order. A same-kind pair (a property getter and setter) gets no key. Inspected callable contributions in Java, C#, Apex, PHP, Kotlin, Scala,
+TypeScript, TSX and JavaScript carry boolean `has_body`; `.decl` records are false. Before storage,
+each merged contribution with body evidence receives the logical OR of that evidence, so the last
+same-file record cannot erase an implementation body. Other languages and non-callable kinds
+have no body key. Existing `behaviour` and `behaviour_reason` values remain independent.
+
+Existing indexes need full re-extraction to acquire the evidence and changed overload/namespace
+ids. The migration losses for changed ids described above still apply. Regression coverage lives
+in `treesitter.rs` and `tests/call_binding_identity.rs`; the latter checks overload call edges and
+merge evidence after SQLite chooses the same-file contribution.

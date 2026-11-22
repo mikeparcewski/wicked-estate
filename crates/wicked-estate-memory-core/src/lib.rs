@@ -15,6 +15,7 @@ use wicked_estate_core::{Language, Location, Node, NodeKind, Span, Symbol, Symbo
 
 pub mod facets;
 pub mod fuzzy;
+pub mod lock;
 pub mod proposal;
 pub mod reason;
 pub mod recall;
@@ -23,6 +24,7 @@ pub mod scope;
 
 pub use facets::{Facets, facet_admits};
 pub use fuzzy::{fuzzy_candidates, jaccard, normalize};
+pub use lock::{MemLock, memory_lock};
 pub use proposal::{ApproveOutcome, Proposal, ProposalState, valid_kind_type};
 pub use reason::{Extracted, heuristic_extract, heuristic_same_entity, heuristic_summary};
 pub use recall::{Candidate, budget_pack, rrf_fuse};
@@ -96,6 +98,9 @@ impl MemKind {
 /// The node-kind label all memory nodes carry (so estate stores them generically).
 pub const MEMORY_NODE_KIND: &str = "memory";
 
+/// Soft-retired memories retain their identity, embedding and edges, but are never recalled.
+pub const RETIRED_MEMORY_NODE_KIND: &str = "memory_retired";
+
 /// How long a Working-tier memory lives: 24 h. Working is session scratch, not a learning — after
 /// this age recall no longer returns it and `archive` folds it into the archival tier.
 pub const WORKING_TTL_SECS: i64 = 86_400;
@@ -106,6 +111,7 @@ pub mod meta_keys {
     pub const SCOPE: &str = "scope";
     pub const CONTENT: &str = "content";
     pub const CREATED_AT: &str = "created_at";
+    pub const RETIRED_AT: &str = "retired_at";
     pub const VALID_AT: &str = "valid_at";
     pub const INVALID_AT: &str = "invalid_at";
     pub const LAST_ACCESS: &str = "last_access";
@@ -119,7 +125,8 @@ pub mod meta_keys {
 }
 
 /// A memory item, before it is written as an estate `Node`. The builder owns the field layout so
-/// capture/recall/consolidation agree on it in one place.
+/// capture/recall/consolidation agree on it in one place. Node-only lock metadata is deliberately
+/// not carried here: callers rewriting an existing node must first check [`memory_lock`].
 #[derive(Debug, Clone)]
 pub struct Memory {
     pub id: String,
@@ -193,6 +200,8 @@ impl Memory {
     /// Reconstruct a `Memory` from an estate `Node` written by [`Memory::to_node`].
     /// Returns `None` if the node is not a memory node / is missing required fields.
     pub fn from_node(node: &Node) -> Option<Memory> {
+        let redacted = wicked_estate_core::redact::redact_text_node(node);
+        let node = redacted.as_ref().unwrap_or(node);
         match &node.kind {
             NodeKind::Other(k) if k == MEMORY_NODE_KIND => {}
             _ => return None,
@@ -287,7 +296,7 @@ impl Memory {
                 m.insert(meta_keys::FACETS.into(), v);
             }
         }
-        node
+        wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node)
     }
 }
 
@@ -436,6 +445,20 @@ pub struct MemoryListItem {
     pub created_at: i64,
 }
 
+/// One soft-retired memory in the management inventory, with its retirement time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RetiredMemory {
+    pub item: MemoryListItem,
+    pub retired_at: i64,
+}
+
+impl RetiredMemory {
+    pub fn new(item: MemoryListItem, retired_at: i64) -> Self {
+        Self { item, retired_at }
+    }
+}
+
 /// Memory counts, optionally scoped (MCP: memory.coverage). HC-007 frozen schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryCoverage {
@@ -507,6 +530,36 @@ pub trait MemoryApi {
     /// operator's complete inventory.
     fn list(&self, scope_prefix: Option<&str>) -> Result<Vec<MemoryListItem>, Self::Error>;
 
+    /// List active memories admitted by recall's ancestor/operator/locked-layer scope gate and
+    /// facet intent gate, without retrieval, ranking or a token budget. `None` means unsupported.
+    fn list_admitted(
+        &self,
+        _scope: &str,
+        _intent: &Facets,
+    ) -> Result<Option<Vec<MemoryListItem>>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Soft-retire an active memory by id or SymbolId string. `Some(0|1)` is the count changed;
+    /// `None` means this implementer does not support retirement (not a successful no-op).
+    fn retire(&mut self, _id: &str, _now: i64) -> Result<Option<u32>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Restore a retired memory, preserving its identity. `None` means not supported.
+    fn unretire(&mut self, _id: &str, _now: i64) -> Result<Option<u32>, Self::Error> {
+        Ok(None)
+    }
+
+    /// List only retired memories, optionally restricted to a scope subtree.
+    /// `None` means not supported; `Some(vec![])` means supported with no matching memories.
+    fn list_retired(
+        &self,
+        _scope_prefix: Option<&str>,
+    ) -> Result<Option<Vec<RetiredMemory>>, Self::Error> {
+        Ok(None)
+    }
+
     // ── Proposal queue (DES-MEM-FACETED-001 §5.0) ─────────────────────────────
     // A type-generic, inert write surface. `submit` writes a `Pending` proposal (SAFE even from a
     // `--readonly` worker — never recalled/applied until approved); `approve`/`reject` are operator
@@ -560,6 +613,37 @@ pub trait MemoryApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_masks_new_nodes_and_legacy_reads() {
+        let mem = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            Scope::root(),
+            "DB_PASSWORD=hunter2-example AKIAIOSFODNN7EXAMPLE",
+            1,
+        );
+        let mut node = mem.to_node();
+        assert!(!node.name.contains("hunter2-example"));
+        assert!(
+            !serde_json::to_string(&node)
+                .unwrap()
+                .contains("AKIAIOSFODNN7EXAMPLE")
+        );
+        node.name = mem.content.clone();
+        node.metadata
+            .insert(meta_keys::CONTENT.into(), mem.content.clone().into());
+        let served = Memory::from_node(&node).unwrap();
+        assert!(!served.content.contains("hunter2-example"));
+        assert!(!served.content.contains("AKIAIOSFODNN7EXAMPLE"));
+        node.metadata.remove(meta_keys::CONTENT);
+        assert!(
+            !Memory::from_node(&node)
+                .unwrap()
+                .content
+                .contains("hunter2-example")
+        );
+    }
 
     #[test]
     fn memory_roundtrips_to_node() {

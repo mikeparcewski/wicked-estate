@@ -17,9 +17,9 @@ use wicked_estate_store::{GraphStoreMutExt, SqliteStore};
 
 const BUILTIN_TS_QUERY: &str =
     include_str!("../../wicked-estate-extract/src/queries/typescript.scm");
-const NAMESPACE_PATTERN: &str =
-    "\n(internal_module\n  name: (identifier) @code_namespace.name\n) @code_namespace.def\n";
-const TS_FIXTURE: &str = "namespace Util {\n  export function f(): void {}\n}\n";
+const AMBIENT_FUNCTION_PATTERN: &str =
+    "\n(function_signature\n  name: (identifier) @code_function.name\n) @code_function.def\n";
+const TS_FIXTURE: &str = "declare function provided(): void;\nexport function f(): void {}\n";
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_wicked-estate")
@@ -174,7 +174,7 @@ fn semantic_override_edits_force_reextraction_with_marker_and_descriptor_diff() 
         &plugins,
         "ts-superset",
         "typescript",
-        &format!("{BUILTIN_TS_QUERY}{NAMESPACE_PATTERN}"),
+        &format!("{BUILTIN_TS_QUERY}{AMBIENT_FUNCTION_PATTERN}"),
     );
     let index_args = [
         "index",
@@ -183,7 +183,7 @@ fn semantic_override_edits_force_reextraction_with_marker_and_descriptor_diff() 
         db.to_str().unwrap(),
     ];
 
-    // Run 1: override active — announced per run, namespace captured, audit key stamped.
+    // Run 1: override active — announced per run, ambient function captured, audit key stamped.
     let out = run(&root, &plugins, None, &index_args);
     assert!(out.status.success(), "stderr={}", stderr_of(&out));
     assert!(
@@ -191,14 +191,14 @@ fn semantic_override_edits_force_reextraction_with_marker_and_descriptor_diff() 
         "every index run announces the active override; stderr={}",
         stderr_of(&out)
     );
-    assert!(node_present(&db, &NodeKind::Namespace, "Util"));
+    assert!(node_present(&db, &NodeKind::Function, "provided"));
     let key1 = meta(&db, "plugin_overrides").expect("audit key written at run end");
     assert!(
         key1.starts_with("typescript|query|ts-superset|"),
         "descriptor shape; got {key1}"
     );
 
-    // Run 2: SEMANTIC byte edit (drop the namespace pattern — never a bare touch): the gate must
+    // Run 2: SEMANTIC byte edit (drop the signature pattern — never a bare touch): the gate must
     // fire with the marker AND the old->new descriptor diff, and the node set must change even
     // though no source file changed.
     fs::write(ovdir.join("q.scm"), BUILTIN_TS_QUERY).unwrap();
@@ -218,22 +218,22 @@ fn semantic_override_edits_force_reextraction_with_marker_and_descriptor_diff() 
         "the old->new descriptor-line diff must print; stderr={err}"
     );
     assert!(
-        !node_present(&db, &NodeKind::Namespace, "Util"),
-        "re-extraction under the edited override must drop the namespace node"
+        !node_present(&db, &NodeKind::Function, "provided"),
+        "re-extraction under the edited override must drop the ambient function"
     );
     let key2 = meta(&db, "plugin_overrides").expect("key rewritten");
     assert_ne!(key1, key2, "a semantic edit must flip the audit key");
 
-    // Run 3: re-add the pattern — the gate re-fires, the namespace comes back.
+    // Run 3: re-add the pattern — the gate re-fires, the ambient function comes back.
     fs::write(
         ovdir.join("q.scm"),
-        format!("{BUILTIN_TS_QUERY}{NAMESPACE_PATTERN}"),
+        format!("{BUILTIN_TS_QUERY}{AMBIENT_FUNCTION_PATTERN}"),
     )
     .unwrap();
     let out = run(&root, &plugins, None, &index_args);
     assert!(out.status.success());
     assert!(stderr_of(&out).contains("PLUGIN-OVERRIDE state changed"));
-    assert!(node_present(&db, &NodeKind::Namespace, "Util"));
+    assert!(node_present(&db, &NodeKind::Function, "provided"));
     assert_eq!(
         meta(&db, "plugin_overrides").as_deref(),
         Some(key1.as_str())
@@ -246,7 +246,7 @@ fn semantic_override_edits_force_reextraction_with_marker_and_descriptor_diff() 
     assert!(out.status.success());
     assert!(stderr_of(&out).contains("PLUGIN-OVERRIDE state changed"));
     assert!(
-        !node_present(&db, &NodeKind::Namespace, "Util"),
+        !node_present(&db, &NodeKind::Function, "provided"),
         "override removal must purge override-minted nodes"
     );
     assert!(
@@ -272,7 +272,7 @@ fn plugins_list_shows_override_states() {
         &plugins,
         "ts-superset",
         "typescript",
-        &format!("{BUILTIN_TS_QUERY}{NAMESPACE_PATTERN}"),
+        &format!("{BUILTIN_TS_QUERY}{AMBIENT_FUNCTION_PATTERN}"),
     );
     write_query_override(&plugins, "tsx-broken", "tsx", "(no_such_node_kind) @x");
     let py_query =
@@ -329,7 +329,7 @@ fn labelled_run_writes_the_scoped_key_only() {
         &plugins,
         "ts-superset",
         "typescript",
-        &format!("{BUILTIN_TS_QUERY}{NAMESPACE_PATTERN}"),
+        &format!("{BUILTIN_TS_QUERY}{AMBIENT_FUNCTION_PATTERN}"),
     );
 
     let out = run(

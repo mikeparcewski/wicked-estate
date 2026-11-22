@@ -19,15 +19,24 @@ length and line breaks (`password: REDACTEDREDA`), so spans and line numbers sta
 | Env-style values (compose `environment`, k8s `env`, ConfigMap `data`, Dockerfile `ENV`/`ARG`) | Masked unless the key ends in `_URL`, `_URI`, `_ENDPOINT`, `_BASE_PATH`, `_HOST`, `_ADDR`, `_ADDRESS`, `_SERVICE` or `_PORT`. Then a URL keeps its scheme and port. Its host is kept when it is a service named in the same file, an IP address or a registrable domain (left-most labels beyond the registrable domain are masked unless known). Each path segment is kept only when it is a base-path word (`api`, `v1`, `graphql`, ...). Userinfo, query and fragment are always masked. Topic and queue values are masked. |
 | A key that names a secret (`password`, `token`, `apiKey`, `client_secret`, ...) | Its value is masked, even in a trusted field. |
 | Kubernetes `Secret` `data`/`stringData`, `SealedSecret` `encryptedData`, `secrets*.yaml` | Every value masked; keys kept. |
-| Code (every language) | A string literal is masked when it has a known token shape or a long random-looking run, or when it is bound to a secret-named variable, property, parameter or env lookup (`const password = "..."`, `{ apiKey: "..." }`, `process.env.TOKEN \|\| "..."`). Module specifiers are never masked. |
+| Code with a built-in grammar | A string literal is masked when it has a known token shape or a long random-looking run, or when the AST binds it to a secret-named variable, property, parameter, callee or env lookup (`const password = "..."`, `{ apiKey: "..." }`, `client.setPassword("...")`, `process.env.TOKEN \|\| "..."`). Binary operators not listed as binding operators are transparent: both literals in `const password = "abc" + "def"` inherit `password`, while `const value = settings.password + "abc"` inherits `value`. Binding discovery skips comment and type subtrees, including annotations or comments longer than 200 bytes. Module specifiers are never masked. |
+| Vue, Svelte and HTML `<script>` blocks | Script bodies use the code rules above. An absent `lang` defaults to JavaScript; explicit tags use `embedded.toml` (`ts` selects TypeScript, including typed bindings in `<script setup lang="ts">`). An unknown language gets the secret-named literal-assignment check. Template text, template expressions and HTML attributes receive only the whole-file token-shape and URL-credential checks. |
 | A file type with no redaction rule (grammar-less mainframe formats such as JCL, runtime plugin grammars, files only a drop-in rule reads) | Token shapes (below) plus the value of every `name=value` / `name: value` whose name names a secret (`PASSWORD=...`). Not default-deny. |
 | Every file, including comments and prose | Known token shapes (AWS, GitHub, GitLab, Slack, Stripe, Google, OpenAI/Anthropic-style keys, npm tokens, JWTs, private-key blocks) and URL credentials (`scheme://user:pass@`) are masked. |
-| Credential files | Never indexed, even when committed: `.env`, `.env.*` (except `.env.example`, `.env.sample`, `.env.template`), `*.env`, `.npmrc`, `.pypirc`, `.netrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`. Also `id_*`, `kubeconfig*` and `credentials*`, except source code: a file whose extension is a listed programming language (`code_ext` in the rules file: Python, JavaScript/TypeScript, Java, Kotlin, Go, Rust, Ruby, PHP, C#, Swift, Scala, Dart) and has no config, prose or key suffix before it (`.yaml`, `.conf`, `.pem`, ...) (`credentials_store.py`, `id_utils.ts`, `credentials.service.ts`) is indexed, and its string literals are redacted like any code. Every other file under these names stays excluded: `id_rsa`, `id_ed25519.pub`, `credentials`, `credentials.json`/`.yaml`/`.toml`/`.ini`/`.tfvars`, `kubeconfig.yaml`, `credentials.yaml.py`, and languages not listed (C/C++ `credentials.h`, `credentials.sh`). When a file an older build indexed matches these rules, the next `index` removes it and prints a `SECRET-EXCLUDED:` line naming it. |
+| Credential files | Never indexed, even when committed: `.env`, `.env.*` (except `.env.example`, `.env.sample`, `.env.template`), `*.env`, `.npmrc`, `.pypirc`, `.netrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`. Also `id_*`, `kubeconfig*` and `credentials*`, except source code: a file whose extension is a listed programming language (`code_ext` in the rules file: Python, JavaScript/TypeScript, Java, Kotlin, Go, Rust, Ruby, PHP, C#, Swift, Scala, Dart, Vue, Svelte) and has no config, prose or key suffix before it (`.yaml`, `.conf`, `.pem`, ...) (`credentials_store.py`, `id_utils.ts`, `credentials.service.ts`) is indexed, and its string literals are redacted like any code. Every other file under these names stays excluded: `id_rsa`, `id_ed25519.pub`, `credentials`, `credentials.json`/`.yaml`/`.toml`/`.ini`/`.tfvars`, `kubeconfig.yaml`, `credentials.yaml.py`, and languages not listed (C/C++ `credentials.h`, `credentials.sh`). When a file an older build indexed matches these rules, the next `index` removes it and prints a `SECRET-EXCLUDED:` line naming it. |
 
 Every store write also passes a backstop that masks known token shapes and URL credentials in
 every free-text column (node signatures, docs and metadata, edge and support metadata,
 unresolved-reference names, annotations, semantic notes, telemetry imports, `tfstate` ids, meta
 values). This covers text that never passes the extractor.
+
+Memory captures, knowledge writes and ingested documents, source manifests, and proposal
+payloads also mask known token shapes, URL credentials, private-key blocks, and secret-named
+assignments in free text (`DB_PASSWORD=...`, `password: "..."`, `token := ...`,
+`Authorization: Bearer ...` / `Basic ...`). Names, signatures, docs and every metadata string
+are covered before storage and before embedding. JSON string values are masked; keys stay.
+This policy uses no entropy heuristic: ordinary prose and commit hashes stay. A colon requires
+whitespace or a quote, so `session:abc123`, `auth:x` and URLs stay, but `auth: done` is masked.
 
 Reads are confined to the repository root: a symlink, `..` path or absolute path that resolves
 outside it is never read (drop-in rule files, semantic-evidence documents and the source walk).
@@ -45,9 +54,17 @@ A store written before 0.33.0 still holds the old text. It is cleaned:
 
 A store counts as a code graph when it records an indexed root or holds any indexed file, so a
 graph written before `indexed_root` existed is cleaned too. Memory and knowledge stores hold
-neither and are left alone.
+neither. Their existing text is cleaned **explicitly** with
+`wicked-estate redact-store --db <path-to-memory.db-or-knowledge.db>` (any other `wicked-estate`
+write command pointed at that file cleans it first, too). Opening a nonempty old memory or
+knowledge store from the MCP server prints one `REDACTION-PENDING:` line with the command;
+opening it does not migrate it. Reads mask text unconditionally, including stores that have not been cleaned.
+The explicit text migration rewrites node names and metadata (including contribution copies),
+runs the token-shape column scrub, rebuilds FTS, and records a separate text-policy epoch. It
+then truncates the WAL and runs `VACUUM`, with the same pending-cleanup retry as code stores.
+Stored vectors are not re-embedded.
 
-The migration re-redacts every stored file text (current and archived versions), re-keys and
+For code graphs, the migration re-redacts every stored file text (current and archived versions), re-keys and
 deletes the old blobs, re-slices node signatures from the masked text, scrubs every other
 free-text column, drops the query cache, rebuilds and optimizes the full-text index, marks every
 file for re-extraction, and records the policy version. It then checkpoints the WAL with TRUNCATE
@@ -58,7 +75,7 @@ its signature and doc (the next index re-derives them). If a reader is attached,
 truncate: the store records that its cleanup is pending, the report says so, and running
 `redact-store` again when the store is idle finishes the job.
 
-**Until a SQLite store is cleaned, estate does not serve its text.** Reads withhold stored source text,
+**Until a SQLite code graph is cleaned, estate does not serve its text.** Reads withhold stored source text,
 signatures and docs and bypass the query cache. CLI read commands print a `REDACTION-PENDING:`
 line naming the command that cleans the store.
 
@@ -78,9 +95,11 @@ These are stated in every answer that returns stored source text (a `PRIVACY:` d
    credential deliberately shaped as one is indistinguishable from an address unless it has a
    known token shape.
 3. **The length of a masked value is visible**, because masking keeps the same length.
-4. **Memory and knowledge stores** (`memory.db`, `knowledge.db`) are not redacted yet. A pasted
-   credential in a captured memory or an ingested document is stored as written
-   ([estate#406](https://github.com/mikeparcewski/wicked-estate/issues/406)).
+4. **Free text in memory and knowledge** masks token shapes and secret-named assignments on
+   capture and read ([estate#406](https://github.com/mikeparcewski/wicked-estate/issues/406)).
+   A secret under an innocent name in prose is not detected. Clean existing `memory.db` and
+   `knowledge.db` files explicitly with `wicked-estate redact-store --db <path>`; backups made
+   before cleaning remain outside estate's reach.
 5. **Non-SQLite backends.** Postgres is a source-build feature (`--features postgres`; the
    released binaries and `cargo install wicked-estate` do not include it). It gets the write
    backstop and redacted text from the indexer, but has no migration and no read guard: a

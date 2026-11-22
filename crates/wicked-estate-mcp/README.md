@@ -5,10 +5,27 @@ MCP stdio server that exposes the wicked-estate retrieval tools to LLM agents ov
 ## What it does
 
 - Implements the MCP stdio transport (newline-delimited JSON-RPC 2.0) by hand — synchronous, no async overhead on a local stdio server.
-- Routes `tools/list` and `tools/call` via unified dispatch across **33 tools**: 12 estate tools (in `wicked-estate-retrieve`, incl. `rules.recall`), 7 memory tools (`src/tools/memory.rs`), 10 knowledge tools (`src/tools/knowledge.rs`), and 4 proposal-queue tools (`src/tools/proposals.rs`).
+- Routes `tools/list` and `tools/call` via unified dispatch across **36 tools**: 12 estate tools (in `wicked-estate-retrieve`, incl. `rules.recall`), 9 memory tools (`src/tools/memory.rs`), 11 knowledge tools (`src/tools/knowledge.rs`), and 4 proposal-queue tools (`src/tools/proposals.rs`).
 - Injects a W7.4 staleness diagnostic (`STALENESS: commits_behind=N`) into every `tools/call` response when the server can determine commits landed since the last index run.
 - Advertises `SemanticSearch` in `tools/list` only when a `VectorStore` is wired in at startup.
 - `handle_request` and `handle_request_ctx` are pure functions (no I/O) so all routing logic is fully unit-tested without a running server.
+
+Memory locks are owned by verified governance packs. Ordinary `memory.capture` writes into a
+one-segment `org:` or `team:` scope, writes to locked ids, `memory.retire` / `memory.unretire` and
+`memory.erase` of locked nodes fail with JSON-RPC -32603 and `memory_locked`. A subtree erase
+containing any locked node refuses the whole erase and names the locked ids. Reflection,
+consolidation and Working expiry skip locked nodes. Recall inherits locked one-segment org/team
+memories across projects, then applies the normal facet gate.
+
+`memory.list {"admit_for":{"scope":"project:x","intent":{"project":"p1"}}}` applies
+exactly recall's ancestor/operator/locked-layer scope admission and facet gate, without query
+retrieval, ranking or a token budget. Combining `admit_for` with `scope_prefix` or `retired:true`,
+or supplying a malformed scope/intent, is -32602. An implementer without admission support returns
+-32601. Omit `admit_for` for the complete management inventory.
+
+The pack write and verification functions (`apply_pack_memories`, `pack_memories`) are library-only
+in `wicked-estate-memory`; they add no MCP tools (the count remains 35, including 9 memory tools).
+Signature verification and sync belong to the governance caller.
 
 ## Key types / traits
 
@@ -20,8 +37,8 @@ MCP stdio server that exposes the wicked-estate retrieval tools to LLM agents ov
 | `McpContext` | Carries the four `embedder_*` dim-guard fields (runtime vs store-meta id/dim). Freshness is measured per call by `annotate_tool_response`, not carried here. |
 | `all_tools()` | Returns the twelve always-on estate `RetrievalTool` instances (no `SemanticSearch` — it is stateful). |
 | `DomainHandles` | Bundles the memory engine and knowledge engine handles passed into the unified dispatch loop. |
-| `src/tools/memory.rs` | Dispatch path for the 7 memory tools (`memory.capture/recall/reflect/erase/learn/coverage/list`). |
-| `src/tools/knowledge.rs` | Dispatch path for the 10 knowledge tools (`knowledge.ingest/write/relate/recall/coverage/relate_code/recall_about_code/replace_source/source_catalog/neighbors`). |
+| `src/tools/memory.rs` | Dispatch path for the 9 memory tools (`memory.capture/recall/reflect/erase/retire/unretire/learn/coverage/list`). |
+| `src/tools/knowledge.rs` | Dispatch path for the 11 knowledge tools (`knowledge.ingest/forget/write/relate/recall/coverage/relate_code/recall_about_code/replace_source/source_catalog/neighbors`). |
 | `src/tools/proposals.rs` | Dispatch path for the 4 proposal-queue tools (`proposal.submit/list/approve/reject`). |
 | `live_semantic_search(vec_store)` | Builds the live `SemanticSearch` backed by `default_embedder()` + the supplied `VectorStore`. |
 | `input_schema(name)` | Returns the JSON Schema `inputSchema` for a named tool; used by `tools/list`. |

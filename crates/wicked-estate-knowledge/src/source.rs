@@ -194,7 +194,8 @@ impl SourceGeneration {
     pub fn validate(&self) -> wicked_estate_core::Result<()> {
         if !valid_source_id(&self.source_id) {
             return Err(bad(format!(
-                "invalid sourceId {:?}: expected the registry id, 1-128 of [A-Za-z0-9._-]",
+                "invalid sourceId {:?}: expected the registry id, 1-128 of [A-Za-z0-9._-]; \
+                 for citation-sourced knowledge use knowledge.forget {{source}}",
                 shown(&self.source_id)
             )));
         }
@@ -748,7 +749,7 @@ impl KnowledgeEngine {
                 n.metadata
                     .get(meta::SOURCE_KEY)
                     .and_then(Value::as_str)
-                    .map(str::to_string)
+                    .map(|s| wicked_estate_core::redact::redact_free_text(s).into_owned())
             })
             .collect();
         let tombstoned_doc_count = all_tombstoned.len();
@@ -769,6 +770,8 @@ impl KnowledgeEngine {
                 }
                 *left -= 1;
             }
+            let redacted = wicked_estate_core::redact::redact_text_node(node);
+            let node = redacted.as_ref().unwrap_or(node);
             self.store.upsert_nodes(std::slice::from_ref(node))?;
             let vec = self.embed(text);
             self.store.set_embedding(&node.symbol, &vec)?;
@@ -782,6 +785,8 @@ impl KnowledgeEngine {
         if self.fail_replace_before_manifest {
             return Err(bad("injected failure after the tombstones".into()));
         }
+        let redacted = wicked_estate_core::redact::redact_text_node(manifest);
+        let manifest = redacted.as_ref().unwrap_or(manifest);
         self.store.upsert_nodes(std::slice::from_ref(manifest))?;
 
         Ok(ReplaceReport {
@@ -900,14 +905,19 @@ impl KnowledgeEngine {
         if now_gen != Some(generation) {
             return Err(changed());
         }
+        let mut catalog = m.get(meta::CATALOG).cloned().unwrap_or_else(|| json!({}));
+        wicked_estate_core::redact::redact_free_json(&mut catalog);
+        for doc in &mut docs {
+            wicked_estate_core::redact::redact_free_json(doc);
+        }
         Ok(Some(CatalogPage {
             source_id: source_id.to_string(),
             label: m
                 .get(meta::LABEL)
                 .and_then(Value::as_str)
-                .map(str::to_string),
+                .map(|s| wicked_estate_core::redact::redact_free_text(s).into_owned()),
             generation,
-            catalog: m.get(meta::CATALOG).cloned().unwrap_or_else(|| json!({})),
+            catalog,
             page,
             pages,
             total_docs: keys.len(),

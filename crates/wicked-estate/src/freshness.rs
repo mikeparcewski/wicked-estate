@@ -832,6 +832,55 @@ impl FreshnessProbe {
             ));
         }
         if let Some(store) = self.store.as_deref() {
+            if let Some(object) = content
+                .as_object_mut()
+                .filter(|object| object.contains_key("crossings") && !object.contains_key("link"))
+            {
+                let statuses = crate::link::answer_statuses(store);
+                for status in &statuses {
+                    if !status.stale {
+                        continue;
+                    }
+                    let reason = if !status.stale_labels.is_empty() {
+                        format!(
+                            "members re-indexed or removed: {}",
+                            status.stale_labels.join(", ")
+                        )
+                    } else if status.last_error.is_some() {
+                        "the last link failed".to_string()
+                    } else {
+                        "the linker changed".to_string()
+                    };
+                    let labels: Vec<&str> =
+                        status.coverage.iter().map(|c| c.label.as_str()).collect();
+                    diags.push(format!(
+                        "LINK-STALE: project '{}' links are stale ({reason}); cross-repo \
+                         dependents may be missing or outdated - re-run `wicked-estate link \
+                         --db {} --project {} --labels {}`",
+                        status.project,
+                        self.db,
+                        status.project,
+                        labels.join(",")
+                    ));
+                }
+                let links =
+                    crate::link::bounded_json(statuses, wicked_estate_retrieve::LINK_RESERVE);
+                if let Some(rows) = links.as_array() {
+                    for status in rows {
+                        if let Some(omitted) =
+                            status["coverage_omitted"].as_u64().filter(|n| *n > 0)
+                        {
+                            let project = status["project"].as_str().unwrap_or_default();
+                            diags.push(format!(
+                                "LINK: project '{project}' omitted {omitted} member coverage \
+                                 entries; see `wicked-estate link --project {project} --status \
+                                 --json` for the full list"
+                            ));
+                        }
+                    }
+                }
+                object.insert("link".to_string(), links);
+            }
             let repos = repo_scope::registry(store);
             let keys = if repos.is_empty() {
                 vec![repo_scope::meta_key(None, "unreadable_files")]
@@ -1088,6 +1137,67 @@ mod tests {
             assert_eq!(content["freshness"]["skipped_documents"], json!(0));
             assert!(!diags.iter().any(|diag| diag.starts_with("DOC-SKIPPED:")));
         }
+    }
+
+    #[test]
+    fn crossing_answers_carry_live_link_status_after_member_reindex() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        for label in ["provider", "consumer"] {
+            let dir = root.path().join(label);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("a.ts"), "export function f() {}\n").unwrap();
+            crate::index_path_as(&mut store, &dir, Some(label)).unwrap();
+        }
+        crate::link::link_project(&mut store, "p", &["provider".into(), "consumer".into()])
+            .unwrap();
+        let mut probe = FreshnessProbe::with_store(":memory:", Some(Box::new(store)));
+        let mut content = json!({"crossings": []});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        assert_eq!(content["link"][0]["project"], "p");
+        assert_eq!(content["link"][0]["stale"], false);
+        assert!(!diags.iter().any(|d| d.starts_with("LINK-STALE:")));
+
+        crate::index_path_as(
+            probe.store.as_mut().unwrap().as_mut(),
+            &root.path().join("consumer"),
+            Some("consumer"),
+        )
+        .unwrap();
+        let mut content = json!({"crossings": []});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        assert_eq!(content["link"][0]["stale"], true);
+        assert_eq!(content["link"][0]["stale_labels"], json!(["consumer"]));
+        assert!(diags.iter().any(|d| {
+            d.starts_with("LINK-STALE: project 'p'")
+                && d.contains("members re-indexed or removed: consumer")
+                && d.contains("wicked-estate link --db :memory: --project p --labels ")
+        }));
+
+        let mut content = json!({"rows": []});
+        probe.annotate(&mut content, &mut vec![]);
+        assert!(content.get("link").is_none());
+        let mut content = json!({"crossings": [], "link": [{"existing": true}]});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        assert_eq!(content["link"], json!([{"existing": true}]));
+        assert!(!diags.iter().any(|d| d.starts_with("LINK-STALE:")));
+    }
+
+    #[test]
+    fn crossing_answers_distinguish_no_links_from_no_store() {
+        let store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        let mut probe = FreshnessProbe::with_store(":memory:", Some(Box::new(store)));
+        let mut content = json!({"crossings": []});
+        probe.annotate(&mut content, &mut vec![]);
+        assert_eq!(content["link"], json!([]));
+
+        let mut probe = FreshnessProbe::open(":memory:");
+        let mut content = json!({"crossings": []});
+        probe.annotate(&mut content, &mut vec![]);
+        assert!(content.get("link").is_none());
     }
 
     #[test]

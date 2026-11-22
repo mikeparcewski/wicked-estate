@@ -211,6 +211,17 @@ pub trait GraphRead: Send {
     /// "no dependents" when calls to that name went unresolved. Rows are per unresolved
     /// reference (per site), defined once in `docs/ENGINE-CONTRACT.md` §2.1.
     fn unresolved_refs_for_name(&self, name: &str) -> Result<Vec<UnresolvedRef>>;
+    /// Counts unresolved references (per site, ENGINE-CONTRACT §2.1) whose referencing symbol
+    /// ([`UnresolvedRef::from`]) is in `from`. Duplicate ids must not double-count; implementing
+    /// stores return `Some(0)` for an empty slice.
+    ///
+    /// `None` means this store cannot answer and callers must treat the count as unknown, never
+    /// as zero. Path uses this to decide whether an absence is proven, so the default fails closed
+    /// while keeping outside implementors compiling.
+    fn count_unresolved_refs_from(&self, from: &[SymbolId]) -> Result<Option<u64>> {
+        let _ = from;
+        Ok(None)
+    }
     /// The stored content digest for `file`, if indexed (incremental change detection). (Wave 2.6)
     fn file_digest(&self, file: &str) -> Result<Option<String>>;
     /// Every path THIS INDEXER recorded — the authoritative record of what a prior `index_path` run

@@ -1,4 +1,4 @@
-//! `MemoryApi` (7-method, DES-001 §4.2 + DES-MEM-FACETED-001) implemented for
+//! `MemoryApi` (DES-001 §4.2 + DES-MEM-FACETED-001) implemented for
 //! [`crate::MemoryEngine`]. Uses `wicked_estate_memory_core` types directly.
 
 use crate::{MemoryEngine, RecallMode, ScopeFilter};
@@ -6,9 +6,21 @@ use std::collections::{BTreeMap, HashMap};
 use wicked_estate_core::SymbolId;
 use wicked_estate_memory_core::{
     ApproveOutcome, CaptureRequest, Facets, MemKind, Memory, MemoryApi, MemoryCoverage,
-    MemoryListItem, Proposal, ProposalState, RecallQuery, RecalledItem, ReflectResult, Scope, Tier,
+    MemoryListItem, Proposal, ProposalState, RecallQuery, RecalledItem, ReflectResult,
+    RetiredMemory, Scope, Tier,
 };
 use wicked_estate_overlay::XEdge;
+
+fn memory_list_item(m: Memory) -> MemoryListItem {
+    MemoryListItem {
+        id: m.id,
+        content: m.content,
+        tier: m.tier.as_str().to_string(),
+        scope: m.scope.as_path().to_string(),
+        facets: m.facets,
+        created_at: m.created_at,
+    }
+}
 
 fn parse_kind(s: &str) -> anyhow::Result<MemKind> {
     Ok(match s {
@@ -31,6 +43,32 @@ fn parse_tier(s: &str) -> anyhow::Result<Tier> {
         "archival" => Tier::Archival,
         other => anyhow::bail!("unknown tier: {other}"),
     })
+}
+
+impl MemoryEngine {
+    /// Active inventory with exactly recall's scope and facet admission, without retrieval,
+    /// ranking, expiry/salience filtering or a token budget.
+    pub fn list_admitted(
+        &self,
+        scope: &str,
+        intent: &Facets,
+    ) -> wicked_estate_core::Result<Vec<MemoryListItem>> {
+        let scope = Scope::parse_strict(scope)
+            .map_err(|e| wicked_estate_core::Error::Invalid(e.to_string()))?;
+        let filter = ScopeFilter::Ancestors(&scope);
+        let mut items = Vec::new();
+        for node in self.memory_nodes(wicked_estate_memory_core::MEMORY_NODE_KIND)? {
+            let Some(memory) = Memory::from_node(&node) else {
+                continue;
+            };
+            if filter.admits(&memory.scope, &node)
+                && wicked_estate_memory_core::facet_admits(&memory.facets, intent).is_some()
+            {
+                items.push(memory_list_item(memory));
+            }
+        }
+        Ok(items)
+    }
 }
 
 impl MemoryApi for MemoryEngine {
@@ -146,7 +184,7 @@ impl MemoryApi for MemoryEngine {
         }
         // collect victim symbol IDs for xedge cleanup BEFORE erasing
         let victim_ids: Vec<String> = self
-            .all_memories()?
+            .erasure_memories()?
             .into_iter()
             .filter(|m| m.scope.path_in_prefix(scope_prefix))
             .map(|m| m.symbol().0)
@@ -227,17 +265,39 @@ impl MemoryApi for MemoryEngine {
                 .collect(),
             None => mems,
         };
-        Ok(filtered
-            .into_iter()
-            .map(|m| MemoryListItem {
-                id: m.id,
-                content: m.content,
-                tier: m.tier.as_str().to_string(),
-                scope: m.scope.as_path().to_string(),
-                facets: m.facets,
-                created_at: m.created_at,
-            })
-            .collect())
+        Ok(filtered.into_iter().map(memory_list_item).collect())
+    }
+
+    fn list_admitted(
+        &self,
+        scope: &str,
+        intent: &Facets,
+    ) -> Result<Option<Vec<MemoryListItem>>, anyhow::Error> {
+        Ok(Some(MemoryEngine::list_admitted(self, scope, intent)?))
+    }
+
+    fn retire(&mut self, id: &str, now: i64) -> Result<Option<u32>, anyhow::Error> {
+        Ok(Some(u32::from(
+            MemoryEngine::retire(self, id, now)?.is_some(),
+        )))
+    }
+
+    fn unretire(&mut self, id: &str, _now: i64) -> Result<Option<u32>, anyhow::Error> {
+        Ok(Some(u32::from(MemoryEngine::unretire(self, id)?.is_some())))
+    }
+
+    fn list_retired(
+        &self,
+        scope_prefix: Option<&str>,
+    ) -> Result<Option<Vec<RetiredMemory>>, anyhow::Error> {
+        Ok(Some(
+            self.retired(scope_prefix)?
+                .into_iter()
+                .map(|(memory, retired_at)| {
+                    RetiredMemory::new(memory_list_item(memory), retired_at)
+                })
+                .collect(),
+        ))
     }
 
     // ── Proposal queue (DES-MEM-FACETED-001 §5.0) — forwards to the inherent engine methods ──

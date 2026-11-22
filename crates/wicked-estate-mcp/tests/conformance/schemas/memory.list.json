@@ -1,10 +1,28 @@
 {
   "captured_from": "wicked-estate-mcp-0.16.3",
-  "description": "Management browse: list every memory in scope, each item carrying memory_id, scope, content, tier, facets, and created_at. Unlike memory.recall this is not relevance-ranked, token-budgeted, or facet-intent-filtered.",
+  "description": "List active or retired memories; admit_for applies recall scope and facet admission without ranking.",
   "inputSchema": {
     "properties": {
       "scope_prefix": {
         "type": "string"
+      },
+      "retired": {
+        "type": "boolean",
+        "default": false
+      },
+      "admit_for": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string"
+          },
+          "intent": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
       }
     },
     "type": "object"

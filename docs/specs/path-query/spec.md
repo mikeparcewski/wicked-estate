@@ -165,8 +165,9 @@ attached, so the agent can tell a precise hop from a heuristic one.
 > over-approximation, true whenever any node sits at exactly `max_depth`, even
 > when the frontier had nothing left to expand and even when a route was found.
 > A consumer may conclude from `depth_bounded: false` together with
-> `node_bounded: false` and `found: false` that no route exists in the graph; it
-> may not conclude from `depth_bounded: true` that one does exist further out.
+> `node_bounded: false`, `found: false`, and `unresolved_on_frontier: 0` that no route
+> exists in the graph; a positive or null unresolved count proves absence only in the
+> RESOLVED graph. It may not conclude from `depth_bounded: true` that a route exists further out.
 > `node_bounded` is **backend-approximate**, and by more than a fencepost. The
 > backends budget on *different populations*: `MemStore` counts `sub_nodes`,
 > which grows only for ids that have a stored `Node`

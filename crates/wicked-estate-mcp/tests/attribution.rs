@@ -133,10 +133,8 @@ fn knowledge_recall_items_carry_source_on_wire() {
 /// S4 gate: `memory.recall` items returned by the combined-server MCP path must carry the
 /// ITEM'S own `scope`, not the query scope.
 ///
-/// Scope inheritance direction: a memory at scope `"org:acme"` is visible when the QUERY scope is
-/// `"org:acme/agent:claude"` (because `"org:acme"` is an ancestor of `"org:acme/agent:claude"`).
-/// This lets us write a memory at the org level and query at the agent level — the returned item
-/// scope must be `"org:acme"`, NOT `"org:acme/agent:claude"` (the query scope).
+/// A memory at `org:acme/unit:billing` is inherited by a query at its `agent:claude`
+/// descendant. The returned scope must remain the memory's own scope.
 #[test]
 fn memory_recall_items_carry_item_scope_not_query_scope() {
     let store = empty_store();
@@ -148,11 +146,10 @@ fn memory_recall_items_carry_item_scope_not_query_scope() {
         .unwrap()
         .with_xedge_store(Arc::clone(&xedge));
 
-    // Capture a memory at the ORG-level scope (broader than the query scope).
-    // Scope inheritance: "org:acme" is an ancestor of "org:acme/agent:claude", so a query at the
-    // agent scope will surface this org-level memory.
-    let item_scope = "org:acme";
-    let query_scope = "org:acme/agent:claude"; // more specific — differs from item_scope
+    // Ordinary captures use a descendant of the pack-only org layer.
+    let item_scope = "org:acme/unit:billing";
+    // More specific than the item scope.
+    let query_scope = "org:acme/unit:billing/agent:claude";
 
     let _cap = call(
         &store,
@@ -168,7 +165,7 @@ fn memory_recall_items_carry_item_scope_not_query_scope() {
         }),
     );
 
-    // Recall at the AGENT scope: the org-level memory must surface (ancestor inheritance).
+    // Recall at the AGENT scope: the broader memory must surface (ancestor inheritance).
     let resp = call(
         &store,
         &mut memory,
@@ -197,7 +194,8 @@ fn memory_recall_items_carry_item_scope_not_query_scope() {
         .expect("memory.recall must return an `items` array");
     assert!(
         !items.is_empty(),
-        "memory.recall must return at least one item (ancestor inheritance: org:acme visible from org:acme/agent:claude)"
+        "memory.recall must return at least one item \
+         (ancestor inheritance must preserve the item scope)"
     );
 
     // Every returned item must carry a `scope` key.
@@ -208,7 +206,7 @@ fn memory_recall_items_carry_item_scope_not_query_scope() {
         );
     }
 
-    // The item's scope must be the ITEM's own scope ("org:acme"), NOT the query scope.
+    // The item's scope must be the ITEM's own scope, NOT the query scope.
     // This is the falsifier for the old bug where `scope` was hardcoded to the query scope.
     assert!(
         items

@@ -273,6 +273,8 @@ ALTER TABLE unresolved_refs ADD COLUMN IF NOT EXISTS start_byte BIGINT NOT NULL 
 ALTER TABLE unresolved_refs ADD COLUMN IF NOT EXISTS end_byte BIGINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_name ON unresolved_refs(raw_name);
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file ON unresolved_refs(file);
+-- Path's reached-set unresolved count (estate#348) looks rows up by source symbol.
+CREATE INDEX IF NOT EXISTS idx_unresolved_refs_from ON unresolved_refs(from_sym);
 
 CREATE TABLE IF NOT EXISTS content (
   git_sha TEXT PRIMARY KEY,
@@ -2541,6 +2543,25 @@ impl GraphRead for PostgresStore {
                 });
             }
             Ok::<Vec<UnresolvedRef>, sqlx::Error>(out)
+        })
+        .map_err(st)
+    }
+
+    fn count_unresolved_refs_from(&self, from: &[SymbolId]) -> Result<Option<u64>> {
+        let from: BTreeSet<&str> = from.iter().map(|id| id.as_str()).collect();
+        if from.is_empty() {
+            return Ok(Some(0));
+        }
+        let from: Vec<String> = from.into_iter().map(str::to_string).collect();
+        let mut h = self.conn()?;
+        rt_block(async {
+            let row =
+                sqlx::query("SELECT COUNT(*) AS c FROM unresolved_refs WHERE from_sym = ANY($1)")
+                    .bind(from)
+                    .fetch_one(h.as_conn())
+                    .await?;
+            let count: i64 = row.try_get("c")?;
+            Ok::<Option<u64>, sqlx::Error>(Some(count as u64))
         })
         .map_err(st)
     }

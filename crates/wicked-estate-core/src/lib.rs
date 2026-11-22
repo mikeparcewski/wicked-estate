@@ -40,6 +40,7 @@ pub use annotation::{
     is_system_derived,
 };
 pub use change::{Change, ChangeOp};
+pub use crossing::{VIA_CAP, ViaEdge, predecessor_edges};
 pub use edge::{Confidence, Direction, Edge, EdgeKind, Provenance, ResolutionTier};
 pub use error::{Error, Result};
 pub use flow::{

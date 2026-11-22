@@ -26,6 +26,11 @@ pub const REDACTION_EPOCH: u32 = 1;
 /// The meta key recording [`REDACTION_EPOCH`] on a migrated or freshly indexed store.
 pub const REDACTION_EPOCH_KEY: &str = "redaction_epoch";
 
+/// Version of the free-text policy used by memory and knowledge stores (#406).
+pub const TEXT_REDACTION_EPOCH: u32 = 1;
+/// Meta key recording a fresh or explicitly cleaned text store.
+pub const TEXT_REDACTION_EPOCH_KEY: &str = "text_redaction_epoch";
+
 const TEXT_MASK: &[u8] = b"REDACTED";
 
 /// What every answer that returns stored source text says about it (DES-S7 §5, operator decision
@@ -35,7 +40,8 @@ Config values are default-deny (masked as REDACTED, same length, so a masked val
 code is masked only where a secret is detected (a known token shape, or a literal bound to a \
 secret-named variable); file types without a redaction rule get only those two checks. Not \
 detected: a secret under an innocent name in code, and a secret placed inside a hostname or \
-repository owner. Memory and knowledge stores are not redacted (estate#406).";
+repository owner. Memory and knowledge text masks known token shapes and secret-named assignments \
+(estate#406); secrets under innocent names in prose are not detected.";
 
 /// Replace `buf[start..end]` with the text mask (`REDACTEDREDACTED...`), keeping `\n`, `\r` and
 /// the indentation at the start of every line inside the range (a YAML block scalar or a heredoc
@@ -194,6 +200,160 @@ pub fn token_shape_ranges(text: &str) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+// C4 in free text: match the name and operator first, then inspect the value without crossing
+// JSON escape boundaries. No entropy checks: ordinary prose and commit hashes must survive.
+static TEXT_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?P<key>"[A-Za-z_][\w.\-]*"|'[A-Za-z_][\w.\-]*'|[A-Za-z_][\w.\-]*)[ \t]*(?P<op>:=|=|:)"#,
+    )
+    .expect("free-text assignment compiles")
+});
+static TEXT_VALUE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^[^\s,;)'"\\<>]+"#).expect("free-text value compiles"));
+
+/// Known token shapes, URL credentials and private keys, plus values assigned to secret-named
+/// keys in prose. A colon needs whitespace or a quote, so scope paths and URLs are kept.
+pub fn free_text_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = token_shape_ranges(text);
+    for caps in TEXT_ASSIGNMENT.captures_iter(text) {
+        let key = caps.name("key").expect("key group");
+        if text[..key.start()]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        {
+            continue;
+        }
+        let name = key.as_str().trim_matches(['\'', '"']);
+        if !deny_key(name) {
+            continue;
+        }
+        let op = caps.name("op").expect("operator group");
+        let tail = &text[op.end()..];
+        if (op.as_str() == "=" && tail.starts_with(['=', '>', '~']))
+            || (op.as_str() == ":" && !tail.starts_with([' ', '\t', '\'', '"']))
+        {
+            continue;
+        }
+        let value = tail.trim_start_matches([' ', '\t']);
+        let start = text.len() - value.len();
+        if let Some(quote) = value.chars().next().filter(|c| matches!(*c, '\'' | '"')) {
+            // An escaped quote belongs to the value. Mask the entire interior, keeping the
+            // delimiters, and stop at an unescaped closing quote. An unterminated quote (a
+            // pasted fragment) masks to the end of its line.
+            let mut escaped = false;
+            let mut end = value[1..].find(['\n', '\r']).map_or(value.len(), |i| i + 1);
+            for (i, c) in value[1..].char_indices() {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == quote || c == '\n' || c == '\r' {
+                    end = 1 + i;
+                    break;
+                }
+            }
+            ranges.push((start + 1, start + end));
+        } else if let Some(run) = TEXT_VALUE.find(value) {
+            ranges.push((start, start + run.end()));
+            if name.eq_ignore_ascii_case("authorization")
+                && (run.as_str().eq_ignore_ascii_case("bearer")
+                    || run.as_str().eq_ignore_ascii_case("basic"))
+            {
+                let rest = &value[run.end()..];
+                let token = rest.trim_start_matches([' ', '\t']);
+                if token.len() < rest.len() {
+                    if let Some(tok) = TEXT_VALUE.find(token) {
+                        let offset = text.len() - token.len();
+                        ranges.push((offset, offset + tok.end()));
+                    }
+                }
+            }
+        }
+    }
+    // Merge overlaps so nested assignments and token shapes share one stable mask origin.
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut().filter(|last| start < last.1) {
+            last.1 = last.1.max(end);
+        } else if start < end {
+            merged.push((start, end));
+        }
+    }
+    merged
+}
+
+/// Same-length, idempotent free-text masking. Borrows text when there is no match or change.
+pub fn redact_free_text(text: &str) -> Cow<'_, str> {
+    let ranges = free_text_ranges(text);
+    if ranges.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    let redacted = apply_masks(text, &ranges);
+    if redacted == text {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(redacted)
+    }
+}
+
+/// Redact every string inside a JSON value, keeping keys. Returns whether anything changed.
+pub fn redact_free_json(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Cow::Owned(redacted) = redact_free_text(s) {
+                *s = redacted;
+                true
+            } else {
+                false
+            }
+        }
+        serde_json::Value::Array(a) => a.iter_mut().fold(false, |acc, v| redact_free_json(v) | acc),
+        serde_json::Value::Object(m) => m
+            .values_mut()
+            .fold(false, |acc, v| redact_free_json(v) | acc),
+        _ => false,
+    }
+}
+
+/// Redact a text node's name, signature, doc and metadata strings. Stable identity, kind and
+/// location are kept. `None` means the node was already safe under the free-text policy.
+pub fn redact_text_node(node: &crate::Node) -> Option<crate::Node> {
+    let mut out = node.clone();
+    let mut changed = false;
+    for s in std::iter::once(&mut out.name)
+        .chain(out.signature.iter_mut())
+        .chain(out.doc.iter_mut())
+    {
+        if let Cow::Owned(redacted) = redact_free_text(s) {
+            *s = redacted;
+            changed = true;
+        }
+    }
+    for value in out.metadata.values_mut() {
+        // Proposals and approval journals carry opaque JSON as a metadata string. Decode
+        // values before masking their strings: escaped quotes must not hide assignments,
+        // and masking prose ranges over JSON punctuation must not corrupt the payload.
+        if let serde_json::Value::String(text) = value {
+            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(text) {
+                let strings_changed = redact_free_json(&mut json);
+                // Content can itself be JSON prose, so also apply the assignment policy to
+                // the compact representation (where numeric/boolean colons stay glued).
+                let compact = json.to_string();
+                let redacted = redact_free_text(&compact);
+                if strings_changed || redacted.as_ref() != compact.as_str() {
+                    *text = redacted.into_owned();
+                    changed = true;
+                }
+                continue;
+            }
+        }
+        changed |= redact_free_json(value);
+    }
+    changed.then_some(out)
 }
 
 /// The store-boundary backstop: mask known token shapes and URL credentials in `text`.
@@ -467,6 +627,105 @@ pub fn deny_key(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_nodes_clean_serialized_payloads_without_corrupting_json() {
+        let mut node = crate::Node::new(
+            crate::Symbol::synthetic("proposal", "legacy").id(),
+            crate::NodeKind::Other("proposal".into()),
+            "legacy proposal",
+            crate::Language::new("proposal"),
+            crate::Location::new("proposal", crate::Span::ZERO),
+        );
+        let payload = serde_json::json!({"content": "password: \"hunter2-example\""});
+        node.metadata
+            .insert("payload".into(), payload.to_string().into());
+        node.metadata.insert(
+            "scalar".into(),
+            serde_json::json!("password: \"hunter2-example\"")
+                .to_string()
+                .into(),
+        );
+        node.metadata
+            .insert("numeric".into(), r#"{"token": 123}"#.into());
+        node.metadata
+            .insert("content".into(), r#"{"password":"hunter2-example"}"#.into());
+        let clean = redact_text_node(&node).unwrap();
+        let content: serde_json::Value =
+            serde_json::from_str(clean.metadata["content"].as_str().unwrap()).unwrap();
+        assert!(content.get("password").is_some());
+        assert!(!content.to_string().contains("hunter2-example"));
+        let payload: serde_json::Value =
+            serde_json::from_str(clean.metadata["payload"].as_str().unwrap()).unwrap();
+        assert!(payload.get("content").is_some());
+        assert!(!payload.to_string().contains("hunter2-example"));
+        let scalar: serde_json::Value =
+            serde_json::from_str(clean.metadata["scalar"].as_str().unwrap()).unwrap();
+        assert!(scalar.is_string());
+        assert!(!scalar.as_str().unwrap().contains("hunter2-example"));
+        let numeric: serde_json::Value =
+            serde_json::from_str(clean.metadata["numeric"].as_str().unwrap()).unwrap();
+        assert_eq!(numeric["token"], 123);
+        assert!(redact_text_node(&clean).is_none());
+    }
+
+    #[test]
+    fn free_text_policy_masks_assignments_and_preserves_prose() {
+        for (input, value) in [
+            ("key AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"),
+            (
+                "key ghp_EXAMPLEexampleEXAMPLEexampleEXAMPLE12",
+                "ghp_EXAMPLEexampleEXAMPLEexampleEXAMPLE12",
+            ),
+            ("DB_PASSWORD=hunter2-example", "hunter2-example"),
+            (r#"password: "hunter2-example""#, "hunter2-example"),
+            ("password: \"hunter2-example\nnext line", "hunter2-example"),
+            (r#"'password' := 'hunter2-example'"#, "hunter2-example"),
+            (r#"password="token=hunter2-example""#, "hunter2-example"),
+            ("Authorization: Bearer hunter2-example", "hunter2-example"),
+            ("Authorization: Basic hunter2-example", "hunter2-example"),
+            ("auth: done", "done"),
+            (
+                r#"{"content":"DB_PASSWORD=hunter2-example\nnext"}"#,
+                "hunter2-example",
+            ),
+        ] {
+            let red = redact_free_text(input);
+            assert!(!red.contains(value), "value survived free-text redaction");
+            assert_eq!(red.len(), input.len());
+            assert!(!free_text_ranges(input).is_empty());
+            assert_eq!(redact_free_text(&red), red, "redaction must be idempotent");
+        }
+        for input in [
+            "session:abc123",
+            "auth:x",
+            "https://x.example.com/a",
+            "token == other",
+            "token => other",
+            "token =~ other",
+            "auth::done",
+            "0123456789abcdef0123456789abcdef01234567",
+            "ordinary prose with no assignment",
+        ] {
+            assert!(
+                free_text_ranges(input).is_empty(),
+                "unexpected mask: {input}"
+            );
+            assert_eq!(redact_free_text(input), input);
+        }
+        assert_eq!(
+            redact_free_text(r#"password: "hunter2-example""#),
+            r#"password: "REDACTEDREDACTE""#,
+        );
+        let mut json = serde_json::json!({"password": ["DB_PASSWORD=hunter2-example"]});
+        assert!(redact_free_json(&mut json));
+        assert!(json.get("password").is_some(), "keys must be kept");
+        assert!(!json.to_string().contains("hunter2-example"));
+        assert!(
+            !redact_free_json(&mut json),
+            "a second pass changes nothing"
+        );
+    }
 
     #[test]
     fn masks_keep_length_and_line_breaks() {

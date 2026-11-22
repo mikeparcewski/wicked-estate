@@ -74,10 +74,6 @@ static RE_EXEC_ANY: LazyLock<Regex> = LazyLock::new(|| {
 /// The start of a CICS option `NAME(`; the operand is read with balanced parentheses.
 static RE_CICS_OPT_HEAD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b([A-Z][A-Z0-9-]*)\s*\(").expect("RE_CICS_OPT_HEAD"));
-static RE_SQL_LINE_COMMENT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)--[^\n]*").expect("RE_SQL_LINE_COMMENT"));
-static RE_SQL_BLOCK_COMMENT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?s)/\*.*?\*/").expect("RE_SQL_BLOCK_COMMENT"));
 static RE_SQL_HOSTVAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r":([A-Za-z][A-Za-z0-9-]*)").expect("RE_SQL_HOSTVAR"));
 static RE_SQL_FROM: LazyLock<Regex> =
@@ -133,7 +129,7 @@ static RE_MOVE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RE_SET_ENTRY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?i)\bSET\s+([A-Za-z0-9][A-Za-z0-9-]*)\s+TO\s+ENTRY\s+(?:'([^']*)'|"([^"]*)"|([A-Za-z0-9][A-Za-z0-9-]*))"#,
+        r#"(?i)\bSET\s+([A-Za-z0-9][A-Za-z0-9-]*(?:\s+[A-Za-z0-9][A-Za-z0-9-]*)*)\s+TO\s+ENTRY\s+(?:'([^']*)'|"([^"]*)"|([A-Za-z0-9][A-Za-z0-9-]*))"#,
     )
     .expect("RE_SET_ENTRY")
 });
@@ -309,13 +305,16 @@ fn blank_bytes(v: &mut [u8], from: usize, to: usize) {
 
 /// Two same-length views of COBOL source: `clean` (comments and, in fixed format, the sequence
 /// and identification areas blanked) and `code` (`clean` with every literal's CONTENTS replaced
-/// by `~`; the quote characters stay). Offsets are identical in the source and both views. Only
-/// whole lines, whole literal contents or line tails are overwritten with ASCII, so both stay
-/// valid UTF-8.
+/// by `~`; the quote characters stay). SQL comments are blanked in both views before matching
+/// EXEC blocks. Offsets are identical in the source and both views. Whole comment/literal
+/// contents and ASCII delimiters are overwritten with ASCII, so both stay valid UTF-8.
 fn lexical_views(text: &str, free: bool) -> (String, String) {
     let mut clean: Vec<u8> = text.as_bytes().to_vec();
     let mut code: Vec<u8> = clean.clone();
     let mut start = 0usize;
+    let mut after_exec = false;
+    let mut in_sql = false;
+    let mut sql_block_comment = false;
     for line in text.split_inclusive('\n') {
         let end = start + line.len();
         let body_end = start + line.trim_end_matches(['\n', '\r']).len();
@@ -343,11 +342,34 @@ fn lexical_views(text: &str, free: bool) -> (String, String) {
             }
             from = start + 7;
         }
-        // Literals and floating `*>` comments, left to right.
+        // Literals, COBOL comments and SQL comments, left to right. SQL state survives cards;
+        // only their code areas participate, so comments/identification cannot end a block.
         let mut i = from;
         while i < stop {
             let c = clean[i];
-            if c == b'\'' || c == b'"' {
+            if sql_block_comment {
+                let begin = i;
+                while i < stop {
+                    if clean[i] == b'*' && i + 1 < stop && clean[i + 1] == b'/' {
+                        i += 2;
+                        sql_block_comment = false;
+                        break;
+                    }
+                    i += 1;
+                }
+                blank_bytes(&mut clean, begin, i);
+                blank_bytes(&mut code, begin, i);
+            } else if in_sql && c == b'/' && i + 1 < stop && clean[i + 1] == b'*' {
+                blank_bytes(&mut clean, i, i + 2);
+                blank_bytes(&mut code, i, i + 2);
+                i += 2;
+                sql_block_comment = true;
+            } else if in_sql && c == b'-' && i + 1 < stop && clean[i + 1] == b'-' {
+                blank_bytes(&mut clean, i, stop);
+                blank_bytes(&mut code, i, stop);
+                break;
+            } else if c == b'\'' || c == b'"' {
+                after_exec = false;
                 let mut j = i + 1;
                 while j < stop {
                     if clean[j] == c {
@@ -368,7 +390,28 @@ fn lexical_views(text: &str, free: bool) -> (String, String) {
                 blank_bytes(&mut clean, i, body_end);
                 blank_bytes(&mut code, i, body_end);
                 break;
+            } else if is_ident_byte(c) && c != b'.' {
+                let begin = i;
+                while i < stop
+                    && is_ident_byte(clean[i])
+                    && clean[i] != b'.'
+                    && !(in_sql && clean[i] == b'-' && i + 1 < stop && clean[i + 1] == b'-')
+                {
+                    i += 1;
+                }
+                let word = &clean[begin..i];
+                if in_sql {
+                    if word.eq_ignore_ascii_case(b"END-EXEC") {
+                        in_sql = false;
+                    }
+                } else {
+                    in_sql = after_exec && word.eq_ignore_ascii_case(b"SQL");
+                    after_exec = !in_sql && word.eq_ignore_ascii_case(b"EXEC");
+                }
             } else {
+                if !c.is_ascii_whitespace() {
+                    after_exec = false;
+                }
                 i += 1;
             }
         }
@@ -632,7 +675,15 @@ impl Literals {
                 ),
                 None => (None, format!("SET ENTRY {} (line {line})", &c[4])),
             };
-            lit.add(c[1].to_ascii_uppercase(), value, what);
+            let targets: Vec<_> = c[1].split_whitespace().collect();
+            // The receiver capture can span earlier SET statements; only the last one applies.
+            let first = targets
+                .iter()
+                .rposition(|target| target.eq_ignore_ascii_case("SET"))
+                .map_or(0, |i| i + 1);
+            for target in &targets[first..] {
+                lit.add(target.to_ascii_uppercase(), value.clone(), what.clone());
+            }
         }
         lit
     }
@@ -691,13 +742,21 @@ impl Literals {
 fn move_targets(rest: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut skip_next = false;
-    for raw in rest.split(|c: char| c.is_whitespace() || c == ',') {
-        if raw.is_empty() {
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() || bytes[i] == b',' {
+            i += 1;
             continue;
         }
-        let ends = raw.ends_with('.');
-        let tok = raw.trim_end_matches('.');
-        let tok = tok.split('(').next().unwrap_or(tok).to_ascii_uppercase();
+        let start = i;
+        while i < bytes.len()
+            && !bytes[i].is_ascii_whitespace()
+            && !matches!(bytes[i], b',' | b'.' | b'(')
+        {
+            i += 1;
+        }
+        let tok = rest[start..i].to_ascii_uppercase();
         if skip_next {
             skip_next = false;
         } else if tok == "OF" || tok == "IN" {
@@ -713,7 +772,26 @@ fn move_targets(rest: &str) -> Vec<String> {
         } else if !tok.is_empty() {
             break; // a literal or an operator is not a receiving item: the list has ended
         }
-        if ends {
+        // A receiver (or its OF/IN qualifier) can carry a spaced subscript or reference
+        // modifier. Consume the whole group before looking for the next receiver or verb.
+        if i < bytes.len() && bytes[i] == b'(' {
+            let mut depth = 0usize;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        if i < bytes.len() && bytes[i] == b'.' {
             break;
         }
     }
@@ -798,6 +876,7 @@ impl Pass<'_> {
         if name.is_empty() || !name.as_bytes()[0].is_ascii_alphabetic() {
             return;
         }
+        let name = name.to_ascii_uppercase();
         self.out
             .refs
             .push(UnresolvedRef::new(from, name, EdgeKind::References, loc));
@@ -952,9 +1031,8 @@ impl Pass<'_> {
             let whole = c.get(0).unwrap();
             let (from, _) = self.anchors.at(whole.start());
             let loc = self.loc(whole.start(), whole.end());
-            // Literal contents are already masked, so `--` and `/*` here are real comments.
-            let no_lc = RE_SQL_LINE_COMMENT.replace_all(c.get(1).unwrap().as_str(), " ");
-            let body = RE_SQL_BLOCK_COMMENT.replace_all(&no_lc, " ").into_owned();
+            let sql = c.get(1).unwrap();
+            let body = sql_identifiers(sql.as_str(), &self.clean[sql.start()..sql.end()]);
             let words: Vec<String> = body
                 .split_whitespace()
                 .take(4)
@@ -1318,6 +1396,33 @@ fn is_table_name(t: &str) -> bool {
         && !SQL_STOP.contains(&t.to_ascii_uppercase().as_str())
 }
 
+/// Restore ordinary SQL delimited identifiers from the same offsets in `clean`. Single-quoted
+/// literals stay masked; unsupported delimited names keep their quotes and masked contents.
+fn sql_identifiers(code: &str, clean: &str) -> String {
+    let mut body = String::with_capacity(code.len());
+    let mut from = 0;
+    while let Some(open) = code[from..].find('"').map(|i| from + i) {
+        body.push_str(&code[from..open]);
+        let Some(close) = code[open + 1..].find('"').map(|i| open + 1 + i) else {
+            body.push_str(&code[open..]);
+            return body;
+        };
+        let name = &clean[open + 1..close];
+        if !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'#' | b'@'))
+        {
+            body.push_str(name);
+        } else {
+            body.push_str(&code[open..=close]);
+        }
+        from = close + 1;
+    }
+    body.push_str(&code[from..]);
+    body
+}
+
 /// For each byte of `body`, the offset of the innermost unclosed `(` before it (one forward pass).
 fn paren_context(body: &str) -> Vec<Option<usize>> {
     let mut stack: Vec<usize> = Vec::new();
@@ -1401,7 +1506,9 @@ fn table_list(rest: &str) -> Vec<String> {
                 i += 1;
             }
             let name = rest[start..i].trim_end_matches('.').to_ascii_uppercase();
-            if !is_table_name(&name) {
+            // A remaining quote is a masked, unsupported identifier part. Do not report its
+            // preceding schema as a table (e.g. APP."MY TABLE").
+            if !is_table_name(&name) || bytes.get(i) == Some(&b'"') {
                 break;
             }
             out.push(name);
@@ -1614,6 +1721,29 @@ mod tests {
     }
 
     #[test]
+    fn lowercase_sql_host_variable_reference_is_folded() {
+        let text = program(
+            "       01 ws-price pic 9.\n",
+            "           exec sql select a into :ws-price from t1 end-exec.\n",
+        )
+        .to_ascii_lowercase();
+        let ex = run("cbl/P.cbl", &text);
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Field && n.name == "WS-PRICE")
+        );
+        let refs: Vec<_> = ex
+            .refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::References)
+            .map(|r| r.raw_name.as_str())
+            .collect();
+        assert!(refs.contains(&"WS-PRICE"), "{refs:?}");
+        assert!(!refs.contains(&"ws-price"), "{refs:?}");
+    }
+
+    #[test]
     fn redefines_and_occurs_depending_are_references() {
         // The generic qualified-word capture replaced the explicit REDEFINES/OCCURS patterns.
         let ex = run(
@@ -1644,6 +1774,72 @@ mod tests {
         let f = ex.nodes.iter().find(|n| n.name == "WS-PGM").unwrap();
         assert_eq!(f.metadata["dynamic_call"]["status"], "resolved");
         assert_eq!(f.metadata["dynamic_call"]["value"], "PRICEPGM");
+    }
+
+    #[test]
+    fn set_entry_assigns_every_receiver() {
+        let ex = run(
+            "cbl/P.cbl",
+            &program(
+                "       01 P1 USAGE PROGRAM-POINTER.\n       01 P2 USAGE PROGRAM-POINTER.\n",
+                "           SET P1 P2 TO ENTRY 'PRICEPGM'.\n           CALL P2.\n",
+            ),
+        );
+        let c = calls(&ex);
+        assert!(
+            c.contains(&format!("{COBOL_DYNAMIC_CALL_PREFIX}PRICEPGM")),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn set_entry_receivers_start_after_last_set() {
+        let text = program(
+            "       01 WS-FLAG PIC X(8).\n       01 P1 USAGE PROGRAM-POINTER.\n",
+            "           SET WS-FLAG TO TRUE\n           SET P1 TO ENTRY 'PRICEPGM'\n           CALL WS-FLAG\n           CALL P1\n",
+        );
+        let ex = run("cbl/P.cbl", &text);
+        let c = calls(&ex);
+        assert!(
+            c.contains(&"cobol-dynamic-call:PRICEPGM".to_string()),
+            "{c:?}"
+        );
+        assert!(
+            c.contains(&"cobol-dynamic-var:WS-FLAG".to_string()),
+            "{c:?}"
+        );
+        let flag_call = text.find("CALL WS-FLAG").unwrap();
+        let flag_names: Vec<_> = ex
+            .refs
+            .iter()
+            .filter(|r| {
+                r.kind == EdgeKind::Calls
+                    && (flag_call..flag_call + "CALL WS-FLAG".len())
+                        .contains(&(r.location.span.start_byte as usize))
+            })
+            .map(|r| r.raw_name.as_str())
+            .collect();
+        assert_eq!(flag_names, vec!["cobol-dynamic-var:WS-FLAG"]);
+    }
+
+    #[test]
+    fn move_receivers_skip_spaced_and_nested_parentheses() {
+        for receiver in ["WS-A(I + 1)", "WS-A((I + 1) * 2)", "WS-A(I : 1 + J)"] {
+            let ex = run(
+                "cbl/P.cbl",
+                &program(
+                    "       01 WS-A PIC X(8) OCCURS 10 TIMES.\n       01 WS-PGM PIC X(8).\n",
+                    &format!(
+                        "           MOVE 'PRICEPGM' TO {receiver} WS-PGM.\n           CALL WS-PGM.\n"
+                    ),
+                ),
+            );
+            let c = calls(&ex);
+            assert!(
+                c.contains(&format!("{COBOL_DYNAMIC_CALL_PREFIX}PRICEPGM")),
+                "{receiver}: {c:?}"
+            );
+        }
     }
 
     fn lit(data: &str, body: &str) -> Literals {
@@ -1935,6 +2131,170 @@ mod tests {
             "X",
         ] {
             assert!(kinds(bogus).is_empty(), "{bogus} is not a table");
+        }
+    }
+
+    #[test]
+    fn sql_line_comment_does_not_end_exec_block() {
+        let text = program(
+            "",
+            "           EXEC SQL SELECT A INTO :H FROM T1 -- END-EXEC here\n                WHERE X IN (SELECT B FROM T2) END-EXEC.\n",
+        );
+        let ex = run("cbl/P.cbl", &text);
+        let (_, code) = lexical_views(&text, false);
+        assert_eq!(RE_EXEC_SQL.captures_iter(&code).count(), 1);
+        let body = RE_EXEC_SQL.captures(&code).unwrap();
+        assert!(
+            body[1].contains("FROM T2"),
+            "one block includes the subselect"
+        );
+        for table in ["T1", "T2"] {
+            assert!(
+                edge_to(
+                    &ex,
+                    &edge_tags::other(edge_tags::READS),
+                    &Symbol::synthetic("db2", table).id(),
+                )
+                .is_some(),
+                "missing read of {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_block_comment_hides_cics_call() {
+        for comment in [
+            "/* EXEC CICS LINK PROGRAM('XPGM') END-EXEC */",
+            "/* EXEC CICS LINK\n                PROGRAM('XPGM') END-EXEC */",
+        ] {
+            let ex = run(
+                "cbl/P.cbl",
+                &program(
+                    "",
+                    &format!("           EXEC SQL {comment} SELECT A INTO :H FROM T1 END-EXEC.\n"),
+                ),
+            );
+            assert!(!calls(&ex).iter().any(|name| name == "XPGM"));
+            assert!(
+                edge_to(
+                    &ex,
+                    &edge_tags::other(edge_tags::READS),
+                    &Symbol::synthetic("db2", "T1").id(),
+                )
+                .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn sql_literal_comment_marker_keeps_table_read() {
+        let ex = run(
+            "cbl/P.cbl",
+            &program(
+                "",
+                "           EXEC SQL SELECT A INTO :H FROM T1 WHERE C = '--' END-EXEC.\n",
+            ),
+        );
+        assert!(
+            edge_to(
+                &ex,
+                &edge_tags::other(edge_tags::READS),
+                &Symbol::synthetic("db2", "T1").id(),
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn sql_delimited_qualified_identifier_reads_table() {
+        for comment in ["", "/* shift */ -- shift again\n                "] {
+            let ex = run(
+                "cbl/P.cbl",
+                &program(
+                    "",
+                    &format!(
+                        "           EXEC SQL {comment}SELECT C INTO :H FROM \"APP\".\"ORDERS\" END-EXEC.\n"
+                    ),
+                ),
+            );
+            assert!(
+                edge_to(
+                    &ex,
+                    &edge_tags::other(edge_tags::READS),
+                    &Symbol::synthetic("db2", "APP.ORDERS").id(),
+                )
+                .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn sql_delimited_identifier_writes_table() {
+        let ex = run(
+            "cbl/P.cbl",
+            &program(
+                "",
+                "           EXEC SQL INSERT INTO \"T1\" VALUES (1) END-EXEC.\n",
+            ),
+        );
+        assert!(
+            edge_to(
+                &ex,
+                &edge_tags::other(edge_tags::WRITES),
+                &Symbol::synthetic("db2", "T1").id(),
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn sql_nonordinary_delimited_identifier_stays_missing() {
+        for table in [
+            "\"MY TABLE\"",
+            "\"APP\".\"MY TABLE\"",
+            "\"MY TABLE\".\"T1\"",
+        ] {
+            let ex = run(
+                "cbl/P.cbl",
+                &program(
+                    "",
+                    &format!("           EXEC SQL SELECT C INTO :H FROM {table} END-EXEC.\n"),
+                ),
+            );
+            assert!(
+                !ex.nodes
+                    .iter()
+                    .any(|n| n.kind == NodeKind::Other("db2_table".to_string())),
+                "unsupported table {table} must not produce a partial name"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_comments_preserve_lexical_offsets() {
+        for newline in ["\n", "\r\n"] {
+            let src = concat!(
+                "000100 exec\n",
+                "000200 sql SELECT '--', 'é/*' FROM T1-- END-EXEC\n",
+                "000300 /* comment\n",
+                "      * END-EXEC */ ignored card\n",
+                "000400 EXEC CICS LINK PROGRAM('XPGM') END-EXEC */\n",
+                "000500 WHERE C = '/*' END-EXEC.\n",
+                "000600 DISPLAY '--outside'.\n",
+            )
+            .replace('\n', newline);
+            let (clean, code) = lexical_views(&src, false);
+            for view in [&clean, &code] {
+                assert_eq!(view.len(), src.len());
+                assert_eq!(
+                    view.match_indices('\n').map(|(i, _)| i).collect::<Vec<_>>(),
+                    src.match_indices('\n').map(|(i, _)| i).collect::<Vec<_>>()
+                );
+                assert!(!view.contains("comment") && !view.contains("XPGM"));
+                assert!(view.contains("WHERE C ="));
+            }
+            assert!(clean.contains("'--'") && clean.contains("'é/*'"));
+            assert!(clean.contains("'--outside'"));
         }
     }
 

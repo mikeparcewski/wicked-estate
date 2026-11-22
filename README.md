@@ -186,13 +186,13 @@ wicked-estate watch ./my-project --db graph.db
 - **Rules engine layer** — IBM ODM BAL/IRL, Camunda DMN, CLIPS/Jess, Drools GDST, Excel/XLSX decision tables, Salesforce Flow, AWS Config Rules, Azure Policy extracted into the same graph as code. NodeKind::{Rule,RuleSet,Condition,Action,Fact} + EdgeKind::{Governs,Evaluates,Produces,InvokedBy}. `RulesInventory` MCP tool lists engines + calling code. `RulesBridgeResolver` connects code call sites to real RuleSet nodes.
 - **Hybrid + semantic retrieval** — graph + FTS5 core, embeddings an optional sidecar fused via RRF.
   Three embedder tiers: lexical (default) → model2vec (static, light) → fastembed (ONNX/BGE).
-- **MCP server** — exposes **33 tools across 3 domains** (estate, memory, knowledge) to agents over
+- **MCP server** — exposes **36 tools across 3 domains** (estate, memory, knowledge) to agents over
   JSON-RPC, following a strict runtime-behavior contract (cap output, report staleness, never
   error-early, label confidence): 12 estate tools (SearchEntity, RetrieveEntity, TraverseGraph, Path,
   BlastRadius, FetchContent, ContextBundle, RulesInventory, rules.recall, RankHotspots, Communities,
-  Lineage), 7 memory tools (memory.capture/recall/reflect/erase/learn/coverage/list) plus the
-  memory-domain proposal queue's 4 tools (proposal.submit/list/approve/reject), and 10 knowledge
-  tools (knowledge.ingest/write/relate/recall/coverage/relate_code/recall_about_code, plus the
+  Lineage), 9 memory tools (memory.capture/recall/reflect/erase/retire/unretire/learn/coverage/list) plus the
+  memory-domain proposal queue's 4 tools (proposal.submit/list/approve/reject), and 11 knowledge
+  tools (knowledge.ingest/forget/write/relate/recall/coverage/relate_code/recall_about_code, plus the
   knowledge plane's replace_source/source_catalog/neighbors).
 - **Requirement ↔ code linking** — annotate nodes with `description` / `requirement` /
   `requirement_validated` and query by requirement.
@@ -230,11 +230,11 @@ swappable impl behind a seam:
 
 ## MCP
 
-`wicked-estate-mcp` is a stdio MCP server (JSON-RPC 2.0) exposing **33 tools across 3 domains**:
+`wicked-estate-mcp` is a stdio MCP server (JSON-RPC 2.0) exposing **36 tools across 3 domains**:
 
 - **Estate** (12 tools): `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `Path`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `rules.recall`, `RankHotspots`, `Communities`, `Lineage`
-- **Memory** (7 tools): `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.learn`, `memory.coverage`, `memory.list`
-- **Knowledge** (10 tools): `knowledge.ingest`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`, `knowledge.replace_source`, `knowledge.source_catalog`, `knowledge.neighbors`
+- **Memory** (9 tools): `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.retire`, `memory.unretire`, `memory.learn`, `memory.coverage`, `memory.list`
+- **Knowledge** (11 tools): `knowledge.ingest`, `knowledge.forget`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`, `knowledge.replace_source`, `knowledge.source_catalog`, `knowledge.neighbors`
 - **Proposal queue** (4 tools, memory-domain): `proposal.submit`, `proposal.list`, `proposal.approve`, `proposal.reject`
 
 Register it in **Claude Code, Cursor, Antigravity, or Codex**. Per-client config: **[docs/mcp-integration.md](./docs/mcp-integration.md)**.
@@ -293,8 +293,10 @@ Per the project's "every done needs a still-not-done" rule:
 - **Secret redaction** ([docs/secret-redaction.md](./docs/secret-redaction.md)): committed config
   values are default-deny and code literals are masked where a secret is detected. Not detected: a
   secret under an innocent name in code, or one placed inside a hostname or repository owner. A
-  masked value's length is visible. Memory and knowledge stores are not redacted yet (#406).
-  Stores written before 0.33.0 are cleaned on their next `index` or by `wicked-estate redact-store`.
+  masked value's length is visible. Memory and knowledge text masks token shapes and secret-named
+  assignments on capture and read (#406); secrets under innocent names in prose are not detected.
+  Clean existing memory/knowledge stores with `wicked-estate redact-store --db <path>`.
+  Code stores written before 0.33.0 are cleaned on their next `index` or by `redact-store`.
 
 ## Docs
 
