@@ -205,3 +205,62 @@ fn pages_join_with_the_unpaged_answers_via_row_for_row() {
     assert!(pages > 1);
     assert_eq!(seen.len(), expected.len());
 }
+
+/// #559 4(a): a row's `via` names an inner row that sits on ANOTHER page and at another depth,
+/// and the pages still join: every via target is the start or a row some page returned, one ring
+/// in.
+#[test]
+fn via_joins_across_pages_to_an_inner_row_on_another_page() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("graph.db");
+    let inner: Vec<String> = (0..300)
+        .map(|i| format!("inner_caller_with_a_long_descriptive_name_{i:04}"))
+        .collect();
+    let outer: Vec<String> = (0..300)
+        .map(|i| format!("outer_caller_with_a_long_descriptive_name_{i:04}"))
+        .collect();
+    let mut ids = vec!["t".to_string()];
+    ids.extend(inner.iter().cloned());
+    ids.extend(outer.iter().cloned());
+    let mut edges: Vec<(&str, &str, EdgeKind)> = Vec::new();
+    for (i, o) in inner.iter().zip(&outer) {
+        edges.push((i.as_str(), "t", EdgeKind::Calls));
+        edges.push((o.as_str(), i.as_str(), EdgeKind::Calls));
+    }
+    fixture(&db, &ids, &edges);
+    // id -> (page, depth, via)
+    let mut rows: BTreeMap<String, (usize, u64, Value)> = BTreeMap::new();
+    let mut cursor: Option<String> = None;
+    let mut page = 0;
+    loop {
+        let doc = blast(&db, cursor.as_deref());
+        for r in doc["dependents"].as_array().unwrap() {
+            let id = r["id"].as_str().unwrap().to_string();
+            let prior = rows.insert(
+                id.clone(),
+                (page, r["depth"].as_u64().unwrap(), r["via"].clone()),
+            );
+            assert!(prior.is_none(), "duplicate row {id}");
+        }
+        page += 1;
+        cursor = doc["next_cursor"].as_str().map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+        assert!(page < 100, "paging must terminate");
+    }
+    assert_eq!(rows.len(), 600);
+    let mut across_pages = 0;
+    for (i, o) in inner.iter().zip(&outer) {
+        let (outer_page, outer_depth, via) = &rows[o];
+        assert_eq!(*outer_depth, 2, "{o}");
+        assert_eq!(via, &json!([{"id": i, "kind": "calls"}]), "{o}");
+        let (inner_page, inner_depth, _) = &rows[i];
+        assert_eq!(*inner_depth, 1, "{i}");
+        if inner_page != outer_page {
+            across_pages += 1;
+        }
+    }
+    assert!(page > 1, "the answer is paged");
+    assert!(across_pages > 0, "some via target sits on another page");
+}

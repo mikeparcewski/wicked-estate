@@ -20,7 +20,9 @@ pub const LINK_RESOLVED_BY: &str = "wicked-link";
 pub const VIA_CAP: usize = 3;
 
 /// A real dependency edge from a blast-radius row to the immediately inner ring.
+/// `#[non_exhaustive]` (wicked-estate#559) so a later field is not a semver break.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ViaEdge {
     pub id: String,
     /// The edge kind in its wire form (`"calls"`, `{"other": "<tag>"}`), as `path --json` hops.
@@ -31,6 +33,13 @@ pub struct ViaEdge {
 /// returned row or a start) qualify. Deduplicate across walks, order by edge kind (its declaration
 /// order: total and stable) then target id, and count every edge omitted by the per-row cap.
 /// Structural edges participate too: `contains` is how a File row entered the answer.
+///
+/// Not listed and not counted (wicked-estate#559): an edge whose target is neither a row nor a
+/// start, i.e. an import-transit File the answer dropped as a row. The caller passes no depth for
+/// such a node, so whether its edge reaches the inner ring is unknown, and counting it in the
+/// omitted count would claim a predecessor that may sit on the same or an outer ring. MCP
+/// BlastRadius states the cut as its own diagnostic (`N importing file(s) excluded from
+/// dependents`). A row reached only through such a File carries `via: []`, `via_omitted: 0`.
 pub fn predecessor_edges(
     edges: &[Edge],
     depth_of_row: &BTreeMap<String, u32>,

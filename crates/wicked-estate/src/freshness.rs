@@ -836,49 +836,12 @@ impl FreshnessProbe {
                 .as_object_mut()
                 .filter(|object| object.contains_key("crossings") && !object.contains_key("link"))
             {
-                let statuses = crate::link::answer_statuses(store);
-                for status in &statuses {
-                    if !status.stale {
-                        continue;
-                    }
-                    let reason = if !status.stale_labels.is_empty() {
-                        format!(
-                            "members re-indexed or removed: {}",
-                            status.stale_labels.join(", ")
-                        )
-                    } else if status.last_error.is_some() {
-                        "the last link failed".to_string()
-                    } else {
-                        "the linker changed".to_string()
-                    };
-                    let labels: Vec<&str> =
-                        status.coverage.iter().map(|c| c.label.as_str()).collect();
-                    diags.push(format!(
-                        "LINK-STALE: project '{}' links are stale ({reason}); cross-repo \
-                         dependents may be missing or outdated - re-run `wicked-estate link \
-                         --db {} --project {} --labels {}`",
-                        status.project,
-                        self.db,
-                        status.project,
-                        labels.join(",")
-                    ));
-                }
-                let links =
-                    crate::link::bounded_json(statuses, wicked_estate_retrieve::LINK_RESERVE);
-                if let Some(rows) = links.as_array() {
-                    for status in rows {
-                        if let Some(omitted) =
-                            status["coverage_omitted"].as_u64().filter(|n| *n > 0)
-                        {
-                            let project = status["project"].as_str().unwrap_or_default();
-                            diags.push(format!(
-                                "LINK: project '{project}' omitted {omitted} member coverage \
-                                 entries; see `wicked-estate link --project {project} --status \
-                                 --json` for the full list"
-                            ));
-                        }
-                    }
-                }
+                let (links, lines) = crate::link::answer_annotation(
+                    store,
+                    &self.db,
+                    wicked_estate_retrieve::LINK_RESERVE,
+                );
+                diags.extend(lines);
                 object.insert("link".to_string(), links);
             }
             let repos = repo_scope::registry(store);
@@ -1184,6 +1147,108 @@ mod tests {
         probe.annotate(&mut content, &mut diags);
         assert_eq!(content["link"], json!([{"existing": true}]));
         assert!(!diags.iter().any(|d| d.starts_with("LINK-STALE:")));
+    }
+
+    /// Index `labels` as tiny one-file repos into an in-memory store and link them as project `p`.
+    fn linked_probe(root: &std::path::Path, labels: &[String]) -> FreshnessProbe {
+        let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        for label in labels {
+            let dir = root.join(label);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("a.ts"), "export function f() {}\n").unwrap();
+            crate::index_path_as(&mut store, &dir, Some(label)).unwrap();
+        }
+        crate::link::link_project(&mut store, "p", labels).unwrap();
+        FreshnessProbe::with_store(":memory:", Some(Box::new(store)))
+    }
+
+    /// #559 item 1: the `link` array and the LINK-STALE / LINK lines fit in LINK_RESERVE together,
+    /// on a stale project with many long-named members, and every cut is counted. On main the
+    /// LINK-STALE line alone listed every member twice (reason and `--labels`), unbounded.
+    #[test]
+    fn link_block_and_its_diagnostics_fit_the_link_reserve_559() {
+        let root = tempfile::tempdir().unwrap();
+        let labels: Vec<String> = (0..30)
+            .map(|i| format!("member_{i:02}_with_a_rather_long_descriptive_label"))
+            .collect();
+        let mut probe = linked_probe(root.path(), &labels);
+        for label in &labels {
+            crate::index_path_as(
+                probe.store.as_mut().unwrap().as_mut(),
+                &root.path().join(label),
+                Some(label),
+            )
+            .unwrap();
+        }
+        let mut content = json!({"crossings": []});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        let link_lines: Vec<&String> = diags
+            .iter()
+            .filter(|d| d.starts_with("LINK-STALE:") || d.starts_with("LINK:"))
+            .collect();
+        let used = content["link"].to_string().len()
+            + link_lines.iter().map(|d| d.len() + 1).sum::<usize>();
+        assert!(
+            used <= wicked_estate_retrieve::LINK_RESERVE,
+            "link block + lines = {used} chars: {link_lines:?}"
+        );
+        let row = &content["link"][0];
+        assert_eq!(row["stale"], true, "{row}");
+        let kept = |list: &str| row[list].as_array().map_or(0, Vec::len) as u64;
+        let cut = |count: &str| row[count].as_u64().unwrap_or(0);
+        assert_eq!(kept("coverage") + cut("coverage_omitted"), 30, "{row}");
+        assert_eq!(
+            kept("stale_labels") + cut("stale_labels_omitted"),
+            30,
+            "{row}"
+        );
+        assert!(
+            link_lines.iter().any(|d| d.starts_with("LINK-STALE:")),
+            "{link_lines:?}"
+        );
+        assert!(
+            link_lines
+                .iter()
+                .any(|d| d.starts_with("LINK: member entries omitted")),
+            "{link_lines:?}"
+        );
+    }
+
+    /// #559 item 2: the suggested relink names only members still in the graph. A member whose
+    /// label was unregistered stays in coverage (and is reported stale), but `link --labels` with
+    /// it would fail.
+    #[test]
+    fn relink_command_names_only_members_still_in_the_graph_559() {
+        let root = tempfile::tempdir().unwrap();
+        let labels: Vec<String> = ["provider", "consumer", "retired"]
+            .map(String::from)
+            .to_vec();
+        let mut probe = linked_probe(root.path(), &labels);
+        // What a removal leaves: the label no longer in the registry the indexer writes
+        // (repo_scope.rs `write_record`: a JSON array of labels under `repo_labels`).
+        probe
+            .store
+            .as_mut()
+            .unwrap()
+            .meta_put("repo_labels", r#"["consumer","provider"]"#)
+            .unwrap();
+        let mut content = json!({"crossings": []});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        assert_eq!(content["link"][0]["stale_labels"], json!(["retired"]));
+        let line = diags
+            .iter()
+            .find(|d| d.starts_with("LINK-STALE: project 'p'"))
+            .expect("a LINK-STALE line");
+        assert!(
+            line.contains("members re-indexed or removed: retired"),
+            "{line}"
+        );
+        let (_, command) = line.split_once("--labels ").expect("a relink command");
+        let named: Vec<&str> = command.trim_end_matches('`').split(',').collect();
+        assert_eq!(named.len(), 2, "{line}");
+        assert!(!named.contains(&"retired"), "{line}");
     }
 
     #[test]

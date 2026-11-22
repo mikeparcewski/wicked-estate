@@ -139,6 +139,36 @@ fn blast_and_path_report_live_link_state_on_repeated_calls() {
         assert!(chars <= wicked_estate_retrieve::R4_CHAR_BUDGET);
     }
 
+    // #559 4(b): a link-state change with NO graph_version bump (a failed link run only writes
+    // its `last_error` meta, link.rs `key(project, "last_error")`) still shows. The link block is
+    // added after the response cache, so these calls are cache hits that carry the live state.
+    let version = store.meta_get("graph_version").unwrap();
+    store
+        .meta_set("link:p:last_error", "provider: manifest unreadable")
+        .unwrap();
+    assert_eq!(
+        store.meta_get("graph_version").unwrap(),
+        version,
+        "the link-state change did not bump graph_version"
+    );
+    for _ in 0..2 {
+        let (content, diags) = mcp.tool("BlastRadius", args.clone());
+        assert_eq!(content["link"][0]["stale"], true, "{content}");
+        assert_eq!(
+            content["link"][0]["last_error"], "provider: manifest unreadable",
+            "{content}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.starts_with("LINK-STALE:") && d.contains("the last link failed")),
+            "{diags:?}"
+        );
+    }
+    store.meta_set("link:p:last_error", "").unwrap();
+    let (content, _) = mcp.tool("BlastRadius", args.clone());
+    assert_eq!(content["link"][0]["stale"], false, "{content}");
+
     wicked_estate::index_path_as(&mut store, &consumer, Some("consumer")).unwrap();
     // The same request observes the new state. Repeating it also checks its warm L1 hit:
     // graph-version invalidation may discard the pre-index cache entry.

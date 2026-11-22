@@ -552,40 +552,164 @@ pub fn answer_statuses(store: &dyn GraphStoreMutExt) -> Vec<LinkStatus> {
 
 /// The answers' `link` array, bounded to `budget` chars: while it is longer, the longest coverage
 /// list (ties: the first project) loses its last member entry, and that project's object counts the
-/// cut in `coverage_omitted` (absent when nothing was cut; `link --status` stays complete). The
-/// fixed status fields are never dropped, even when they alone exceed `budget`. A JSON-level count,
-/// not a [`LinkStatus`] field, so the public struct keeps its shape.
+/// cut in `coverage_omitted` (absent when nothing was cut; `link --status` stays complete). Once no
+/// coverage is left, the longest `stale_labels` list is cut the same way and counted in
+/// `stale_labels_omitted` (wicked-estate#559). The other status fields are never dropped, even when
+/// they alone exceed `budget`. JSON-level counts, not [`LinkStatus`] fields, so the public struct
+/// keeps its shape.
 pub fn bounded_json(statuses: Vec<LinkStatus>, budget: usize) -> serde_json::Value {
     let mut rows: Vec<serde_json::Value> = statuses
         .iter()
         .map(|s| serde_json::to_value(s).unwrap_or_default())
         .collect();
-    let coverage_len = |row: &serde_json::Value| row["coverage"].as_array().map_or(0, Vec::len);
+    let list_len = |row: &serde_json::Value, list: &str| row[list].as_array().map_or(0, Vec::len);
     loop {
         let value = serde_json::Value::Array(rows.clone());
         if value.to_string().len() <= budget {
             return value;
         }
-        let longest = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| coverage_len(row) > 0)
-            .max_by(|(ai, a), (bi, b)| {
-                coverage_len(a)
-                    .cmp(&coverage_len(b))
-                    .then_with(|| bi.cmp(ai))
+        let longest = |list: &str| {
+            rows.iter()
+                .enumerate()
+                .filter(|(_, row)| list_len(row, list) > 0)
+                .max_by(|(ai, a), (bi, b)| {
+                    list_len(a, list)
+                        .cmp(&list_len(b, list))
+                        .then_with(|| bi.cmp(ai))
+                })
+                .map(|(index, _)| index)
+        };
+        let Some((index, list, count)) = longest("coverage")
+            .map(|i| (i, "coverage", "coverage_omitted"))
+            .or_else(|| {
+                longest("stale_labels").map(|i| (i, "stale_labels", "stale_labels_omitted"))
             })
-            .map(|(index, _)| index);
-        let Some(index) = longest else {
+        else {
             return value;
         };
         let row = &mut rows[index];
-        if let Some(coverage) = row["coverage"].as_array_mut() {
-            coverage.pop();
+        if let Some(items) = row[list].as_array_mut() {
+            items.pop();
         }
-        let omitted = row["coverage_omitted"].as_u64().unwrap_or(0) + 1;
-        row["coverage_omitted"] = serde_json::json!(omitted);
+        let omitted = row[count].as_u64().unwrap_or(0) + 1;
+        row[count] = serde_json::json!(omitted);
     }
+}
+
+/// Most names one link diagnostic lists before it counts the rest.
+const DIAG_NAME_CAP: usize = 3;
+/// Room kept for the one `LINK:` coverage-omission line [`answer_annotation`] may add.
+const OMITTED_LINE_RESERVE: usize = 320;
+
+/// `names`, at most [`DIAG_NAME_CAP`] of them, then `+N more`.
+fn capped_names<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let names: Vec<&str> = names.into_iter().collect();
+    let mut out = names
+        .iter()
+        .take(DIAG_NAME_CAP)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > DIAG_NAME_CAP {
+        out.push_str(&format!(", +{} more", names.len() - DIAG_NAME_CAP));
+    }
+    out
+}
+
+/// A validated member that is no longer in the graph: removed, or its label unregistered.
+fn member_gone(store: &dyn GraphStoreMutExt, label: &str) -> bool {
+    !label.is_empty()
+        && (repo_scope::record(store, label).is_none()
+            || !repo_scope::labels(store).iter().any(|l| l == label))
+}
+
+/// What the transport adds to an answer that carries `crossings` (DES-S2 §5): the bounded `link`
+/// array and its diagnostics, together within `budget` chars (wicked-estate#559; the answer
+/// reserves [`wicked_estate_retrieve::LINK_RESERVE`] for both). One `LINK-STALE:` line per stale
+/// project names the relink command over the members still in the graph; when those lines would
+/// take more than half the budget they fold into one line naming the projects. The `link` array
+/// gets the rest, less room for the one `LINK:` line that counts cut coverage. `db` is the path
+/// the command names.
+pub fn answer_annotation(
+    store: &dyn GraphStoreMutExt,
+    db: &str,
+    budget: usize,
+) -> (serde_json::Value, Vec<String>) {
+    let statuses = answer_statuses(store);
+    let chars = |lines: &[String]| lines.iter().map(|l| l.len() + 1).sum::<usize>();
+    let stale: Vec<&LinkStatus> = statuses.iter().filter(|s| s.stale).collect();
+    let mut lines: Vec<String> = stale
+        .iter()
+        .map(|status| {
+            let reason = if !status.stale_labels.is_empty() {
+                format!(
+                    "members re-indexed or removed: {}",
+                    capped_names(status.stale_labels.iter().map(String::as_str))
+                )
+            } else if status.last_error.is_some() {
+                "the last link failed".to_string()
+            } else {
+                "the linker changed".to_string()
+            };
+            // A removed member is not relinked: naming it would make the command fail.
+            let labels: Vec<&str> = status
+                .coverage
+                .iter()
+                .map(|c| c.label.as_str())
+                .filter(|label| !member_gone(store, label))
+                .collect();
+            let project = &status.project;
+            let action = if labels.is_empty() {
+                "no member is still in the graph; re-index its members, then relink".to_string()
+            } else {
+                format!(
+                    "re-run `wicked-estate link --db {db} --project {project} --labels {}`",
+                    labels.join(",")
+                )
+            };
+            format!(
+                "LINK-STALE: project '{project}' links are stale ({reason}); cross-repo \
+                 dependents may be missing or outdated - {action}"
+            )
+        })
+        .collect();
+    if chars(&lines) > budget / 2 {
+        lines = vec![format!(
+            "LINK-STALE: {} project(s) have stale links ({}); cross-repo dependents may be \
+             missing or outdated - see `wicked-estate link --db {db} --project <id> --status \
+             --json` for the members to relink",
+            stale.len(),
+            capped_names(stale.iter().map(|s| s.project.as_str()))
+        )];
+    }
+    let links = bounded_json(
+        statuses,
+        budget.saturating_sub(chars(&lines) + OMITTED_LINE_RESERVE),
+    );
+    let cut: Vec<(String, u64)> = links
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let omitted = row["coverage_omitted"].as_u64().unwrap_or(0)
+                + row["stale_labels_omitted"].as_u64().unwrap_or(0);
+            (omitted > 0).then(|| {
+                (
+                    row["project"].as_str().unwrap_or_default().to_string(),
+                    omitted,
+                )
+            })
+        })
+        .collect();
+    if !cut.is_empty() {
+        let named: Vec<String> = cut.iter().map(|(p, n)| format!("'{p}' ({n})")).collect();
+        lines.push(format!(
+            "LINK: member entries omitted for project(s) {}; see `wicked-estate link --project \
+             <id> --status --json` for the full lists",
+            capped_names(named.iter().map(String::as_str))
+        ));
+    }
+    (links, lines)
 }
 
 /// Remember `project` as linked in this store (so answers can find its status).
@@ -612,9 +736,7 @@ pub fn status(store: &dyn GraphStoreMutExt, project: &str) -> Option<LinkStatus>
     let mut stale_labels = Vec::new();
     // Every validated member must still exist, with the generation it was linked at.
     for label in validated_members(store, project) {
-        let gone = !label.is_empty()
-            && (repo_scope::record(store, &label).is_none()
-                || !repo_scope::labels(store).contains(&label));
+        let gone = member_gone(store, &label);
         let (live, indexing) = token(store, &label);
         if gone || indexing || tokens.get(&label) != Some(&live) {
             stale_labels.push(label);
@@ -847,6 +969,32 @@ fn installed_artifact(
 #[cfg(test)]
 mod answer_tests {
     use super::*;
+
+    #[test]
+    fn bounded_json_cuts_and_counts_stale_labels_once_coverage_is_gone_559() {
+        let status = LinkStatus {
+            project: "p".into(),
+            generation: 1,
+            stale: true,
+            stale_labels: (0..40)
+                .map(|i| format!("member_{i:02}_with_a_long_descriptive_name"))
+                .collect(),
+            coverage: vec![MemberCoverage {
+                label: "only".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let bounded = bounded_json(vec![status], 600);
+        assert!(bounded.to_string().len() <= 600, "{bounded}");
+        let row = &bounded[0];
+        assert_eq!(row["coverage"], serde_json::json!([]));
+        assert_eq!(row["coverage_omitted"], 1);
+        let kept = row["stale_labels"].as_array().unwrap().len() as u64;
+        assert!(kept > 0, "{row}");
+        assert_eq!(kept + row["stale_labels_omitted"].as_u64().unwrap(), 40);
+        assert_eq!(row["stale"], true);
+    }
 
     #[test]
     fn answer_status_coverage_is_bounded_and_counts_every_omission() {
