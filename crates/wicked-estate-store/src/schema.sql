@@ -114,6 +114,23 @@ CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
 CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file);
 
+-- Edge contributions (wicked-estate#543), the edge analogue of node_files: for an edges key
+-- asserted by MORE THAN ONE file, one row per asserting file with the Edge JSON that file's
+-- extraction produced. Sparse: a key asserted by one file has no rows (its edges row is the whole
+-- truth), so the table stays small. upsert_edges records both contributions when a second file
+-- asserts a key; remove_file drops the removed file's key groups and re-asserts the survivors, so
+-- the edge stays, owned by another asserting file. Stores written before it start empty: a key
+-- two files asserted is recorded when either file is next indexed.
+CREATE TABLE IF NOT EXISTS edge_files (
+  source INTEGER NOT NULL,  -- sid FK → symbols.sid
+  target INTEGER NOT NULL,  -- sid FK → symbols.sid
+  kind   TEXT    NOT NULL,  -- serialized EdgeKind
+  file   TEXT    NOT NULL,  -- repo-relative asserting file (never '')
+  data   TEXT    NOT NULL,  -- full Edge JSON as this file asserted it
+  PRIMARY KEY (source, target, kind, file)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_files_file ON edge_files(file);
+
 -- TS-S2A support plane (wicked_estate_core::support; docs/ENGINE-CONTRACT.md §3.4). Additive:
 -- `CREATE TABLE IF NOT EXISTS` adds all three to any older DB on open, and while they are empty
 -- every existing code path behaves exactly as before.

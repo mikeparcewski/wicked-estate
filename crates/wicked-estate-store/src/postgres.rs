@@ -223,6 +223,17 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
 CREATE INDEX IF NOT EXISTS idx_edges_file   ON edges(file);
+-- Edge contributions (wicked-estate#543): one row per asserting file for a key asserted by more
+-- than one file (sparse; see the SQLite schema.sql comment).
+CREATE TABLE IF NOT EXISTS edge_files (
+  source TEXT NOT NULL,
+  target TEXT NOT NULL,
+  kind   TEXT NOT NULL,
+  file   TEXT NOT NULL,
+  data   TEXT NOT NULL,
+  PRIMARY KEY (source, target, kind, file)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_files_file ON edge_files(file);
 
 -- TS-S2A support plane (wicked_estate_core::support; docs/ENGINE-CONTRACT.md §3.4) — additive,
 -- created on any older database by this same CREATE ... IF NOT EXISTS DDL on open. Mirrors the
@@ -805,6 +816,10 @@ impl PostgresStore {
                 .execute(&mut *tx)
                 .await?;
             sqlx::query("DELETE FROM edge_base WHERE source = ANY($1) OR target = ANY($1)")
+                .bind(&syms)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM edge_files WHERE source = ANY($1) OR target = ANY($1)")
                 .bind(&syms)
                 .execute(&mut *tx)
                 .await?;
@@ -1431,6 +1446,44 @@ impl GraphWrite for PostgresStore {
             let data = serde_json::to_string(e)?;
             let file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
             let confidence = e.confidence.get() as f64;
+            if !file.is_empty() {
+                // #543 edge contributions (see SqliteStore::upsert_edges): a second asserting
+                // file records the row's contribution and this one; a recorded key records this
+                // file's latest.
+                rt_block(async {
+                    let c = h.as_conn();
+                    sqlx::query(
+                        "INSERT INTO edge_files(source, target, kind, file, data) \
+                         SELECT source, target, kind, file, data FROM edges \
+                         WHERE source = $1 AND target = $2 AND kind = $3 \
+                           AND file NOT IN ('', $4) \
+                         ON CONFLICT DO NOTHING",
+                    )
+                    .bind(&e.source.0)
+                    .bind(&e.target.0)
+                    .bind(&kind)
+                    .bind(file)
+                    .execute(&mut *c)
+                    .await?;
+                    sqlx::query(
+                        "INSERT INTO edge_files(source, target, kind, file, data) \
+                         SELECT $1, $2, $3, $4, $5 WHERE EXISTS( \
+                           SELECT 1 FROM edge_files \
+                           WHERE source = $1 AND target = $2 AND kind = $3) \
+                         ON CONFLICT(source, target, kind, file) \
+                         DO UPDATE SET data = EXCLUDED.data",
+                    )
+                    .bind(&e.source.0)
+                    .bind(&e.target.0)
+                    .bind(&kind)
+                    .bind(file)
+                    .bind(&data)
+                    .execute(&mut *c)
+                    .await?;
+                    Ok::<(), sqlx::Error>(())
+                })
+                .map_err(st)?;
+            }
             rt_block(
                 sqlx::query(
                     // Higher-confidence-wins (W3.4), UNLESS the incoming edge carries more
@@ -1689,6 +1742,40 @@ impl GraphWrite for PostgresStore {
             kept
         };
 
+        // #543: the other files' contributions to every key this file asserted with them,
+        // re-asserted after the deletes (see SqliteStore::remove_file), then the file's key groups
+        // and every group whose source lives in this file are dropped.
+        let survivors: Vec<Edge> = rt_block(async {
+            let c = h.as_conn();
+            let rows: Vec<String> = sqlx::query_scalar(
+                "SELECT ef.data FROM edge_files ef \
+                 WHERE ef.file <> $1 \
+                   AND (ef.source, ef.target, ef.kind) IN \
+                       (SELECT source, target, kind FROM edge_files WHERE file = $1) \
+                   AND ef.source NOT IN (SELECT symbol FROM nodes WHERE file = $1) \
+                   AND EXISTS(SELECT 1 FROM edges e WHERE e.source = ef.source \
+                              AND e.target = ef.target AND e.kind = ef.kind) \
+                 ORDER BY ef.source, ef.target, ef.kind, ef.file",
+            )
+            .bind(file)
+            .fetch_all(&mut *c)
+            .await?;
+            sqlx::query(
+                "DELETE FROM edge_files \
+                 WHERE (source, target, kind) IN \
+                       (SELECT source, target, kind FROM edge_files WHERE file = $1) \
+                    OR source IN (SELECT symbol FROM nodes WHERE file = $1)",
+            )
+            .bind(file)
+            .execute(&mut *c)
+            .await?;
+            Ok::<Vec<String>, sqlx::Error>(rows)
+        })
+        .map_err(st)?
+        .iter()
+        .map(|d| serde_json::from_str::<Edge>(d))
+        .collect::<std::result::Result<_, _>>()?;
+
         // TS-S2A: retire supported keys' base contributions by exactly the edge predicate, and
         // capture the supported rows this DELETE removes (healed below).
         let support = rt_block(pg_support_pre_delete(
@@ -1743,6 +1830,9 @@ impl GraphWrite for PostgresStore {
         .map_err(st)?;
         // Support is producer-owned: re-project every supported edge the deletes removed.
         rt_block(pg_support_post_delete(h.as_conn(), support))?;
+        drop(h);
+        // #543: the other asserting files still assert their edges.
+        self.upsert_edges(&survivors)?;
 
         Ok(())
     }
@@ -1810,6 +1900,16 @@ impl GraphWrite for PostgresStore {
         )
         .map_err(st)?;
         let restored = rt_block(pg_support_post_delete(h.as_conn(), support))?;
+        // #543: a pruned edge's contributions go with it.
+        rt_block(
+            sqlx::query(
+                "DELETE FROM edge_files WHERE NOT EXISTS(SELECT 1 FROM edges e \
+                   WHERE e.source = edge_files.source AND e.target = edge_files.target \
+                     AND e.kind = edge_files.kind)",
+            )
+            .execute(h.as_conn()),
+        )
+        .map_err(st)?;
         Ok((result.rows_affected() as usize).saturating_sub(restored))
     }
 

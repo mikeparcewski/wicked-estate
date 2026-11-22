@@ -1993,7 +1993,7 @@ impl SqliteStore {
                 .map_err(st)?;
             // TS-S2A: erasure is total — support facts and base contributions naming the symbol
             // go too (support is otherwise never deleted outside `replace_edge_supports`).
-            for table in ["edge_supports", "edge_base"] {
+            for table in ["edge_supports", "edge_base", "edge_files"] {
                 self.conn
                     .execute(
                         &format!(
@@ -2453,6 +2453,7 @@ impl SqliteStore {
             ("node_files", "data"),
             ("edges", "data"),
             ("edge_base", "data"),
+            ("edge_files", "data"),
             ("edge_supports", "data"),
             ("edge_supports", "fact_id"),
             ("edge_history", "edge_json"),
@@ -2673,6 +2674,7 @@ impl SqliteStore {
                             "DELETE FROM edges WHERE source=?1 OR target=?1",
                             "DELETE FROM edge_base WHERE source=?1 OR target=?1",
                             "DELETE FROM edge_supports WHERE source=?1 OR target=?1",
+                            "DELETE FROM edge_files WHERE source=?1 OR target=?1",
                             "DELETE FROM unresolved_refs WHERE from_sym=?1",
                             "DELETE FROM annotations WHERE node_sym=?1",
                             "DELETE FROM symbols WHERE sid=?1",
@@ -3660,6 +3662,24 @@ impl GraphWrite for SqliteStore {
                     OR excluded.evidence_count > edges.evidence_count",
             )
             .map_err(st)?;
+        // #543 edge contributions: when a second file asserts a key, record the row's contribution
+        // (its file and data) and this one; a key already recorded records this file's latest.
+        let mut record_owner = self
+            .conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO edge_files(source,target,kind,file,data) \
+                 SELECT source,target,kind,file,data FROM edges \
+                 WHERE source=?1 AND target=?2 AND kind=?3 AND file NOT IN ('', ?4)",
+            )
+            .map_err(st)?;
+        let mut record_mine = self
+            .conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO edge_files(source,target,kind,file,data) \
+                 SELECT ?1,?2,?3,?4,?5 WHERE EXISTS( \
+                   SELECT 1 FROM edge_files WHERE source=?1 AND target=?2 AND kind=?3)",
+            )
+            .map_err(st)?;
         // TS-S2A: while no support exists anywhere this is the original single-statement path.
         let supported = self.any_support()?;
         for (e, (src_sid, tgt_sid)) in edges.iter().zip(sids.iter()) {
@@ -3684,6 +3704,14 @@ impl GraphWrite for SqliteStore {
             // After Fix A (wicked-estate-extract), Contains edges always carry a location, so this is always
             // populated for tree-sitter-produced edges.
             let file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
+            if !file.is_empty() {
+                record_owner
+                    .execute(params![src_sid, tgt_sid, kind, file])
+                    .map_err(st)?;
+                record_mine
+                    .execute(params![src_sid, tgt_sid, kind, file, data])
+                    .map_err(st)?;
+            }
             stmt.execute(params![
                 src_sid,
                 tgt_sid,
@@ -4043,6 +4071,44 @@ impl GraphWrite for SqliteStore {
         // Delete edges using the same matching logic as Step 2 (location file OR source node
         // in this file) so that edges without an explicit location are also removed.
         // IMPORTANT: delete edges BEFORE nodes so the subquery on nodes is still valid.
+        // #543: the other files' contributions to every key this file asserted together with
+        // them, re-asserted after the deletes below so the edge stays, owned by one of them. The
+        // file's key groups are dropped (the re-assertion records them again when two or more
+        // files remain), and so is every group whose source lives in this file (the edge goes
+        // with its source). Only a key that still has an edges row is re-asserted, so a pruned or
+        // erased edge never returns. Same point and predicate as the edges DELETE below.
+        let survivors: Vec<Edge> = {
+            let mut q = self
+                .conn
+                .prepare(
+                    "SELECT ef.data FROM edge_files ef \
+                     WHERE ef.file != ?1 \
+                       AND (ef.source, ef.target, ef.kind) IN \
+                           (SELECT source, target, kind FROM edge_files WHERE file = ?1) \
+                       AND ef.source NOT IN (SELECT symbol FROM nodes WHERE file = ?1) \
+                       AND EXISTS(SELECT 1 FROM edges e WHERE e.source = ef.source \
+                                  AND e.target = ef.target AND e.kind = ef.kind) \
+                     ORDER BY ef.source, ef.target, ef.kind, ef.file",
+                )
+                .map_err(st)?;
+            let rows = q
+                .query_map(params![file], |r| r.get::<_, String>(0))
+                .map_err(st)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(serde_json::from_str::<Edge>(&row.map_err(st)?)?);
+            }
+            out
+        };
+        self.conn
+            .execute(
+                "DELETE FROM edge_files \
+                 WHERE (source, target, kind) IN \
+                       (SELECT source, target, kind FROM edge_files WHERE file = ?1) \
+                    OR source IN (SELECT symbol FROM nodes WHERE file = ?1)",
+                params![file],
+            )
+            .map_err(st)?;
         // TS-S2A: retire supported keys' base contributions by exactly the edge predicate, and
         // capture the supported rows this DELETE removes (healed below).
         let support = self.support_pre_delete(
@@ -4083,6 +4149,8 @@ impl GraphWrite for SqliteStore {
             .map_err(st)?;
         // Support is producer-owned: re-project every supported edge the deletes removed.
         self.support_post_delete(support)?;
+        // #543: the other asserting files still assert their edges.
+        self.upsert_edges(&survivors)?;
         Ok(())
     }
 
@@ -4156,6 +4224,15 @@ impl GraphWrite for SqliteStore {
             )
             .map_err(st)?;
         let restored = self.support_post_delete(support)?;
+        // #543: a pruned edge's contributions go with it.
+        self.conn
+            .execute(
+                "DELETE FROM edge_files WHERE NOT EXISTS(SELECT 1 FROM edges e \
+                   WHERE e.source = edge_files.source AND e.target = edge_files.target \
+                     AND e.kind = edge_files.kind)",
+                [],
+            )
+            .map_err(st)?;
         Ok(n.saturating_sub(restored))
     }
 

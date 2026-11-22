@@ -157,6 +157,17 @@ impl SurrealStore {
                  DEFINE INDEX edge_file  ON edge_rel COLUMNS file;
                  DEFINE INDEX edge_dedup ON edge_rel COLUMNS src, tgt, kind UNIQUE;
 
+                 -- Edge contributions (wicked-estate#543): one row per asserting file for a key
+                 -- asserted by more than one file (sparse; see the SQLite schema.sql comment).
+                 DEFINE TABLE edge_contrib SCHEMAFULL;
+                 DEFINE FIELD src  ON edge_contrib TYPE string;
+                 DEFINE FIELD tgt  ON edge_contrib TYPE string;
+                 DEFINE FIELD kind ON edge_contrib TYPE string;
+                 DEFINE FIELD file ON edge_contrib TYPE string;
+                 DEFINE FIELD data ON edge_contrib TYPE string;
+                 DEFINE INDEX edge_contrib_key  ON edge_contrib COLUMNS src, tgt, kind, file UNIQUE;
+                 DEFINE INDEX edge_contrib_file ON edge_contrib COLUMNS file;
+
                  -- TS-S2A support plane (wicked_estate_core::support): owner generations, the
                  -- owners' authoritative facts, and the base contribution of supported keys.
                  DEFINE TABLE support_owner SCHEMAFULL;
@@ -461,6 +472,40 @@ async fn sr_raw(db: &Surreal<Db>, table: &str, key: &EdgeKey) -> Result<Option<R
         .transpose()
 }
 
+/// Record `edge` as `file`'s contribution to its key (wicked-estate#543). `replace` false keeps
+/// a contribution already recorded for that file (the row's own, captured on a collision).
+async fn sr_put_contrib(
+    db: &Surreal<Db>,
+    kind: &str,
+    file: &str,
+    edge: &Edge,
+    replace: bool,
+) -> Result<()> {
+    let data = serde_json::to_string(edge).map_err(se)?;
+    let otherwise = if replace {
+        " ELSE { UPDATE edge_contrib SET data=$data \
+           WHERE src=$src AND tgt=$tgt AND kind=$kind AND file=$file }"
+    } else {
+        ""
+    };
+    db.query(format!(
+        "LET $ex = (SELECT id FROM edge_contrib \
+           WHERE src=$src AND tgt=$tgt AND kind=$kind AND file=$file LIMIT 1);
+         IF array::len($ex) = 0 {{ INSERT INTO edge_contrib \
+           {{ src: $src, tgt: $tgt, kind: $kind, file: $file, data: $data }} }}{otherwise};"
+    ))
+    .bind(("src", edge.source.0.clone()))
+    .bind(("tgt", edge.target.0.clone()))
+    .bind(("kind", kind.to_string()))
+    .bind(("file", file.to_string()))
+    .bind(("data", data))
+    .await
+    .map_err(se)?
+    .check()
+    .map_err(se)?;
+    Ok(())
+}
+
 async fn sr_count(db: &Surreal<Db>, query: &str, key: Option<&EdgeKey>) -> Result<u64> {
     let mut q = db.query(query);
     if let Some(k) = key {
@@ -661,6 +706,38 @@ impl GraphWrite for SurrealStore {
                     .await
                     .map_err(se)?;
                 let existing: Option<Edge> = data_col::<Edge>(&mut res, 0)?.into_iter().next();
+                // #543 edge contributions (see MemStore::upsert_edges): a second asserting file
+                // records the row's contribution and this one; a recorded key records this
+                // file's latest.
+                let file = e
+                    .location
+                    .as_ref()
+                    .map(|l| l.file.clone())
+                    .unwrap_or_default();
+                if let Some(x) = existing.as_ref().filter(|_| !file.is_empty()) {
+                    let owner = x
+                        .location
+                        .as_ref()
+                        .map(|l| l.file.clone())
+                        .unwrap_or_default();
+                    let mut res = db
+                        .query(
+                            "SELECT VALUE file FROM edge_contrib \
+                             WHERE src=$src AND tgt=$tgt AND kind=$kind LIMIT 1",
+                        )
+                        .bind(("src", e.source.0.clone()))
+                        .bind(("tgt", e.target.0.clone()))
+                        .bind(("kind", kind.clone()))
+                        .await
+                        .map_err(se)?;
+                    let recorded: Vec<String> = res.take(0).map_err(se)?;
+                    if !recorded.is_empty() || (!owner.is_empty() && owner != file) {
+                        if !owner.is_empty() {
+                            sr_put_contrib(&db, &kind, &owner, x, false).await?;
+                        }
+                        sr_put_contrib(&db, &kind, &file, e, true).await?;
+                    }
+                }
                 // On a collision the higher-confidence edge wins — UNLESS the incoming edge carries
                 // more evidence. `evidence_count` is a monotonic audit counter, so growth is
                 // strictly newer information. Same rule as MemStore / SqliteStore / PostgresStore.
@@ -674,11 +751,6 @@ impl GraphWrite for SurrealStore {
                 if !write {
                     continue;
                 }
-                let file = e
-                    .location
-                    .as_ref()
-                    .map(|l| l.file.clone())
-                    .unwrap_or_default();
                 db.query(
                     "LET $ex = (SELECT id FROM edge_rel WHERE src=$src AND tgt=$tgt AND kind=$kind LIMIT 1);
                  IF array::len($ex) = 0 { INSERT INTO edge_rel { src: $src, tgt: $tgt, kind: $kind, file: $file, data: $data } } ELSE { UPDATE edge_rel SET file=$file, data=$data WHERE src=$src AND tgt=$tgt AND kind=$kind };",
@@ -721,7 +793,7 @@ impl GraphWrite for SurrealStore {
         let db = self.db.clone();
         let file = file.to_string();
         let history_enabled = self.history_enabled;
-        self.rt.block_on(async move {
+        let survivors = self.rt.block_on(async move {
             // Step 1: the git blob SHA of the version being superseded (tags archived edges).
             let current_git_sha = file_text_async(&db, &file)
                 .await?
@@ -865,6 +937,50 @@ impl GraphWrite for SurrealStore {
                 (BTreeSet::new(), BTreeSet::new())
             };
 
+            // #543: the other files' contributions to every key this file asserted with them,
+            // re-asserted after the deletes (see MemStore::remove_file); the file's key groups and
+            // every group whose source lives in this file are dropped, by exact key.
+            let mut res = db
+                .query(
+                    "SELECT src, tgt, kind FROM edge_contrib WHERE file=$file;
+                     SELECT src, tgt, kind FROM edge_contrib WHERE src INSIDE $syms;",
+                )
+                .bind(("file", file.clone()))
+                .bind(("syms", file_symbols.clone()))
+                .await
+                .map_err(se)?;
+            let mine = key_cols(&mut res, 0)?;
+            let sourced_here = key_cols(&mut res, 1)?;
+            res.check().map_err(se)?;
+            let mut survivors: Vec<Edge> = Vec::new();
+            for key in mine.iter().filter(|k| !file_sym_set.contains(k.0.as_str())) {
+                if sr_raw(&db, "edge_rel", key).await?.is_some() {
+                    let mut res = db
+                        .query(
+                            "SELECT data, file FROM edge_contrib \
+                             WHERE src=$src AND tgt=$tgt AND kind=$kind AND file!=$file \
+                             ORDER BY file",
+                        )
+                        .bind(("src", key.0.clone()))
+                        .bind(("tgt", key.1.clone()))
+                        .bind(("kind", key.2.clone()))
+                        .bind(("file", file.clone()))
+                        .await
+                        .map_err(se)?;
+                    survivors.extend(data_col::<Edge>(&mut res, 0)?);
+                }
+            }
+            for key in mine.iter().chain(&sourced_here) {
+                db.query("DELETE edge_contrib WHERE src=$src AND tgt=$tgt AND kind=$kind")
+                    .bind(("src", key.0.clone()))
+                    .bind(("tgt", key.1.clone()))
+                    .bind(("kind", key.2.clone()))
+                    .await
+                    .map_err(se)?
+                    .check()
+                    .map_err(se)?;
+            }
+
             // Step 4: remove nodes (kept ones were re-homed, so no longer match), the owned edges
             // (a kept node's own OUTGOING edges still die — SqliteStore parity), unresolved refs,
             // digest, and content.
@@ -899,8 +1015,10 @@ impl GraphWrite for SurrealStore {
             }
             // Support is producer-owned: re-project every supported edge the deletes removed.
             sr_support_post_delete(&db, deleted, retired).await?;
-            Ok::<_, Error>(())
-        })
+            Ok::<_, Error>(survivors)
+        })?;
+        // #543: the other asserting files still assert their edges.
+        self.upsert_edges(&survivors)
     }
 
     fn set_file_digest(&mut self, file: &str, digest: &str) -> Result<()> {
@@ -989,6 +1107,27 @@ impl GraphWrite for SurrealStore {
             // Taking the two counts does not surface an error from the DELETE (or the LET):
             // check the whole response so a failed prune cannot report success.
             res.check().map_err(se)?;
+            // #543: a pruned edge's contributions go with it (deleted by exact key).
+            let mut res = db
+                .query(
+                    "LET $live = (SELECT VALUE symbol FROM node);
+                     SELECT src, tgt, kind FROM edge_contrib \
+                       WHERE src NOTINSIDE $live OR tgt NOTINSIDE $live;",
+                )
+                .await
+                .map_err(se)?;
+            let dead = key_cols(&mut res, 1)?;
+            res.check().map_err(se)?;
+            for key in &dead {
+                db.query("DELETE edge_contrib WHERE src=$src AND tgt=$tgt AND kind=$kind")
+                    .bind(("src", key.0.clone()))
+                    .bind(("tgt", key.1.clone()))
+                    .bind(("kind", key.2.clone()))
+                    .await
+                    .map_err(se)?
+                    .check()
+                    .map_err(se)?;
+            }
             let restored = sr_support_post_delete(&db, deleted, retired).await?;
             Ok::<_, Error>((before.saturating_sub(after) as usize).saturating_sub(restored))
         })

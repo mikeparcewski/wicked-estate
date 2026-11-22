@@ -2853,6 +2853,153 @@ fn sup_truncated(e: &Edge) -> u64 {
         .unwrap_or(0)
 }
 
+/// wicked-estate#543: edge contributions. An edge between two nodes neither file defines,
+/// asserted by two files (two RACF members `PERMIT P ID(U)`, two JCL streams binding one DD to
+/// one dataset), is ONE `(source, target, kind)` row. `remove_file` of either asserting file must
+/// leave it, owned by (located in) the other; removing the second removes it. Re-extracting a file
+/// (remove + upsert) re-asserts its contribution. An edge whose SOURCE node lives in the removed
+/// file still goes with it, whatever other file asserted it.
+pub fn edge_contribution_suite<S: GraphStore>(store: &mut S) {
+    const DEFS: &str = "ec/defs.txt";
+    const A: &str = "ec/a.racf";
+    const B: &str = "ec/b.racf";
+    let node = |name: &str, file: &str| {
+        Node::new(
+            sym(name),
+            NodeKind::Function,
+            name,
+            Language::new("rust"),
+            Location::new(file, Span::ZERO),
+        )
+    };
+    let asserted = |file: &str, src: &str, tgt: &str, conf: f32| {
+        let mut e = Edge::new(
+            sym(src),
+            sym(tgt),
+            EdgeKind::References,
+            ResolutionTier::Parsed,
+            "conformance",
+        )
+        .with_location(Location::new(file, Span::ZERO));
+        e.confidence = crate::Confidence::new(conf);
+        e
+    };
+    // The edge `ec_p -> ec_u` as the store answers it: `None` when absent, else its owning file.
+    let owner = |store: &S, src: &str| -> Option<String> {
+        let edges: Vec<Edge> = store
+            .neighbors(&sym(src), Direction::Dependencies)
+            .expect("neighbors")
+            .into_iter()
+            .filter(|e| e.target == sym("ec_u") && e.kind == EdgeKind::References)
+            .collect();
+        assert!(
+            edges.len() <= 1,
+            "one row per (source, target, kind): {edges:?}"
+        );
+        edges.first().map(|e| {
+            e.location
+                .as_ref()
+                .map(|l| l.file.clone())
+                .unwrap_or_default()
+        })
+    };
+    let index = |store: &mut S, file: &str, conf: f32| {
+        store.begin_batch().expect("begin");
+        store.remove_file(file).expect("remove_file");
+        store
+            .upsert_edges(&[asserted(file, "ec_p", "ec_u", conf)])
+            .expect("upsert edge");
+        store.commit_batch().expect("commit");
+    };
+    let remove = |store: &mut S, file: &str| {
+        store.begin_batch().expect("begin");
+        store.remove_file(file).expect("remove_file");
+        store.commit_batch().expect("commit");
+    };
+    store
+        .upsert_nodes(&[node("ec_p", DEFS), node("ec_u", DEFS)])
+        .expect("shared nodes");
+
+    // (EC-1) A then B assert the edge; B's higher confidence owns the row. Removing B (the owner)
+    // leaves the edge, now owned by A. Removing A too removes it.
+    index(store, A, 0.6);
+    index(store, B, 0.9);
+    assert_eq!(
+        owner(store, "ec_p").as_deref(),
+        Some(B),
+        "EC-1: B wins the row"
+    );
+    remove(store, B);
+    assert_eq!(
+        owner(store, "ec_p").as_deref(),
+        Some(A),
+        "EC-1: A still asserts it"
+    );
+    remove(store, A);
+    assert_eq!(owner(store, "ec_p"), None, "EC-1: no file asserts it");
+
+    // (EC-2) Removing the NON-owner leaves the owner's row as it was.
+    index(store, A, 0.9);
+    index(store, B, 0.6);
+    assert_eq!(owner(store, "ec_p").as_deref(), Some(A));
+    remove(store, B);
+    assert_eq!(owner(store, "ec_p").as_deref(), Some(A), "EC-2: owner kept");
+    remove(store, A);
+    assert_eq!(owner(store, "ec_p"), None);
+
+    // (EC-3) Re-extracting a file re-asserts its contribution: A, B, re-extract A, remove B → A.
+    // Then re-extract A again and remove A → gone (B's contribution went with B).
+    index(store, A, 0.6);
+    index(store, B, 0.9);
+    index(store, A, 0.6);
+    remove(store, B);
+    assert_eq!(
+        owner(store, "ec_p").as_deref(),
+        Some(A),
+        "EC-3: A re-asserted it"
+    );
+    index(store, A, 0.6);
+    remove(store, A);
+    assert_eq!(
+        owner(store, "ec_p"),
+        None,
+        "EC-3: B's contribution left with B"
+    );
+
+    // (EC-4) Three files: removing them one by one keeps the edge until the last goes.
+    let c = "ec/c.racf";
+    index(store, A, 0.5);
+    index(store, B, 0.7);
+    index(store, c, 0.9);
+    remove(store, c);
+    assert_eq!(
+        owner(store, "ec_p").as_deref(),
+        Some(B),
+        "EC-4: best survivor"
+    );
+    remove(store, A);
+    assert_eq!(owner(store, "ec_p").as_deref(), Some(B), "EC-4: B left");
+    remove(store, B);
+    assert_eq!(owner(store, "ec_p"), None);
+
+    // (EC-5) An edge whose SOURCE lives in the removed file goes with its source, even though
+    // another file asserted it too.
+    store
+        .upsert_nodes(&[node("ec_s", A)])
+        .expect("source node in A");
+    store
+        .upsert_edges(&[
+            asserted(A, "ec_s", "ec_u", 0.6),
+            asserted(B, "ec_s", "ec_u", 0.9),
+        ])
+        .expect("two assertions");
+    assert_eq!(owner(store, "ec_s").as_deref(), Some(B));
+    remove(store, A);
+    assert_eq!(owner(store, "ec_s"), None, "EC-5: the source node is gone");
+    remove(store, B);
+    assert_eq!(owner(store, "ec_s"), None);
+}
+
 /// TS-S2A: the authoritative, replaceable support plane (`crate::support`,
 /// `docs/ENGINE-CONTRACT.md` §3.4). Run on a FRESH store. Every shipped backend runs it; a new
 /// backend must pass it alongside [`graph_store_suite`].

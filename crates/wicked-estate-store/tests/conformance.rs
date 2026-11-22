@@ -66,6 +66,20 @@ fn memstore_multi_file_contributions() {
     conformance::multi_file_contribution_suite(&mut store);
 }
 
+/// Edge contributions (wicked-estate#543): an edge two files assert survives the removal of
+/// either, owned by the other.
+#[test]
+fn sqlite_edge_contributions() {
+    let mut store = wicked_estate_store::SqliteStore::in_memory().expect("in-memory sqlite");
+    conformance::edge_contribution_suite(&mut store);
+}
+
+#[test]
+fn memstore_edge_contributions() {
+    let mut store = MemStore::new();
+    conformance::edge_contribution_suite(&mut store);
+}
+
 /// TS-S2A: authoritative, replaceable edge support — the same suite every shipped backend runs.
 #[test]
 fn sqlite_support_replacement() {
