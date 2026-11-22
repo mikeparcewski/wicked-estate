@@ -4263,20 +4263,22 @@ impl GraphWrite for SqliteStore {
         // row).
         let description = wicked_estate_core::redact::scrub_opt(semantics.description.as_deref());
         let requirement = wicked_estate_core::redact::scrub_opt(semantics.requirement.as_deref());
+        // One cached statement: the indexer calls this once per saved symbol (#462).
         self.conn
-            .execute(
+            .prepare_cached(
                 "UPDATE nodes SET description=?2, requirement=?3, requirement_validated=?4, \
                  requirement_validated_by=?5, requirement_validated_at=?6 \
                  WHERE symbol=(SELECT sid FROM symbols WHERE sym=?1)",
-                params![
-                    symbol.0,
-                    description.as_deref(),
-                    requirement.as_deref(),
-                    semantics.requirement_validated as i64,
-                    semantics.requirement_validated_by,
-                    semantics.requirement_validated_at
-                ],
             )
+            .map_err(st)?
+            .execute(params![
+                symbol.0,
+                description.as_deref(),
+                requirement.as_deref(),
+                semantics.requirement_validated as i64,
+                semantics.requirement_validated_by,
+                semantics.requirement_validated_at
+            ])
             .map_err(st)?;
         Ok(())
     }

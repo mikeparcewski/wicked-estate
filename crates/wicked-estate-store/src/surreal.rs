@@ -1072,10 +1072,8 @@ impl GraphWrite for SurrealStore {
         symbol: &SymbolId,
         semantics: &NodeSemantics,
     ) -> Result<()> {
-        if self.get_node(symbol)?.is_none() {
-            return Ok(());
-        }
-        // The claim is kept as it was; description/requirement pass through the same redaction
+        // No-op when the symbol is not a node: the write itself checks, so a restore costs one
+        // round trip, not a `get_node` first (#462). The claim is kept as it was; description/requirement pass through the same redaction
         // backstop `set_node_semantics` uses (#438).
         let mut semantics = semantics.clone();
         semantics.description =
@@ -1088,18 +1086,22 @@ impl GraphWrite for SurrealStore {
         let sym = symbol.0.clone();
         self.rt.block_on(async move {
             if semantics == NodeSemantics::default() {
-                db.query("DELETE semantics WHERE symbol=$sym")
-                    .bind(("sym", sym))
-                    .await
-                    .map_err(se)?
-                    .check()
-                    .map_err(se)?;
+                db.query(
+                    "LET $node = (SELECT id FROM node WHERE symbol=$sym LIMIT 1);
+                     IF array::len($node) > 0 { DELETE semantics WHERE symbol=$sym };",
+                )
+                .bind(("sym", sym))
+                .await
+                .map_err(se)?
+                .check()
+                .map_err(se)?;
             } else {
                 let data = serde_json::to_string(&semantics).map_err(se)?;
                 let req = semantics.requirement;
                 db.query(
-                    "LET $ex = (SELECT id FROM semantics WHERE symbol=$sym LIMIT 1);
-                     IF array::len($ex) = 0 { INSERT INTO semantics { symbol: $sym, requirement: $req, data: $data } } ELSE { UPDATE semantics SET requirement=$req, data=$data WHERE symbol=$sym };",
+                    "LET $node = (SELECT id FROM node WHERE symbol=$sym LIMIT 1);
+                     LET $ex = (SELECT id FROM semantics WHERE symbol=$sym LIMIT 1);
+                     IF array::len($node) > 0 { IF array::len($ex) = 0 { INSERT INTO semantics { symbol: $sym, requirement: $req, data: $data } } ELSE { UPDATE semantics SET requirement=$req, data=$data WHERE symbol=$sym } };",
                 )
                 .bind(("sym", sym))
                 .bind(("req", req))
@@ -1737,6 +1739,51 @@ impl GraphRead for SurrealStore {
                 .map_err(se)?;
             Ok(data_col::<NodeSemantics>(&mut res, 0)?.into_iter().next())
         })
+    }
+
+    fn semantics_in_files(&self, files: &[&str]) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+        // Two queries, not one `node_semantics` per node (#462): the files' symbols, then the
+        // semantics rows of those symbols.
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let files: Vec<String> = files
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let db = self.db.clone();
+        let mut out = self.rt.block_on(async move {
+            let mut res = db
+                .query("SELECT symbol, file FROM node WHERE file INSIDE $files")
+                .bind(("files", files))
+                .await
+                .map_err(se)?;
+            let syms: Vec<String> = res.take((0, "symbol")).map_err(se)?;
+            let homes: Vec<String> = res.take((0, "file")).map_err(se)?;
+            if syms.is_empty() {
+                return Ok::<_, Error>(Vec::new());
+            }
+            let home: BTreeMap<String, String> = syms.iter().cloned().zip(homes).collect();
+            let mut res = db
+                .query("SELECT symbol, data FROM semantics WHERE symbol INSIDE $syms")
+                .bind(("syms", syms))
+                .await
+                .map_err(se)?;
+            let sem_syms: Vec<String> = res.take((0, "symbol")).map_err(se)?;
+            let blobs: Vec<String> = res.take((0, "data")).map_err(se)?;
+            let mut out = Vec::new();
+            for (sym, blob) in sem_syms.into_iter().zip(blobs) {
+                let sem: NodeSemantics = serde_json::from_str(&blob).map_err(se)?;
+                if let Some(file) = home.get(&sym) {
+                    out.push((file.clone(), SymbolId(sym), sem));
+                }
+            }
+            Ok(out)
+        })?;
+        out.sort_by(|a, b| (&a.0, &a.1.0).cmp(&(&b.0, &b.1.0))); // deterministic
+        Ok(out)
     }
 
     fn find_by_requirement(&self, requirement: &str) -> Result<Vec<Node>> {

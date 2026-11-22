@@ -288,8 +288,13 @@ pub trait GraphRead: Send {
     /// nodes that carry some. The indexer reads this inside the batch that removes the files and
     /// restores their fields (wicked-estate#438). Stores with concurrent writers serialize this
     /// read with `set_node_semantics` until the batch ends (wicked-estate#463). The default scans
-    /// `all_nodes`; stores whose node rows hold the semantic columns override it with one query.
+    /// `all_nodes`; stores whose node rows hold the semantic columns override it with one query,
+    /// and stores keeping semantics apart walk that map or table (wicked-estate#462). An empty
+    /// `files` returns at once.
     fn semantics_in_files(&self, files: &[&str]) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
         let wanted: std::collections::HashSet<&str> = files.iter().copied().collect();
         let mut out = Vec::new();
         for n in self.all_nodes()? {
