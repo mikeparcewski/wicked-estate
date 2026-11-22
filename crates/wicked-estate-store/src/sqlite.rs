@@ -3664,12 +3664,19 @@ impl GraphWrite for SqliteStore {
             .map_err(st)?;
         // #543 edge contributions: when a second file asserts a key, record the row's contribution
         // (its file and data) and this one; a key already recorded records this file's latest.
+        // The current contribution is the kept-aside base one for a supported key (TS-S2A), else
+        // the public row (a supported key's public row is a projection, never a file's own).
         let mut record_owner = self
             .conn
             .prepare_cached(
                 "INSERT OR IGNORE INTO edge_files(source,target,kind,file,data) \
+                 SELECT source,target,kind,file,data FROM edge_base \
+                 WHERE source=?1 AND target=?2 AND kind=?3 AND file NOT IN ('', ?4) \
+                 UNION ALL \
                  SELECT source,target,kind,file,data FROM edges \
-                 WHERE source=?1 AND target=?2 AND kind=?3 AND file NOT IN ('', ?4)",
+                 WHERE source=?1 AND target=?2 AND kind=?3 AND file NOT IN ('', ?4) \
+                   AND NOT EXISTS(SELECT 1 FROM edge_supports \
+                                  WHERE source=?1 AND target=?2 AND kind=?3)",
             )
             .map_err(st)?;
         let mut record_mine = self
@@ -3684,6 +3691,19 @@ impl GraphWrite for SqliteStore {
         let supported = self.any_support()?;
         for (e, (src_sid, tgt_sid)) in edges.iter().zip(sids.iter()) {
             let kind = serde_json::to_string(&e.kind)?;
+            let data = serde_json::to_string(e)?;
+            // Use the location file when present; empty string when None (e.g. synthetic edges).
+            // After Fix A (wicked-estate-extract), Contains edges always carry a location, so this is always
+            // populated for tree-sitter-produced edges.
+            let file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
+            if !file.is_empty() {
+                record_owner
+                    .execute(params![src_sid, tgt_sid, kind, file])
+                    .map_err(st)?;
+                record_mine
+                    .execute(params![src_sid, tgt_sid, kind, file, data])
+                    .map_err(st)?;
+            }
             if supported {
                 let key: SidKey = (*src_sid, *tgt_sid, kind.clone());
                 if self.key_supported(&key)? {
@@ -3698,19 +3718,6 @@ impl GraphWrite for SqliteStore {
                     }
                     continue;
                 }
-            }
-            let data = serde_json::to_string(e)?;
-            // Use the location file when present; empty string when None (e.g. synthetic edges).
-            // After Fix A (wicked-estate-extract), Contains edges always carry a location, so this is always
-            // populated for tree-sitter-produced edges.
-            let file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
-            if !file.is_empty() {
-                record_owner
-                    .execute(params![src_sid, tgt_sid, kind, file])
-                    .map_err(st)?;
-                record_mine
-                    .execute(params![src_sid, tgt_sid, kind, file, data])
-                    .map_err(st)?;
             }
             stmt.execute(params![
                 src_sid,
@@ -3913,6 +3920,8 @@ impl GraphWrite for SqliteStore {
         let kept: Vec<KeptImport> = {
             let mut candidates: Vec<(i64, String, Option<String>)> = Vec::new();
             {
+                // #543: an edge another file still asserts (a live key's contribution, which the
+                // removal below re-asserts) is a survivor too.
                 let mut stmt = self
                     .conn
                     .prepare(
@@ -3921,17 +3930,27 @@ impl GraphWrite for SqliteStore {
                                   WHERE e.target = n.symbol \
                                     AND e.file NOT IN ('', ?1) \
                                     AND e.source NOT IN \
-                                        (SELECT symbol FROM nodes WHERE file = ?1)) \
+                                        (SELECT symbol FROM nodes WHERE file = ?1)), \
+                                (SELECT MIN(ef.file) FROM edge_files ef \
+                                  WHERE ef.target = n.symbol \
+                                    AND ef.file NOT IN ('', ?1) \
+                                    AND ef.source NOT IN \
+                                        (SELECT symbol FROM nodes WHERE file = ?1) \
+                                    AND EXISTS(SELECT 1 FROM edges e2 \
+                                        WHERE e2.source = ef.source AND e2.target = ef.target \
+                                          AND e2.kind = ef.kind)) \
                          FROM nodes n \
                          WHERE n.file = ?1 AND n.kind = ?2",
                     )
                     .map_err(st)?;
                 let rows = stmt
                     .query_map(params![file, import_kind], |r| {
+                        let edge_home = r.get::<_, Option<String>>(2)?;
+                        let contrib_home = r.get::<_, Option<String>>(3)?;
                         Ok((
                             r.get::<_, i64>(0)?,
                             r.get::<_, String>(1)?,
-                            r.get::<_, Option<String>>(2)?,
+                            edge_home.into_iter().chain(contrib_home).min(),
                         ))
                     })
                     .map_err(st)?;
@@ -3944,18 +3963,26 @@ impl GraphWrite for SqliteStore {
                 let Some(new_file) = new_home else { continue };
                 // The survivor edge at MIN(file) supplies the new location (file + span); if its
                 // data JSON carries no location (schema-legal), fall back to a zero span.
-                let edge_json: Option<String> = self
-                    .conn
-                    .query_row(
-                        "SELECT e.data FROM edges e \
-                         WHERE e.target = ?1 AND e.file = ?2 \
-                           AND e.source NOT IN (SELECT symbol FROM nodes WHERE file = ?3) \
-                         ORDER BY e.kind, e.source LIMIT 1",
-                        params![sid, new_file, file],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(st)?;
+                let mut edge_json: Option<String> = None;
+                for table in ["edges", "edge_files"] {
+                    if edge_json.is_none() {
+                        edge_json = self
+                            .conn
+                            .query_row(
+                                &format!(
+                                    "SELECT e.data FROM {table} e \
+                                     WHERE e.target = ?1 AND e.file = ?2 \
+                                       AND e.source NOT IN \
+                                           (SELECT symbol FROM nodes WHERE file = ?3) \
+                                     ORDER BY e.kind, e.source LIMIT 1"
+                                ),
+                                params![sid, new_file, file],
+                                |r| r.get(0),
+                            )
+                            .optional()
+                            .map_err(st)?;
+                    }
+                }
                 let new_loc = edge_json
                     .and_then(|j| serde_json::from_str::<Edge>(&j).ok())
                     .and_then(|e| e.location)
@@ -4223,8 +4250,8 @@ impl GraphWrite for SqliteStore {
                 [],
             )
             .map_err(st)?;
-        let restored = self.support_post_delete(support)?;
-        // #543: a pruned edge's contributions go with it.
+        // #543: a pruned edge's contributions go with it (before the support heal re-projects a
+        // supported key's public row, which would otherwise keep them).
         self.conn
             .execute(
                 "DELETE FROM edge_files WHERE NOT EXISTS(SELECT 1 FROM edges e \
@@ -4233,6 +4260,7 @@ impl GraphWrite for SqliteStore {
                 [],
             )
             .map_err(st)?;
+        let restored = self.support_post_delete(support)?;
         Ok(n.saturating_sub(restored))
     }
 

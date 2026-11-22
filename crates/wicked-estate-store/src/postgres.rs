@@ -1421,31 +1421,8 @@ impl GraphWrite for PostgresStore {
         })?;
         for e in edges {
             let kind = serde_json::to_string(&e.kind)?;
-            if supported {
-                let key: EdgeKey = (e.source.0.clone(), e.target.0.clone(), kind.clone());
-                let handled = rt_block(async {
-                    let c = h.as_conn();
-                    if !pg_key_supported(&mut *c, &key).await? {
-                        return Ok::<bool, Error>(false);
-                    }
-                    // The base rule applies to the kept-aside base contribution; the public row
-                    // is re-projected — a base write never erases support.
-                    let wins = pg_edge_base_of(&mut *c, &key)
-                        .await?
-                        .is_none_or(|(existing, _)| base_upsert_wins(&existing, e));
-                    if wins {
-                        pg_set_edge_base(&mut *c, &key, e).await?;
-                        pg_reproject(&mut *c, &key).await?;
-                    }
-                    Ok(true)
-                })?;
-                if handled {
-                    continue;
-                }
-            }
             let data = serde_json::to_string(e)?;
             let file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
-            let confidence = e.confidence.get() as f64;
             if !file.is_empty() {
                 // #543 edge contributions (see SqliteStore::upsert_edges): a second asserting
                 // file records the row's contribution and this one; a recorded key records this
@@ -1453,10 +1430,18 @@ impl GraphWrite for PostgresStore {
                 rt_block(async {
                     let c = h.as_conn();
                     sqlx::query(
+                        // The current contribution: the kept-aside base one for a supported key
+                        // (TS-S2A), else the public row (a supported key's is a projection).
                         "INSERT INTO edge_files(source, target, kind, file, data) \
+                         SELECT source, target, kind, file, data FROM edge_base \
+                         WHERE source = $1 AND target = $2 AND kind = $3 \
+                           AND file NOT IN ('', $4) \
+                         UNION ALL \
                          SELECT source, target, kind, file, data FROM edges \
                          WHERE source = $1 AND target = $2 AND kind = $3 \
                            AND file NOT IN ('', $4) \
+                           AND NOT EXISTS(SELECT 1 FROM edge_supports \
+                               WHERE source = $1 AND target = $2 AND kind = $3) \
                          ON CONFLICT DO NOTHING",
                     )
                     .bind(&e.source.0)
@@ -1484,6 +1469,29 @@ impl GraphWrite for PostgresStore {
                 })
                 .map_err(st)?;
             }
+            if supported {
+                let key: EdgeKey = (e.source.0.clone(), e.target.0.clone(), kind.clone());
+                let handled = rt_block(async {
+                    let c = h.as_conn();
+                    if !pg_key_supported(&mut *c, &key).await? {
+                        return Ok::<bool, Error>(false);
+                    }
+                    // The base rule applies to the kept-aside base contribution; the public row
+                    // is re-projected — a base write never erases support.
+                    let wins = pg_edge_base_of(&mut *c, &key)
+                        .await?
+                        .is_none_or(|(existing, _)| base_upsert_wins(&existing, e));
+                    if wins {
+                        pg_set_edge_base(&mut *c, &key, e).await?;
+                        pg_reproject(&mut *c, &key).await?;
+                    }
+                    Ok(true)
+                })?;
+                if handled {
+                    continue;
+                }
+            }
+            let confidence = e.confidence.get() as f64;
             rt_block(
                 sqlx::query(
                     // Higher-confidence-wins (W3.4), UNLESS the incoming edge carries more
@@ -1676,12 +1684,22 @@ impl GraphWrite for PostgresStore {
         let kept: Vec<KeptImport> = {
             let candidates: Vec<(String, String, Option<String>)> = rt_block(async {
                 let rows = sqlx::query(
-                    "SELECT n.symbol, n.data, \
+                    // #543: a live key's contribution from another file (re-asserted below) is
+                    // a survivor too. LEAST ignores NULLs.
+                    "SELECT n.symbol, n.data, LEAST( \
                             (SELECT MIN(e.file) FROM edges e \
                               WHERE e.target = n.symbol \
                                 AND e.file NOT IN ('', $1) \
                                 AND e.source NOT IN \
-                                    (SELECT symbol FROM nodes WHERE file = $1)) AS new_home \
+                                    (SELECT symbol FROM nodes WHERE file = $1)), \
+                            (SELECT MIN(ef.file) FROM edge_files ef \
+                              WHERE ef.target = n.symbol \
+                                AND ef.file NOT IN ('', $1) \
+                                AND ef.source NOT IN \
+                                    (SELECT symbol FROM nodes WHERE file = $1) \
+                                AND EXISTS(SELECT 1 FROM edges e2 \
+                                    WHERE e2.source = ef.source AND e2.target = ef.target \
+                                      AND e2.kind = ef.kind))) AS new_home \
                      FROM nodes n \
                      WHERE n.file = $1 AND n.kind = $2",
                 )
@@ -1706,10 +1724,15 @@ impl GraphWrite for PostgresStore {
                 // The survivor edge at MIN(file) supplies the new location (file + span).
                 let edge_json: Option<String> = rt_block(async {
                     let row = sqlx::query(
-                        "SELECT e.data FROM edges e \
-                         WHERE e.target = $1 AND e.file = $2 \
-                           AND e.source NOT IN (SELECT symbol FROM nodes WHERE file = $3) \
-                         ORDER BY e.kind, e.source LIMIT 1",
+                        "SELECT data FROM ( \
+                           SELECT e.data, 0 AS pri, e.kind, e.source FROM edges e \
+                           WHERE e.target = $1 AND e.file = $2 \
+                             AND e.source NOT IN (SELECT symbol FROM nodes WHERE file = $3) \
+                           UNION ALL \
+                           SELECT ef.data, 1 AS pri, ef.kind, ef.source FROM edge_files ef \
+                           WHERE ef.target = $1 AND ef.file = $2 \
+                             AND ef.source NOT IN (SELECT symbol FROM nodes WHERE file = $3) \
+                         ) x ORDER BY pri, kind, source LIMIT 1",
                     )
                     .bind(&symbol)
                     .bind(&new_file)
@@ -1899,8 +1922,8 @@ impl GraphWrite for PostgresStore {
             .execute(h.as_conn()),
         )
         .map_err(st)?;
-        let restored = rt_block(pg_support_post_delete(h.as_conn(), support))?;
-        // #543: a pruned edge's contributions go with it.
+        // #543: a pruned edge's contributions go with it (before the support heal re-projects a
+        // supported key's public row, which would otherwise keep them).
         rt_block(
             sqlx::query(
                 "DELETE FROM edge_files WHERE NOT EXISTS(SELECT 1 FROM edges e \
@@ -1910,6 +1933,7 @@ impl GraphWrite for PostgresStore {
             .execute(h.as_conn()),
         )
         .map_err(st)?;
+        let restored = rt_block(pg_support_post_delete(h.as_conn(), support))?;
         Ok((result.rows_affected() as usize).saturating_sub(restored))
     }
 

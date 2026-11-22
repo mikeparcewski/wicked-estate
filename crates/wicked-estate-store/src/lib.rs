@@ -503,6 +503,27 @@ impl GraphWrite for MemStore {
             &*wicked_estate_core::redact::scrub_all(edges, wicked_estate_core::redact::scrub_edge);
         for e in edges {
             let key = e.dedup_key();
+            // #543: a second asserting file records both contributions (the current base
+            // contribution's and this one); a key already recorded records this file's latest.
+            // The base contribution is the kept-aside one for a supported key (TS-S2A), else the
+            // public row.
+            let file = edge_file(e);
+            if !file.is_empty() {
+                let base = if self.supports.contains_key(&key) {
+                    self.edge_base.get(&key)
+                } else {
+                    self.edges.iter().find(|x| x.dedup_key() == key)
+                };
+                let owner = base.map_or("", edge_file);
+                if self.edge_files.contains_key(&key) || (!owner.is_empty() && owner != file) {
+                    let owned = base.filter(|_| !owner.is_empty()).cloned();
+                    let contribs = self.edge_files.entry(key.clone()).or_default();
+                    if let Some(b) = owned {
+                        contribs.entry(edge_file(&b).to_string()).or_insert(b);
+                    }
+                    contribs.insert(file.to_string(), e.clone());
+                }
+            }
             // A supported key (TS-S2A): the base rule applies to the kept-aside base contribution,
             // and the public edge is re-projected — a base write never erases support.
             if self.supports.contains_key(&key) {
@@ -518,22 +539,6 @@ impl GraphWrite for MemStore {
             }
             match self.edges.iter_mut().find(|x| x.dedup_key() == key) {
                 Some(existing) => {
-                    // #543: a second asserting file records both contributions (the row's and
-                    // this one); a key already recorded records this file's latest.
-                    let file = edge_file(e);
-                    let owner = edge_file(existing);
-                    if !file.is_empty()
-                        && (self.edge_files.contains_key(&key)
-                            || (!owner.is_empty() && owner != file))
-                    {
-                        let contribs = self.edge_files.entry(key.clone()).or_default();
-                        if !owner.is_empty() {
-                            contribs
-                                .entry(owner.to_string())
-                                .or_insert_with(|| existing.clone());
-                        }
-                        contribs.insert(file.to_string(), e.clone());
-                    }
                     // On a collision the higher-confidence edge wins (W3.4 max-confidence merge)
                     // — UNLESS the incoming edge carries more evidence. evidence_count is a
                     // monotonic audit counter, so growth is strictly newer information (a
@@ -638,6 +643,7 @@ impl GraphWrite for MemStore {
         // retain below deletes, so pre-delete evaluation equals post-delete state). The kept
         // node is re-homed to the survivor edge with the deterministic MIN location file, so the
         // keep self-terminates when the last importer is removed.
+        let live_keys: HashSet<EdgeKey> = self.edges.iter().map(Edge::dedup_key).collect();
         let mut kept_syms: HashSet<SymbolId> = HashSet::new();
         {
             let mut rehomes: Vec<(SymbolId, wicked_estate_core::Location)> = Vec::new();
@@ -645,11 +651,21 @@ impl GraphWrite for MemStore {
                 if n.location.file != file || n.kind != NodeKind::Import {
                     continue;
                 }
+                // #543: a live key's contribution from another file (re-asserted below) is a
+                // survivor too.
+                let contributed = self
+                    .edge_files
+                    .iter()
+                    .filter(|(key, _)| key.1 == n.symbol.0 && live_keys.contains(*key))
+                    .flat_map(|(_, contribs)| contribs.values())
+                    .filter(|e| !file_symbols.contains(&e.source))
+                    .filter_map(|e| e.location.as_ref());
                 let survivor_loc = self
                     .edges
                     .iter()
                     .filter(|e| e.target == n.symbol && !file_symbols.contains(&e.source))
                     .filter_map(|e| self.owning_location(e))
+                    .chain(contributed)
                     .filter(|l| !l.file.is_empty() && l.file != file)
                     .min_by(|a, b| a.file.cmp(&b.file));
                 if let Some(loc) = survivor_loc {
@@ -668,7 +684,6 @@ impl GraphWrite for MemStore {
         // key's group is dropped (re-upserting the survivors below records them again when two or
         // more remain); a key whose source lives in this file goes with its source. Only a key
         // that still has an edge row is re-asserted, so a pruned or erased edge never returns.
-        let live_keys: HashSet<EdgeKey> = self.edges.iter().map(Edge::dedup_key).collect();
         let mut survivors: Vec<Edge> = Vec::new();
         self.edge_files.retain(|key, contribs| {
             if file_symbols.contains(&SymbolId(key.0.clone())) {

@@ -677,6 +677,41 @@ impl GraphWrite for SurrealStore {
             let supported = sr_any_support(&db).await?;
             for e in &edges {
                 let kind = serde_json::to_string(&e.kind).map_err(se)?;
+                // #543 edge contributions (see MemStore::upsert_edges): a second asserting file
+                // records the current contribution (the kept-aside base one for a supported key,
+                // else the public row) and this one; a recorded key records this file's latest.
+                let asserting = e.location.as_ref().map_or("", |l| l.file.as_str());
+                if !asserting.is_empty() {
+                    let key: EdgeKey = (e.source.0.clone(), e.target.0.clone(), kind.clone());
+                    let table = if supported && sr_key_supported(&db, &key).await? {
+                        "edge_base"
+                    } else {
+                        "edge_rel"
+                    };
+                    let base: Option<Edge> = sr_raw(&db, table, &key).await?.map(|(b, _)| b);
+                    let owner = base
+                        .as_ref()
+                        .and_then(|b| b.location.as_ref())
+                        .map_or("", |l| l.file.as_str())
+                        .to_string();
+                    let mut res = db
+                        .query(
+                            "SELECT VALUE file FROM edge_contrib \
+                             WHERE src=$src AND tgt=$tgt AND kind=$kind LIMIT 1",
+                        )
+                        .bind(("src", key.0.clone()))
+                        .bind(("tgt", key.1.clone()))
+                        .bind(("kind", key.2.clone()))
+                        .await
+                        .map_err(se)?;
+                    let recorded: Vec<String> = res.take(0).map_err(se)?;
+                    if !recorded.is_empty() || (!owner.is_empty() && owner != asserting) {
+                        if let Some(b) = base.as_ref().filter(|_| !owner.is_empty()) {
+                            sr_put_contrib(&db, &kind, &owner, b, false).await?;
+                        }
+                        sr_put_contrib(&db, &kind, asserting, e, true).await?;
+                    }
+                }
                 if supported {
                     let key: EdgeKey = (e.source.0.clone(), e.target.0.clone(), kind.clone());
                     if sr_key_supported(&db, &key).await? {
@@ -706,38 +741,11 @@ impl GraphWrite for SurrealStore {
                     .await
                     .map_err(se)?;
                 let existing: Option<Edge> = data_col::<Edge>(&mut res, 0)?.into_iter().next();
-                // #543 edge contributions (see MemStore::upsert_edges): a second asserting file
-                // records the row's contribution and this one; a recorded key records this
-                // file's latest.
                 let file = e
                     .location
                     .as_ref()
                     .map(|l| l.file.clone())
                     .unwrap_or_default();
-                if let Some(x) = existing.as_ref().filter(|_| !file.is_empty()) {
-                    let owner = x
-                        .location
-                        .as_ref()
-                        .map(|l| l.file.clone())
-                        .unwrap_or_default();
-                    let mut res = db
-                        .query(
-                            "SELECT VALUE file FROM edge_contrib \
-                             WHERE src=$src AND tgt=$tgt AND kind=$kind LIMIT 1",
-                        )
-                        .bind(("src", e.source.0.clone()))
-                        .bind(("tgt", e.target.0.clone()))
-                        .bind(("kind", kind.clone()))
-                        .await
-                        .map_err(se)?;
-                    let recorded: Vec<String> = res.take(0).map_err(se)?;
-                    if !recorded.is_empty() || (!owner.is_empty() && owner != file) {
-                        if !owner.is_empty() {
-                            sr_put_contrib(&db, &kind, &owner, x, false).await?;
-                        }
-                        sr_put_contrib(&db, &kind, &file, e, true).await?;
-                    }
-                }
                 // On a collision the higher-confidence edge wins — UNLESS the incoming edge carries
                 // more evidence. `evidence_count` is a monotonic audit counter, so growth is
                 // strictly newer information. Same rule as MemStore / SqliteStore / PostgresStore.
@@ -901,6 +909,19 @@ impl GraphWrite for SurrealStore {
                         owned.push(e);
                     }
                     incoming = owned;
+                }
+                // #543: a live key's contribution from another file (re-asserted below) is a
+                // survivor too.
+                let mut res = db
+                    .query("SELECT data FROM edge_contrib WHERE tgt=$sym AND file!=$file")
+                    .bind(("sym", n.symbol.0.clone()))
+                    .bind(("file", file.clone()))
+                    .await
+                    .map_err(se)?;
+                for c in data_col::<Edge>(&mut res, 0)? {
+                    if sr_raw(&db, "edge_rel", &c.dedup_key()).await?.is_some() {
+                        incoming.push(c);
+                    }
                 }
                 let survivor_loc = incoming
                     .iter()
