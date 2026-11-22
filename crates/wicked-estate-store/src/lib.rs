@@ -1200,6 +1200,26 @@ impl GraphRead for MemStore {
         Ok(self.semantics.get(symbol).cloned())
     }
 
+    fn semantics_in_files(&self, files: &[&str]) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+        // Walk the semantics map, not every node (#462): only annotated symbols are visited.
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: std::collections::HashSet<&str> = files.iter().copied().collect();
+        let mut out: Vec<(String, SymbolId, NodeSemantics)> = self
+            .semantics
+            .iter()
+            .filter_map(|(sym, sem)| {
+                let file = &self.nodes.get(sym)?.location.file;
+                wanted
+                    .contains(file.as_str())
+                    .then(|| (file.clone(), sym.clone(), sem.clone()))
+            })
+            .collect();
+        out.sort_by(|a, b| (&a.0, &a.1.0).cmp(&(&b.0, &b.1.0))); // deterministic
+        Ok(out)
+    }
+
     fn find_by_requirement(&self, requirement: &str) -> Result<Vec<Node>> {
         let mut out: Vec<Node> = self
             .semantics
@@ -2358,6 +2378,55 @@ mod tests {
     }
 
     // ── Semantic linking (MemStore) ──────────────────────────────────────────
+
+    /// #462: MemStore answers `semantics_in_files` from its semantics map. The answer must be
+    /// what the node scan (the trait default it replaces) gives: only annotated nodes homed in
+    /// one of the files, unannotated and other-file nodes left out, nothing for an empty list.
+    #[test]
+    fn mem_semantics_in_files_walks_the_map_with_the_scan_answer_462() {
+        let mut store = MemStore::new();
+        store
+            .upsert_nodes(&[
+                make_node("a1", "src/a.rs"),
+                make_node("a2", "src/a.rs"),
+                make_node("plain", "src/a.rs"),
+                make_node("c1", "src/c.rs"),
+                make_node("d1", "src/d.rs"),
+            ])
+            .unwrap();
+        for s in ["a2", "a1", "c1", "d1"] {
+            store
+                .set_node_semantics(&sym(s), Some(s), Some("REQ-462"), None)
+                .unwrap();
+        }
+        let files = ["src/c.rs", "src/a.rs", "src/missing.rs", "src/a.rs"];
+        let mut scan: Vec<(String, SymbolId, NodeSemantics)> = Vec::new();
+        for n in GraphRead::all_nodes(&store).unwrap() {
+            if files.contains(&n.location.file.as_str()) {
+                if let Some(s) = store.node_semantics(&n.symbol).unwrap() {
+                    scan.push((n.location.file.clone(), n.symbol.clone(), s));
+                }
+            }
+        }
+        scan.sort_by(|a, b| (&a.0, &a.1.0).cmp(&(&b.0, &b.1.0)));
+        let got = store.semantics_in_files(&files).unwrap();
+        assert_eq!(got, scan);
+        assert_eq!(
+            got.iter().map(|r| r.1.0.as_str()).collect::<Vec<_>>(),
+            ["a1", "a2", "c1"]
+        );
+        assert!(store.semantics_in_files(&[]).unwrap().is_empty());
+        store.remove_file("src/c.rs").unwrap();
+        assert_eq!(
+            store
+                .semantics_in_files(&["src/c.rs", "src/d.rs"])
+                .unwrap()
+                .iter()
+                .map(|r| r.1.0.as_str())
+                .collect::<Vec<_>>(),
+            ["d1"]
+        );
+    }
 
     #[test]
     fn mem_node_semantics_absent_before_annotation() {
