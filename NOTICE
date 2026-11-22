@@ -3,7 +3,7 @@ Copyright (c) 2026 Michael Parcewski
 
 This product is licensed under the MIT License; see LICENSE for the full text.
 
-This product includes the following component vendored as source in this
+This product includes the following components vendored as source in this
 repository (as distinct from pinned Cargo dependencies, whose licenses are
 recorded in Cargo.lock and surfaced by the usual cargo/`cargo-about` tooling):
 
@@ -36,6 +36,53 @@ Oracle APEXlang tree-sitter grammar and test fixtures
   The full pinned APEXlang corpus (oracle/apex, oracle/skills; UPL-1.0) is not
   vendored: oracle/apexlang/corpus.tsv lists it and
   scripts/apexlang-corpus.py fetches and verifies it.
+-------------------------------------------------------------------------------
+ColdFusion CFML (tag + cfscript) tree-sitter grammar
+  Path:      crates/wicked-estate-extract/vendor/tree-sitter-cfml/
+  Crate:     wicked-estate-tree-sitter-cfml
+  Origin:    Vendored from https://github.com/cfmleditor/tree-sitter-cfml
+  License:   MIT License (the terms of this product's LICENSE file)
+             Copyright (c) 2014 Gareth Edwards & Gavin Baumanis
+             The full license text ships in the directory (LICENSE).
+-------------------------------------------------------------------------------
+Visual Basic 6 tree-sitter grammar
+  Path:      crates/wicked-estate-extract/vendor/tree-sitter-vb6/
+  Crate:     wicked-estate-tree-sitter-vb6
+  Origin:    Vendored from https://github.com/joannefan/tree-sitter-vb6
+  License:   MIT License (the terms of this product's LICENSE file)
+             Copyright (c) 2023 joannefan
+             The full license text ships in the directory (LICENSE).
+-------------------------------------------------------------------------------
+VBA tree-sitter grammar
+  Path:      crates/wicked-estate-extract/vendor/tree-sitter-vba/
+  Crate:     wicked-estate-tree-sitter-vba
+  Origin:    Vendored from https://github.com/tmepple/tree-sitter-vba
+  License:   MIT License (the terms of this product's LICENSE file)
+             Copyright (c) 2023 tmepple
+             The full license text ships in the directory (LICENSE).
+-------------------------------------------------------------------------------
+VBScript tree-sitter grammar
+  Path:      crates/wicked-estate-extract/vendor/tree-sitter-vbscript/
+  Crate:     wicked-estate-tree-sitter-vbscript
+  Origin:    Vendored from https://github.com/JJK96/tree-sitter-vbscript
+  License:   MIT License (the terms of this product's LICENSE file)
+             Copyright (c) 2023 JJK96
+             The full license text ships in the directory (LICENSE).
+-------------------------------------------------------------------------------
+In-house tree-sitter grammars: Progress OpenEdge ABL, Crystal Reports formula,
+Visual FoxPro, Informix 4GL, LotusScript, PowerBuilder PowerScript
+  Paths:     crates/wicked-estate-extract/vendor/tree-sitter-abl/
+             crates/wicked-estate-extract/vendor/tree-sitter-crystal-formula/
+             crates/wicked-estate-extract/vendor/tree-sitter-foxpro/
+             crates/wicked-estate-extract/vendor/tree-sitter-informix4gl/
+             crates/wicked-estate-extract/vendor/tree-sitter-lotusscript/
+             crates/wicked-estate-extract/vendor/tree-sitter-powerscript/
+  Origin:    In-house, authored in this repository
+             (https://github.com/mikeparcewski/wicked-estate); not imported
+             from an upstream grammar. Each is a symbols+calls subset written
+             here; ANTLR grammars (vfp2py, grammars-v4) and real source
+             samples were consulted for syntax.
+  License:   MIT (this repository's LICENSE)
 -------------------------------------------------------------------------------
 Data embedded in the binary by a Cargo dependency (document conversion:
 anydoc -> pdf-inspector), reproduced here as their licenses require for
