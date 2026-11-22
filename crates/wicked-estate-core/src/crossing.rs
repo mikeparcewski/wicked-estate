@@ -20,9 +20,7 @@ pub const LINK_RESOLVED_BY: &str = "wicked-link";
 pub const VIA_CAP: usize = 3;
 
 /// A real dependency edge from a blast-radius row to the immediately inner ring.
-/// `#[non_exhaustive]` (wicked-estate#559) so a later field is not a semver break.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[non_exhaustive]
 pub struct ViaEdge {
     pub id: String,
     /// The edge kind in its wire form (`"calls"`, `{"other": "<tag>"}`), as `path --json` hops.
