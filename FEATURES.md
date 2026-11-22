@@ -273,8 +273,8 @@ Full `GraphRead` + `GraphWrite` + `GraphStoreMutExt` implementation backed by Po
 - `rules.recall` ✅ — faceted, severity-ordered recall of conformance `Rule` nodes (`PAT-*`/`POL-*`);
   facets: language/layer/framework (wildcard), severity/rule_type (exact), scope subtree prefix,
   projects (a project rule only when its project is named; omitted = global rules only).
-- `RankHotspots` ✅ — top symbols by PageRank × change-frequency churn.
-- `Communities` ✅ — detected symbol communities (graph clusters).
+- `RankHotspots` ✅ — top symbols by PageRank over `Calls` + `Imports` edges (see §6 for the edge set).
+- `Communities` ✅ — detected symbol communities (Louvain over `Calls` + `Imports` edges).
 - `SemanticSearch` ✅ — embedding ANN (optional; needs a VectorStore).
 
 **Hybrid retrieval** ✅ — graph + FTS5 core, embeddings an **optional** sidecar, fused via **RRF**
@@ -304,6 +304,18 @@ must fall back to reading files · R7 confidence visible, low-confidence labeled
 `wicked-estate-rank` — (personalized) **PageRank** over CALLS/IMPORTS via power-iteration (empty seeds = uniform =
 global PR). Used to rank "most important symbols" (`rank` command) and to budget ContextPack output.
 (Replaced an O(V·E)/iter petgraph path: 59.8s → 0.107s on the bench corpus.)
+
+**Which edges count.** PageRank (`rank`/`hotspots`, MCP `RankHotspots`, and the ordering in
+`ContextBundle` and `graph-view`), Louvain community detection (`clusters`, MCP `Communities`)
+and the community summaries count **`Calls` and `Imports` edges only**, each at weight 1.0. Every
+other edge kind is ignored, including **`References`**. That covers all SCIP evidence: `scip` writes
+`References` only (SCIP has no call role), so running `scip` does not change rank, hotspots or
+communities. For you this means a symbol that is only referenced, never called or imported (a
+constant that is only read, a function only passed as a value), ranks low; a symbol with no
+`Calls` or `Imports` edge in either direction is a singleton and is left out of communities.
+Source: `crates/wicked-estate-rank/src/lib.rs` (`build_graph`), `community.rs` (`collect_edges`)
+and `cluster_summary.rs`. Whether `References` should count is an
+open question (#294).
 
 ---
 

@@ -94,6 +94,9 @@ gh attestation verify wicked-estate-$V-$T.tar.gz --repo mikeparcewski/wicked-est
 - **Linux** binaries are built against glibc 2.28, so they start on RHEL/Alma/Rocky 8+, Debian 10+
   and Ubuntu 20.04+. They are glibc builds and not static musl ones, because a musl binary cannot
   `dlopen` the runtime grammar plugins (`PLUGIN.md`).
+- **macOS** binaries need macOS 11 (Big Sur) or later, on Apple silicon and Intel alike: the
+  release build pins that floor for the Rust and the C code (SQLite, the grammars) and checks it
+  on the shipped binaries.
 - **macOS** binaries are not notarized yet. After downloading, clear the quarantine flag once:
   `xattr -d com.apple.quarantine wicked-estate wicked-estate-mcp`.
 - **Windows** binaries link the C runtime statically, so no VC++ redistributable is needed.
@@ -143,7 +146,7 @@ wicked-estate path http_handler db_write --db graph.db
 wicked-estate query handleRequest --db graph.db
 wicked-estate source handleRequest --db graph.db
 
-# Most important symbols (PageRank)
+# Most important symbols (PageRank over Calls + Imports edges only)
 wicked-estate rank --db graph.db
 
 # Semantic search (after: wicked-estate index … --embeddings, built with a semantic feature)
@@ -216,7 +219,7 @@ swappable impl behind a seam:
 | `wicked-estate-extract` | tree-sitter + grammar-less extractors + W15 rules engine extractors |
 | `wicked-estate-resolve` | reference resolvers (name/scoped/import-map/relative-import/SCIP/estate) + the LSP client library (ADR-009) |
 | `wicked-estate-store` | storage (SQLite default + in-memory reference) |
-| `wicked-estate-rank` | PageRank importance |
+| `wicked-estate-rank` | PageRank importance and Louvain communities, over `Calls` + `Imports` edges only (SCIP `References` are not counted; see FEATURES.md §6) |
 | `wicked-estate-retrieve` | agent-facing retrieval tools + hybrid/semantic search |
 | `wicked-estate-mcp` | MCP server (`wicked-estate-mcp` binary) |
 | `wicked-estate` | the `wicked-estate` CLI binary |
