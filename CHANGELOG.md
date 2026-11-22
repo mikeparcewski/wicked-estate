@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.35.10] — 2026-11-22
+
+Patch release on estate main d8c342e7 (0.35.9 plus #564), carrying 1 PR since 0.35.9: #564. There is no GitHub Release for 0.35.9: its publish run could not draft one (the crates.io wait failed on the vendored grammar crates, #563). The 0.35.9 crates are on crates.io; the prebuilt binaries ship in the 0.35.10 GitHub Release.
+
+### Fixed
+
+- **Fixed:** the Publish workflow's crates.io wait now checks each crate at its own manifest version, so the vendored grammar crates no longer keep it from drafting the GitHub Release (#563). `scripts/publish.sh --list-versions` prints the `crate=version` pairs, and `publish.sh` rejects unknown arguments. (#564)
+
 ## [0.35.9] — 2026-11-22
 
 Patch release on the train-11 cut 3adf57aa, carrying 24 PRs since 0.35.8: #527, #528, #529, #530, #531, #534, #535, #536, #537, #538, #539, #540, #541, #542, #546, #547, #550, #551, #552, #553, #554, #555, #557, #560.
