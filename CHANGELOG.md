@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.35.11] — 2026-11-23
+
+Patch release on the train-12 cut 950919c0, carrying 5 PRs since 0.35.10: #549, #566, #567, #569, #568.
+
+### Changed
+
+- State the edge set rank, hotspots and communities count (Calls + Imports only) (#566)
+- Semantics carry-over without node scans or a second lookup; SQLite restore uses a cached statement (#567)
+- Provenance rows and NOTICE attribution for all 12 vendored grammars (#569)
+- Pin the x86_64 macOS floor and check it on the shipped binaries (#568)
+
+### Fixed
+
+- **Documents are converted in a supervised child, and skipped documents stay visible (#442, #457, #443).** `wicked-estate` and `wicked-estate-mcp` now convert each PDF/Office/ODF/RTF/EPUB document in a child process of the same binary, with a 1 GiB memory budget and a 120 s deadline. A crafted PDF (for example an absurd predictor `/Columns` that made lopdf allocate ~8 GiB at load) is skipped with a reason instead of killing the indexer or the MCP server, and a converter crash ends only the child. Skipped documents are recorded per repo: `index` prints every recorded `DOC-SKIPPED` line on each run, `stats --json` gains `skipped_documents {count, files}`, and freshness diagnostics name them, including on unchanged runs. Behaviour change: `DOC-SKIPPED` lines repeat on every index run until the document converts or is removed. (#549)
+
 ## [0.35.10] — 2026-11-22
 
 Patch release on estate main d8c342e7 (0.35.9 plus #564), carrying 1 PR since 0.35.9: #564. There is no GitHub Release for 0.35.9: its publish run could not draft one (the crates.io wait failed on the vendored grammar crates, #563). The 0.35.9 crates are on crates.io; the prebuilt binaries ship in the 0.35.10 GitHub Release.
