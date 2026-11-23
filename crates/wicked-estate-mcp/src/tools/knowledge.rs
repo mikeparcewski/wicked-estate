@@ -204,7 +204,13 @@ fn dispatch_ingest(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, n
             );
         }
     };
-    let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+    // A present scope must be a string: under replace_source an unreadable scope would read as
+    // the root, whose subtree is every scope (#558).
+    let scope = match args.get("scope") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => return json_rpc_error(id, -32602, "scope must be a string"),
+    };
     let source = args
         .get("source")
         .and_then(|v| v.as_str())
