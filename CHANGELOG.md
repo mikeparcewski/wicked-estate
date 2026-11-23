@@ -4,7 +4,7 @@
 
 ## [0.35.11] — 2026-11-23
 
-Patch release on the train-12 cut 950919c0, carrying 5 PRs since 0.35.10: #549, #566, #567, #569, #568.
+Patch release on the train-12 re-cut 4 794aa60f, carrying 7 PRs since 0.35.10: #549, #566, #567, #569, #568, #561, #572.
 
 ### Changed
 
@@ -16,6 +16,8 @@ Patch release on the train-12 cut 950919c0, carrying 5 PRs since 0.35.10: #549, 
 ### Fixed
 
 - **Documents are converted in a supervised child, and skipped documents stay visible (#442, #457, #443).** `wicked-estate` and `wicked-estate-mcp` now convert each PDF/Office/ODF/RTF/EPUB document in a child process of the same binary, with a 1 GiB memory budget and a 120 s deadline. A crafted PDF (for example an absurd predictor `/Columns` that made lopdf allocate ~8 GiB at load) is skipped with a reason instead of killing the indexer or the MCP server, and a converter crash ends only the child. Skipped documents are recorded per repo: `index` prints every recorded `DOC-SKIPPED` line on each run, `stats --json` gains `skipped_documents {count, files}`, and freshness diagnostics name them, including on unchanged runs. Behaviour change: `DOC-SKIPPED` lines repeat on every index run until the document converts or is removed. (#549)
+- The release workflow's version bump rewrites only `[workspace.package]` and the internal wicked-estate-* path pins, leaving third-party pins such as `zip` untouched (estate#479) (#561)
+- Scope-bound replace_source; bounded link diagnostics and live-member relink (#558, #559) (#572)
 
 ## [0.35.10] — 2026-11-22
 
