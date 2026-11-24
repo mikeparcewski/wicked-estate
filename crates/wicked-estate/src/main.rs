@@ -1,6 +1,7 @@
 //! `wicked-estate` — CLI over the indexing pipeline (`wicked_estate` lib).
 //!
 //!   wicked-estate index <path>           [--db <file|:memory:>] [--repo <name>] [--history] [--embeddings] [--force]
+//!                                        [--codegraph <bundle-dir> [--codegraph-languages a,b] [--codegraph-timeout <s>]]
 //!                                     `--repo <name>` (alias `--as`) co-locates MANY repos in ONE db:
 //!                                     every path this run stores is namespaced `<name>/…`. Without it
 //!                                     the behaviour is unchanged. Edges do NOT resolve across repos.
@@ -24,7 +25,7 @@
 //!   wicked-estate semantic <query>       [--db ...]
 //!   wicked-estate cross-graph <name>     --db <a.db> --db <b.db> ...
 //!                                     (or --dbs a.db,b.db,c.db)
-//!   wicked-estate watch <path>           [--db ...] [--repo <name>] [--history]
+//!   wicked-estate watch <path>           [--db ...] [--repo <name>] [--history] [--codegraph <bundle-dir> ...]
 //!   wicked-estate subscribe              [--db ...] [--since <seq>]
 //!   wicked-estate clusters [<min_size>]  [--json] [--annotate] [--db ...]
 //!   wicked-estate fingerprint <name>     [--content] [--db ...]
@@ -75,6 +76,39 @@ static ALLOC: BudgetAlloc = BudgetAlloc::new();
 
 fn to_any(e: wicked_estate_core::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
+}
+
+/// `--codegraph <bundle-dir>` on `index`/`watch`: the codegraph import config, its state kept
+/// next to the graph file (`<db>.codegraph/<repo label or _>`). `None` without the flag.
+fn codegraph_config(
+    args: &cli_flags::Args,
+    db: &str,
+    repo: Option<&str>,
+) -> Result<Option<wicked_estate::codegraph::CodegraphConfig>> {
+    let Some(bundle) = args.str("codegraph") else {
+        return Ok(None);
+    };
+    if db.contains("://") {
+        anyhow::bail!("--codegraph needs a graph file (its state lives next to it), not {db}");
+    }
+    let languages: Vec<String> = args
+        .list("codegraph-languages")
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
+    for lang in &languages {
+        if !wicked_estate::codegraph::DEFAULT_LANGUAGES.contains(&lang.as_str()) {
+            anyhow::bail!(
+                "--codegraph-languages: {lang} is not one codegraph handles for estate (one of: {})",
+                wicked_estate::codegraph::DEFAULT_LANGUAGES.join(", ")
+            );
+        }
+    }
+    Ok(Some(wicked_estate::codegraph::CodegraphConfig {
+        bundle: std::path::PathBuf::from(bundle),
+        state_dir: std::path::PathBuf::from(format!("{db}.codegraph")).join(repo.unwrap_or("_")),
+        languages,
+        timeout: Duration::from_secs(args.u64("codegraph-timeout").unwrap_or(600)),
+    }))
 }
 
 fn ensure_db_dir(db: &str) -> Result<()> {
@@ -923,6 +957,7 @@ fn main() -> Result<()> {
             ensure_db_dir(&db)?;
             let _writer = lock_writer(&db, "index")?;
             let as_repo = args.str("repo");
+            let codegraph = codegraph_config(&args, &db, as_repo)?;
             // --force: invalidate the stored digests so index_path treats every file as changed —
             // but only THIS repo's, or forcing one repo would silently make every other repo in a
             // co-located graph re-extract from scratch on its next run.
@@ -941,13 +976,23 @@ fn main() -> Result<()> {
                 let mut concrete = SqliteStore::open(&db).map_err(to_any)?;
                 concrete.set_history_enabled(true).map_err(to_any)?;
                 let mut store: Box<dyn GraphStoreMutExt> = Box::new(concrete);
-                wicked_estate::index_path_as(store.as_mut(), Path::new(path), as_repo)
-                    .map_err(to_any)?
+                wicked_estate::index_path_with(
+                    store.as_mut(),
+                    Path::new(path),
+                    as_repo,
+                    codegraph.as_ref(),
+                )
+                .map_err(to_any)?
             } else {
                 // Default: history OFF (no-bloat-by-default).
                 let mut store = open_store_ext(&db).map_err(to_any)?;
-                wicked_estate::index_path_as(store.as_mut(), Path::new(path), as_repo)
-                    .map_err(to_any)?
+                wicked_estate::index_path_with(
+                    store.as_mut(),
+                    Path::new(path),
+                    as_repo,
+                    codegraph.as_ref(),
+                )
+                .map_err(to_any)?
             };
             // The counts are the WHOLE graph's, which in a multi-repo db is every repo — say so
             // rather than let a labelled run read as if it had produced all of them itself.
@@ -2664,11 +2709,18 @@ fn main() -> Result<()> {
             };
 
             let as_repo = args.str("repo");
+            let codegraph = codegraph_config(&args, &db, as_repo)?;
             // Each index pass takes the writer lock and releases it before waiting for events,
             // so `link` and other writers interleave between passes, never within one.
             let stats = {
                 let _writer = lock_writer(&db, "watch")?;
-                wicked_estate::index_path_as(store.as_mut(), watch_path, as_repo).map_err(to_any)?
+                wicked_estate::index_path_with(
+                    store.as_mut(),
+                    watch_path,
+                    as_repo,
+                    codegraph.as_ref(),
+                )
+                .map_err(to_any)?
             };
             println!(
                 "watch: initial index of {path_str} → {} nodes, {} edges, {} files",
@@ -2708,8 +2760,12 @@ fn main() -> Result<()> {
                                     Err(e) => eprintln!("watch: re-index waiting: {e}"),
                                 }
                             };
-                            match wicked_estate::index_path_as(store.as_mut(), watch_path, as_repo)
-                            {
+                            match wicked_estate::index_path_with(
+                                store.as_mut(),
+                                watch_path,
+                                as_repo,
+                                codegraph.as_ref(),
+                            ) {
                                 Ok(s) => {
                                     println!(
                                         "watch: re-indexed → {} nodes, {} edges, {} files",
@@ -4268,6 +4324,15 @@ fn main() -> Result<()> {
                 "    --force       bypass incremental digest skip; re-extract all files (use after a binary upgrade)"
             );
             println!(
+                "    --codegraph <bundle-dir>  extract + resolve TS/JS, Java, Kotlin, C#, Scala, Swift, VB.NET,"
+            );
+            println!(
+                "                  C/C++ and PHP with the pinned codegraph 1.6.4 bundle (state in <db>.codegraph/)"
+            );
+            println!(
+                "    --codegraph-languages a,b  only these codegraph languages; --codegraph-timeout <s> (default 600)"
+            );
+            println!(
                 "  wicked-estate scip  <root>         [--db ...] [--repo <name>] [--scip-file <path>]"
             );
             println!(
@@ -4356,7 +4421,9 @@ fn main() -> Result<()> {
             println!(
                 "  wicked-estate link --project <id> [--labels a,b] [--json] [--status] [--db <file>]  # cross-repo package links"
             );
-            println!("  wicked-estate watch <path>         [--db ...] [--repo <name>] [--history]");
+            println!(
+                "  wicked-estate watch <path>         [--db ...] [--repo <name>] [--history] [--codegraph <bundle-dir> ...]"
+            );
             println!(
                 "    Initial full index then reactive re-index on file changes (Ctrl-C to stop)."
             );

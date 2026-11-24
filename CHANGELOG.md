@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **codegraph import (opt-in):** `index --codegraph <bundle-dir>` (and `watch`) hands extraction and resolution for TS/JS, Java, Kotlin, C#, Scala, Swift, VB.NET, C/C++ and PHP to the pinned codegraph 1.6.4 bundle and maps its facts onto estate's own ids. A ref binds the codegraph edge at the same site (`resolved_by = codegraph:<how>`), codegraph-only edges are added, and definitions estate's extraction lacks get estate-scheme ids. Codegraph runs on a redacted mirror in the graph's state dir (`<db>.codegraph/`), never in the repo, with no inherited environment and telemetry off. A file codegraph reports errors for (`size_exceeded`, `parse_error`, ...), lacks, or cannot match one to one keeps estate's own pipeline (`CODEGRAPH-SKIPPED: <path> <reason>`); a failed run keeps it for every file (`CODEGRAPH-FALLBACK:`). A ref codegraph left unresolved is parked as `codegraph:<name>` and never bound by name. `--codegraph-languages` narrows the switch; switching it off re-extracts the covered files once. Only the darwin-arm64 bundle is pinned so far.
+
 ## [0.35.10] — 2026-11-22
 
 Patch release on estate main d8c342e7 (0.35.9 plus #564), carrying 1 PR since 0.35.9: #564. There is no GitHub Release for 0.35.9: its publish run could not draft one (the crates.io wait failed on the vendored grammar crates, #563). The 0.35.9 crates are on crates.io; the prebuilt binaries ship in the 0.35.10 GitHub Release.

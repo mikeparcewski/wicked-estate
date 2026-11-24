@@ -197,6 +197,11 @@ const JOURNAL: Flag = str_flag("journal");
 const REPO: Flag = Flag::new("repo", Ty::Label).inline();
 const AS: Flag = Flag::new("as", Ty::Label).inline().alias_of("repo");
 const HISTORY: Flag = switch("history");
+/// Codegraph import (the hybrid languages): the extracted pinned bundle, the language switch and
+/// the per-run time limit in seconds.
+const CODEGRAPH: Flag = str_flag("codegraph");
+const CODEGRAPH_LANGUAGES: Flag = Flag::new("codegraph-languages", Ty::List);
+const CODEGRAPH_TIMEOUT: Flag = Flag::new("codegraph-timeout", U64);
 const KIND: Flag = str_flag("kind");
 const SYMBOL: Flag = str_flag("symbol");
 const TYPE: Flag = str_flag("type");
@@ -239,9 +244,23 @@ pub const COMMANDS: &[Command] = &[
         name: "index",
         spec: ruled(
             &[opt("path")],
-            &[DB, REPO, AS, HISTORY, switch("embeddings"), switch("force")],
-            // History and embeddings are skipped for an in-memory store: nothing persists.
-            &[Rule::Excludes(&["history", "embeddings"], IN_MEMORY)],
+            &[
+                DB,
+                REPO,
+                AS,
+                HISTORY,
+                switch("embeddings"),
+                switch("force"),
+                CODEGRAPH,
+                CODEGRAPH_LANGUAGES,
+                CODEGRAPH_TIMEOUT,
+            ],
+            // History and embeddings are skipped for an in-memory store: nothing persists. The
+            // codegraph state lives next to the graph file, so an in-memory store has none.
+            &[Rule::Excludes(
+                &["history", "embeddings", "codegraph"],
+                IN_MEMORY,
+            )],
         ),
     },
     Command {
@@ -406,8 +425,16 @@ pub const COMMANDS: &[Command] = &[
         name: "watch",
         spec: ruled(
             &[opt("path")],
-            &[DB, REPO, AS, HISTORY],
-            &[Rule::Excludes(&["history"], IN_MEMORY)],
+            &[
+                DB,
+                REPO,
+                AS,
+                HISTORY,
+                CODEGRAPH,
+                CODEGRAPH_LANGUAGES,
+                CODEGRAPH_TIMEOUT,
+            ],
+            &[Rule::Excludes(&["history", "codegraph"], IN_MEMORY)],
         ),
     },
     Command {

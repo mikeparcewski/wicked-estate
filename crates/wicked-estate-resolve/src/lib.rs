@@ -149,13 +149,17 @@ fn record_overloads(edge: &mut Edge, count: usize) {
 /// A `local-binding:` ref (wicked-estate#486) is skipped too: a local's name is not a global
 /// name. `ScopedNameResolver` binds its `<symbol>` form through [`bind_local`] before this check.
 /// An `import-alias:` ref likewise belongs only to `ImportMapResolver`, within its hinted module.
+/// A `codegraph:` ref is one codegraph left unresolved in a file it owns; nothing here binds it.
 fn routed_elsewhere(r: &UnresolvedRef) -> bool {
     use wicked_estate_core::refs::apexlang_ref::{CONTAINER_PREFIX, PREFIX};
-    use wicked_estate_core::refs::{IMPORT_ALIAS_PREFIX, LOCAL_BINDING_PREFIX};
+    use wicked_estate_core::refs::{
+        CODEGRAPH_REF_PREFIX, IMPORT_ALIAS_PREFIX, LOCAL_BINDING_PREFIX,
+    };
     r.raw_name.starts_with(PREFIX)
         || r.raw_name.starts_with(CONTAINER_PREFIX)
         || r.raw_name.starts_with(LOCAL_BINDING_PREFIX)
         || r.raw_name.starts_with(IMPORT_ALIAS_PREFIX)
+        || r.raw_name.starts_with(CODEGRAPH_REF_PREFIX)
 }
 
 /// The target of a `local-binding:<name>:<symbol>` ref: exactly that symbol, the definition the

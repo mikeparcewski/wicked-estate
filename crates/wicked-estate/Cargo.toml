@@ -40,6 +40,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = tr
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
+# Codegraph import: read codegraph's SQLite output (the same bundled SQLite as the store, one
+# library per process) and pin its bundle by sha256.
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
 
 [features]
 # Real semantic embeddings end-to-end for `index --embeddings` + `semantic`. Enable a tier

@@ -34,6 +34,13 @@ pub const LOCAL_BINDING_PREFIX: &str = "local-binding:";
 /// their hints, so back-fill cannot bind either name to an unrelated global.
 pub const IMPORT_ALIAS_PREFIX: &str = "import-alias:";
 
+/// `raw_name` prefix of a ref in a file whose resolution codegraph owns (the codegraph import):
+/// `codegraph:<name as written>`. Codegraph found no target at the site, so estate's name
+/// resolvers must never bind it, now or on a back-fill: binding by bare name is exactly the
+/// false-edge class the import replaces. Like the other prefixes it survives in the parked
+/// `unresolved_refs` row.
+pub const CODEGRAPH_REF_PREFIX: &str = "codegraph:";
+
 /// The persisted form of an APEXlang `@reference` (estate#313).
 ///
 /// `SqliteStore` keeps a parked ref's `raw_name`, `kind` and site, never its hints, so everything
