@@ -49,7 +49,9 @@ structure is refused by id and otherwise skipped and counted: refresh that struc
 `knowledge.replace_source`, which accepts registry ids and covers live data sources only.
 
 To refresh citation-sourced documents, call `knowledge.ingest` with `replace_source: true` and a
-non-empty `source`; it replaces knowledge with that exact source and returns `{doc_id, replaced}`.
+non-empty `source`; it replaces knowledge with that exact source inside the call's `scope` subtree
+and returns `{doc_id, replaced}`. The same source ingested under another scope is left alone; an
+empty `scope` is the root, so it replaces the source in every scope.
 An omitted or false flag keeps the existing append behavior. `source_rev` and `observed_at` remain
 accepted but are not stored. An emptied topic can use `knowledge.forget {"source": "..."}`.
 

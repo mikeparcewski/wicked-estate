@@ -1434,8 +1434,11 @@ fn main() -> Result<()> {
             // X1 (DES-S2 §5, §6): the state of every project link in this store — generation,
             // staleness and a per-member coverage summary (`link --status` lists the packages).
             // Built first so the row budget counts it (crew's capped read must stay parseable).
+            // Bounded (wicked-estate#559) to the CLI's own share of the page, CLI_LINK_BUDGET, not
+            // MCP's 1.5K LINK_RESERVE: crew reads every member's coverage from this array and not
+            // `coverage_omitted`, so only a project far past crew's scale is cut.
             let links = wicked_estate::link::answer_statuses(store.as_ref());
-            let links_json = serde_json::json!(links);
+            let links_json = wicked_estate::link::bounded_json(links.clone(), CLI_LINK_BUDGET);
             let links_len = links_json.to_string().len() + 10;
             let (mut kept, _) = cap_blast_radius_rows(name, unresolved, &br, depth, links_len);
             if kept == 0 && !deps.is_empty() {
@@ -1648,8 +1651,10 @@ fn main() -> Result<()> {
             });
             if json_out {
                 let mut doc = path_json(from, to, &result);
-                doc["link"] =
-                    serde_json::json!(wicked_estate::link::answer_statuses(store.as_ref()));
+                doc["link"] = wicked_estate::link::bounded_json(
+                    wicked_estate::link::answer_statuses(store.as_ref()),
+                    CLI_LINK_BUDGET,
+                );
                 doc["resolved"] = serde_json::json!(miss.is_none());
                 if let Some((operand, (found, truncated))) = &miss {
                     wicked_estate_retrieve::suggest::mark_miss(
@@ -4583,6 +4588,12 @@ fn evidence_text(c: &wicked_estate::EdgeConfidence) -> String {
 /// R4 budget). crew parses the `--json` document from `execCapped` stdout, where an oversized
 /// payload is cut mid-document and `JSON.parse` throws — bounding it here fixes that.
 const BLAST_RADIUS_CHAR_BUDGET: usize = 25_000;
+
+/// The CLI `--json` answers' bound on their `link` array (blast-radius, path): half the CLI page,
+/// about 50 members in the compact form. crew builds per-member coverage from the array and does
+/// not read `coverage_omitted`, so the CLI keeps far more than MCP's 1.5K `LINK_RESERVE`; the
+/// blast-radius rows are budgeted around the array's measured length.
+const CLI_LINK_BUDGET: usize = BLAST_RADIUS_CHAR_BUDGET / 2;
 
 /// Room for the #279 paging keys on every page: `"next_cursor":"p1.<offset>.<16 hex>"` and
 /// `"page":{"from":…,"count":…,"total":…}` at their widest (20-digit `usize`s), with margin.

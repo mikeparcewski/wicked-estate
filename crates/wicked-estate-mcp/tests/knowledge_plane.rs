@@ -701,6 +701,122 @@ fn ingest_replace_source_removes_old_doc_and_chunk() {
     }
 }
 
+/// #558: replace_source is bound to the call's scope subtree. Two learn runs ingest the same
+/// citation under different scopes; refreshing one leaves the other's copy in place.
+#[test]
+fn ingest_replace_source_keeps_the_same_source_in_another_scope() {
+    let mut r = rig();
+    let source = "src/notes.md";
+    for (scope, word) in [
+        ("learn:a/topic:x", "alphaquasar"),
+        ("learn:b/topic:y", "betaquasar"),
+    ] {
+        r.ok(
+            "knowledge.ingest",
+            json!({"title": "t", "chunks": [word], "source": source, "scope": scope}),
+        );
+    }
+    let result = r.ok(
+        "knowledge.ingest",
+        json!({
+            "title": "t2", "chunks": ["alphapulsar"], "source": source,
+            "scope": "learn:a/topic:x", "replace_source": true
+        }),
+    );
+    assert_eq!(result["replaced"], 2, "only learn:a's doc and chunk");
+    let docs = |r: &Rig, scope: &str| {
+        r.know
+            .count(Some(wicked_estate_knowledge::KClass::Doc), Some(scope))
+            .unwrap()
+    };
+    assert_eq!(docs(&r, "learn:a"), 1);
+    assert_eq!(docs(&r, "learn:b"), 1, "the other scope's copy stays");
+    let recalled = r.ok("knowledge.recall", json!({"query": "betaquasar"}));
+    assert!(
+        recalled["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["body_snippet"]
+                .as_str()
+                .unwrap()
+                .contains("betaquasar")),
+        "{recalled}"
+    );
+}
+
+/// #558 review: the doc-to-chunk cascade honours the scope bound too. A chunk of the other scope
+/// that was related to the replaced doc (`knowledge.relate ... derived_from`) stays.
+#[test]
+fn ingest_replace_source_cascade_stays_inside_the_scope() {
+    use wicked_estate_core::Symbol;
+    use wicked_estate_knowledge::KClass;
+    let mut r = rig();
+    let source = "src/notes.md";
+    for (scope, word) in [
+        ("learn:a/topic:x", "alphaquasar"),
+        ("learn:b/topic:y", "betaquasar"),
+    ] {
+        r.ok(
+            "knowledge.ingest",
+            json!({"title": "t", "chunks": [word], "source": source, "scope": scope}),
+        );
+    }
+    // knowledge.relate takes full SymbolIds (the forget-by-id form, engine.rs ForgetTarget::Id).
+    let id_of = |r: &Rig, class: KClass, scope: &str| {
+        let kn = r
+            .know
+            .all_nodes(Some(class), Some(scope))
+            .unwrap()
+            .remove(0);
+        Symbol::synthetic(class.as_kind(), kn.id).id().0
+    };
+    let a_doc = id_of(&r, KClass::Doc, "learn:a");
+    let b_chunk = id_of(&r, KClass::Chunk, "learn:b");
+    r.ok(
+        "knowledge.relate",
+        json!({"src": b_chunk, "tgt": a_doc, "rel": "derived_from"}),
+    );
+    let result = r.ok(
+        "knowledge.ingest",
+        json!({
+            "title": "t2", "chunks": ["alphapulsar"], "source": source,
+            "scope": "learn:a/topic:x", "replace_source": true
+        }),
+    );
+    assert_eq!(result["replaced"], 2, "learn:a's doc and chunk only");
+    assert_eq!(
+        r.know.count(Some(KClass::Chunk), Some("learn:b")).unwrap(),
+        1,
+        "learn:b's chunk stays"
+    );
+}
+
+/// #558 review: a present scope that is not a string is refused, so a malformed refresh can
+/// never read as the root scope (every scope) and replace them all.
+#[test]
+fn ingest_replace_source_refuses_a_non_string_scope() {
+    let mut r = rig();
+    r.ok(
+        "knowledge.ingest",
+        json!({"title": "t", "chunks": ["keepme"], "source": "s.md", "scope": "learn:b"}),
+    );
+    for scope in [json!(123), json!({"path": "learn:a"}), json!(["learn:a"])] {
+        let response = r.call(
+            "knowledge.ingest",
+            json!({"title": "t", "chunks": ["x"], "source": "s.md", "scope": scope,
+                   "replace_source": true}),
+        );
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+    }
+    assert_eq!(
+        r.know
+            .count(Some(wicked_estate_knowledge::KClass::Doc), Some("learn:b"))
+            .unwrap(),
+        1
+    );
+}
+
 #[test]
 fn recall_require_filters_before_budget_and_rejects_invalid_deps() {
     use wicked_estate_knowledge::{KClass, KNode};
