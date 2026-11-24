@@ -53,7 +53,7 @@ typedef struct {
 } WickedCobolScanner;
 
 // Measured on AWS CardDemo's 106 COBOL files (wicked-estate#583): at most 1,295 recovering scans
-// (a procedure copybook) and, in programs, at most 1 per 90 others. Generated non-COBOL text:
+// (a procedure copybook) and, in programs, at most 1 per 89 others. Generated non-COBOL text:
 // 0.7 to 2.3 recovering scans per other one.
 #define RECOVERY_FLOOR 8192u
 #define RECOVERY_RATIO 4u
