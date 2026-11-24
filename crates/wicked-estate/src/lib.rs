@@ -2404,6 +2404,10 @@ fn index_path_inner(
         .with(|v| v.get())
         .unwrap_or((chunk_byte_budget, chunk_file_cap));
     let skipped_minified: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    // COBOL files where parse recovery took over (scanner patch 4, #583): path, first and last
+    // line (1-based) of the largest parse error.
+    let partial_parses: std::sync::Mutex<Vec<(String, u32, u32)>> =
+        std::sync::Mutex::new(Vec::new());
 
     // ── EXTRACT + WRITE ────────────────────────────────────────────────────────────────────
     // write-nodes: upsert nodes rows (hot path — prepare_cached, one transaction per chunk).
@@ -2565,6 +2569,28 @@ fn index_path_inner(
                         // A file with no language extractor still gets the extra-edge pass below.
                         base_extraction(&fw.rel, &ext, &text, &ext_map).unwrap_or_default()
                     };
+                    if let Some(span) = extraction
+                        .nodes
+                        .iter()
+                        .filter(|n| n.kind == NodeKind::File)
+                        .find_map(|n| {
+                            let v = n
+                                .metadata
+                                .get(wicked_estate_extract::treesitter::COBOL_UNPARSED_SPAN)?;
+                            serde_json::from_value::<wicked_estate_core::Span>(v.clone()).ok()
+                        })
+                    {
+                        // A span ending at a line's start (after its newline) ends on the line before.
+                        let last = if span.end_col == 0 && span.end_line > span.start_line {
+                            span.end_line
+                        } else {
+                            span.end_line + 1
+                        };
+                        partial_parses
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push((fw.rel.clone(), span.start_line + 1, last));
+                    }
                     if let Some(meta) = source.as_ref().and_then(|s| s.export_metadata.as_ref()) {
                         wicked_estate_extract::apexlang::apply_export_metadata(
                             &mut extraction,
@@ -2848,6 +2874,16 @@ fn index_path_inner(
         for path in &skipped_min {
             eprintln!("SKIPPED_MINIFIED: {path}");
         }
+    }
+    let mut partial = partial_parses
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner());
+    partial.sort();
+    for (path, from, to) in &partial {
+        eprintln!(
+            "PARTIAL-PARSE: {path}: the COBOL grammar could not read much of this file; lines \
+             {from} to {to} are one parse error, so the graph has nothing from those lines"
+        );
     }
 
     // ── Emit extraction counters (best-effort) ───────────────────────────────────────────────

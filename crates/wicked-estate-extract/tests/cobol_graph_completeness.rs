@@ -1577,3 +1577,139 @@ fn many_paragraphs_extract_in_linear_time() {
         std::time::Duration::from_secs(30),
     );
 }
+
+/// The 1-based first and last line of the parse error the File node reports (scanner patch 4),
+/// read as the index reads it. Checks the report's claim: no paragraph node lies in those lines.
+fn unparsed_lines(ex: &Extraction) -> Option<(u32, u32)> {
+    let file = ex.nodes.iter().find(|n| n.kind == NodeKind::File)?;
+    let v = file
+        .metadata
+        .get(wicked_estate_extract::treesitter::COBOL_UNPARSED_SPAN)?;
+    let s: wicked_estate_core::Span = serde_json::from_value(v.clone()).expect("a Span");
+    let last = if s.end_col == 0 && s.end_line > s.start_line {
+        s.end_line
+    } else {
+        s.end_line + 1
+    };
+    for n in ex.nodes.iter().filter(|n| n.kind == NodeKind::Function) {
+        let line = n.location.span.start_line + 1;
+        assert!(
+            !(s.start_line + 1..=last).contains(&line),
+            "{} at line {line} lies in the reported error {}..={last}",
+            n.name,
+            s.start_line + 1
+        );
+    }
+    Some((s.start_line + 1, last))
+}
+
+#[test]
+fn generated_text_the_grammar_rejects_extracts_in_bounded_time() {
+    // Patch 1's recovery walked ever longer runs of tree-sitter's stack on such text: 10,000 lines
+    // took about 13 s in a debug build, and 8,000 word lines about 30 s (wicked-estate#583). Once
+    // recovery has taken over a parse, scanner patch 4 recovers as upstream does.
+    let text: String = (0..10_000)
+        .map(|i| format!("let value_{i} = compute(&inputs[{i}], |x| x + {i})?;\n"))
+        .collect();
+    assert_extracts_within("JUNKTEXT", &text, std::time::Duration::from_secs(8));
+    // The File node says which lines are one parse error, for the index to report.
+    let (from, to) = unparsed_lines(&extract("JUNKTEXT", &text)).expect("a report");
+    assert!(from <= 1_000 && to == 10_000, "{from}..={to}");
+    let words: String = (0..8_000)
+        .map(|i| format!("alpha beta gamma delta epsilon zeta eta theta {i}\n"))
+        .collect();
+    assert_extracts_within("WORDTEXT", &words, std::time::Duration::from_secs(8));
+    let (from, to) = unparsed_lines(&extract("WORDTEXT", &words)).expect("a report");
+    assert!(from <= 1_000 && to == 8_000, "{from}..={to}");
+}
+
+/// `count` lines of generated text the grammar cannot read, each written from column 8.
+fn junk_lines(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|i| format!("let value_{i} = compute(&inputs[{i}], |x| x + {i})?;"))
+        .collect()
+}
+
+#[test]
+fn a_program_with_an_unreadable_tail_reports_the_tail_lines() {
+    // 40 readable paragraphs, then 3,000 lines the grammar cannot read: the report starts at the
+    // tail (tree-sitter's error takes in the last readable line, measured), ends at the last line,
+    // and the paragraphs before it keep their nodes.
+    let mut body = Vec::new();
+    for i in 0..40 {
+        body.push(format!("PARA-{i:02}."));
+        body.push(format!("    CALL 'SUB{i:02}'."));
+    }
+    let head = 4 + DATA.len() + 1 + body.len();
+    body.extend(junk_lines(3_000));
+    let body: Vec<&str> = body.iter().map(String::as_str).collect();
+    let ex = extract("TAILPGM", &program("TAILPGM", DATA, &body));
+    assert!(function_names(&ex).contains(&"PARA-39"));
+    let (from, to) = unparsed_lines(&ex).expect("a report");
+    let total = (head + 3_000) as u32;
+    assert!(
+        from >= head as u32 && from <= head as u32 + 1_000 && to == total,
+        "{from}..={to}, readable head {head}, total {total}"
+    );
+}
+
+#[test]
+fn a_free_format_file_reports_its_own_lines() {
+    // Free format is parsed as fixed-format cards, three cards per line here; the reported lines
+    // are the file's, not the cards'.
+    let mut text = String::from(">>SOURCE FORMAT FREE\n");
+    for i in 0..2_000 {
+        text.push_str(&format!(
+            "let value_{i} = compute(&inputs[{i}], |x| x + {i})?; let other_{i} = combine(value_{i}, \
+             &weights[{i}]); let third_{i} = finish(other_{i}, &limits[{i}], {i});\n"
+        ));
+    }
+    let (from, to) = unparsed_lines(&extract("FREEJUNK", &text)).expect("a report");
+    assert!(from >= 2 && to == 2_001, "{from}..={to}");
+}
+
+#[test]
+fn a_program_after_an_unreadable_block_is_never_reported_as_unparsed() {
+    // Once patch 4 is off, upstream recovery can still resync at a division header. The report
+    // names the largest error, not "everything after the trip", so a paragraph the graph has is
+    // never inside the reported lines (`unparsed_lines` checks that).
+    let mut text: String = junk_lines(3_000)
+        .iter()
+        .map(|l| format!("       {l}\n"))
+        .collect();
+    text.push_str(&program(
+        "AFTERPGM",
+        DATA,
+        &["MAIN-PARA.", "    CALL 'SUBPGM'.", "    GOBACK."],
+    ));
+    let ex = extract("AFTERPGM", &text);
+    let (from, to) = unparsed_lines(&ex).expect("a report");
+    assert!(from <= 1_000 && to <= 3_000 + 12, "{from}..={to}");
+}
+
+#[test]
+fn a_block_of_unreadable_lines_inside_a_program_still_resyncs() {
+    // 100 lines the grammar cannot read between two paragraphs stay below patch 4's floor: the
+    // parse resyncs after them (patch 1), and the paragraphs after the block get nodes.
+    let mut body = vec!["MAIN-PARA.".to_string(), "    DISPLAY 'START'.".to_string()];
+    for i in 0..100 {
+        body.push(format!(
+            "    let value_{i} = compute(&inputs[{i}], |x| x + {i})?;"
+        ));
+    }
+    body.extend([
+        "NEXT-PARA.".to_string(),
+        "    CALL 'SUBPGM'.".to_string(),
+        "LAST-PARA.".to_string(),
+        "    GOBACK.".to_string(),
+    ]);
+    let body: Vec<&str> = body.iter().map(String::as_str).collect();
+    let ex = extract("JUNKPGM", &program("JUNKPGM", DATA, &body));
+    let names = function_names(&ex);
+    assert!(
+        names.contains(&"NEXT-PARA") && names.contains(&"LAST-PARA"),
+        "{names:?}"
+    );
+    assert_eq!(callers_of(&ex, "SUBPGM"), ["NEXT-PARA"]);
+    assert_eq!(unparsed_lines(&ex), None);
+}

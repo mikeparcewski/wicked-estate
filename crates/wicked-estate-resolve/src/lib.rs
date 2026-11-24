@@ -606,8 +606,7 @@ fn qualifier_match(n: &wicked_estate_core::Node, qualifiers: &[String]) -> Optio
 ///   copybook, and a paragraph of the same spelling never is.
 /// - **label** binds a COBOL paragraph or section, by the same tiers.
 /// - **program** binds the unique program `Module` (COBOL, HLASM, PL/I, C, C++), never a
-///   paragraph. Uniqueness comes first: two programs of that name are ambiguous even when one of
-///   them is the caller.
+///   paragraph: two programs of that name are ambiguous, even when one of them is the caller's.
 ///
 /// Ownership comes from the extractor: items and paragraphs carry `cobol_program` or
 /// `cobol_copybook`, refs carry `cobol_programs` or `cobol_copybook` and `cobol_copies`.
@@ -637,10 +636,10 @@ fn cobol_targets(
         })
         .collect();
     if role == PROGRAM {
-        let [only] = candidates.as_slice() else {
-            return None;
-        };
-        return (only.symbol != r.from).then_some((candidates, CobolTier::Elsewhere));
+        // A call starts from the paragraph that makes it, so a program's call of itself binds its
+        // own Module: a recursive call, not a self-edge. (The extractor drops one made before the
+        // first paragraph, where the program itself would be the source.)
+        return (candidates.len() == 1).then_some((candidates, CobolTier::Elsewhere));
     }
     candidates.retain(|n| n.symbol != r.from);
     // How each candidate meets a data use's qualifiers: `true` by its own groups, `false` only as
@@ -4047,6 +4046,58 @@ mod tests {
                 "CUST-NAME"
             ),
             ["cbl/TWOPGM.cbl:CUST-NAME"]
+        );
+    }
+
+    /// A label binds a paragraph, never a data item of the same spelling. AMBPGM performs a
+    /// STEP-PARA that two sections define (a label ref by name) and has a STEP-PARA data item;
+    /// DATEPGM performs paragraphs of a procedure copybook (not nodes, as CSUTLDPY in CardDemo's
+    /// COACTUPC) and COPYs a data item EDIT-DATE.
+    #[test]
+    fn cobol_a_label_binds_a_paragraph_never_a_field() {
+        let edges = cobol_role_edges(false);
+        let calls_to = |source: &str, name: &str| {
+            let mut t: Vec<(String, NodeKind)> = edges
+                .iter()
+                .filter(|(src, t, k, _)| {
+                    src == source && *k == EdgeKind::Calls && t.rsplit(':').next() == Some(name)
+                })
+                .map(|(_, t, _, n)| (t.clone(), n.clone()))
+                .collect();
+            t.dedup();
+            t
+        };
+        assert_eq!(
+            calls_to("cbl/AMBPGM.cbl:AMBPGM", "STEP-PARA"),
+            [("cbl/AMBPGM.cbl:STEP-PARA".to_string(), NodeKind::Function)],
+            "{edges:#?}"
+        );
+        for name in ["EDIT-DATE", "EDIT-DATE-EXIT"] {
+            assert!(
+                calls_to("cbl/DATEPGM.cbl:DATEPGM", name).is_empty(),
+                "{edges:#?}"
+            );
+        }
+        assert!(
+            edges
+                .iter()
+                .all(|(_, _, k, t)| *k != EdgeKind::Calls || *t != NodeKind::Field),
+            "{edges:#?}"
+        );
+    }
+
+    /// A program that CALLs itself from a paragraph binds its own Module (a recursive call).
+    #[test]
+    fn cobol_a_program_calling_itself_from_a_paragraph_binds_its_module() {
+        let edges = cobol_role_edges(false);
+        assert!(
+            edges.contains(&(
+                "cbl/SELFPGM.cbl:SELFPGM".to_string(),
+                "cbl/SELFPGM.cbl:SELFPGM".to_string(),
+                EdgeKind::Calls,
+                NodeKind::Module
+            )),
+            "{edges:#?}"
         );
     }
 
