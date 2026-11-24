@@ -1033,6 +1033,19 @@ impl LogicalSource {
         };
         for n in &mut ex.nodes {
             one(&mut n.location.span);
+            // The File node's unparsed region (scanner patch 4) is a span of the parsed text too.
+            let key = crate::treesitter::COBOL_UNPARSED_SPAN;
+            if let Some(mut s) = n
+                .metadata
+                .get(key)
+                .and_then(|v| serde_json::from_value::<Span>(v.clone()).ok())
+            {
+                one(&mut s);
+                n.metadata.insert(
+                    key.to_string(),
+                    serde_json::to_value(s).expect("a Span serializes"),
+                );
+            }
         }
         for e in &mut ex.local_edges {
             if let Some(l) = &mut e.location {

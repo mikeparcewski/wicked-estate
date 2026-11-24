@@ -307,24 +307,32 @@ unsafe extern "C" {
     fn wicked_cobol_take_recovery_took_over() -> std::ffi::c_int;
 }
 
-/// File-node metadata key: the 1-based line from which a COBOL parse is one error to the end of
-/// the file, because recovery took over the parse (scanner patch 4, wicked-estate#583). The
-/// graph has nothing after that line; the index reports the file as `PARTIAL-PARSE`. (A
-/// free-format source is parsed as fixed-format cards, so its line is that text's.)
-pub const COBOL_UNPARSED_FROM_LINE: &str = "cobol_unparsed_from_line";
+/// File-node metadata key: the span (a [`Span`] as JSON) of the largest parse error in a COBOL
+/// file where recovery took over the parse (scanner patch 4, wicked-estate#583). The graph has
+/// nothing from those lines; the index reports the file as `PARTIAL-PARSE`. Like every span of a
+/// free-format source, it is mapped back to the file's own lines ([`crate::cobol_links::LogicalSource::to_file`]).
+pub const COBOL_UNPARSED_SPAN: &str = "cobol_unparsed_span";
 
-/// The 1-based line where the error that runs to the end of `tree` starts: on the path of last
-/// children from the root, the first ERROR node that ends where the root does.
-fn cobol_unparsed_from_line(tree: &tree_sitter::Tree) -> u32 {
-    let root = tree.root_node();
-    let mut node = Some(root);
-    while let Some(n) = node {
-        if n.is_error() && n.end_byte() == root.end_byte() {
-            return n.start_position().row as u32 + 1;
+/// The span of the largest ERROR node in `tree` (an ERROR's own children are not searched), or
+/// `None` when the parse has no error.
+fn cobol_largest_error(tree: &tree_sitter::Tree) -> Option<Span> {
+    let mut best: Option<tree_sitter::Node> = None;
+    let mut cursor = tree.walk();
+    loop {
+        let n = cursor.node();
+        if n.is_error() {
+            if best.is_none_or(|b| n.byte_range().len() > b.byte_range().len()) {
+                best = Some(n);
+            }
+        } else if cursor.goto_first_child() {
+            continue;
         }
-        node = n.child(n.child_count().saturating_sub(1));
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return best.map(ts_span);
+            }
+        }
     }
-    1
 }
 
 fn lang_cobol() -> tree_sitter::Language {
@@ -4751,9 +4759,11 @@ impl TreeSitterExtractor {
             .parse(cobol_view.as_deref().unwrap_or(&file.text).as_bytes(), None)
             .ok_or_else(|| Error::Extraction(format!("parse failed for {}", file.path)))?;
         // SAFETY: as above. The parse ran the scanner on this thread.
-        let cobol_unparsed_from = (is_cobol
-            && unsafe { wicked_cobol_take_recovery_took_over() } != 0)
-            .then(|| cobol_unparsed_from_line(&tree));
+        let cobol_unparsed = if is_cobol && unsafe { wicked_cobol_take_recovery_took_over() } != 0 {
+            cobol_largest_error(&tree)
+        } else {
+            None
+        };
         // Reuse the query compiled once at construction time.
         let query = &self.query;
         let names = query.capture_names();
@@ -5680,10 +5690,11 @@ impl TreeSitterExtractor {
             file.language.clone(),
             Location::new(&file.path, Span::ZERO),
         );
-        if let Some(line) = cobol_unparsed_from {
-            file_node
-                .metadata
-                .insert(COBOL_UNPARSED_FROM_LINE.to_string(), line.into());
+        if let Some(span) = cobol_unparsed {
+            file_node.metadata.insert(
+                COBOL_UNPARSED_SPAN.to_string(),
+                serde_json::to_value(span).expect("a Span serializes"),
+            );
         }
         nodes.push(file_node);
         let mut local_edges = Vec::new();
