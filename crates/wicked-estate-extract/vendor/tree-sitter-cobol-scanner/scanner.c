@@ -19,9 +19,20 @@
  *      (`EXEC` then SQL / CICS / DLI) outside its literals and comments, so the scan now fails at
  *      the next one: each failing scan stops at the next opener. A terminated block is matched
  *      exactly as before.
- * Every function and table is `static`, so nothing clashes with the crate's own scanner symbols.
+ *   4. Recovery that takes over the file (wicked-estate#583). On text the grammar mostly rejects
+ *      (a non-COBOL file saved as `.cbl`, a dialect it cannot read), patch 1 keeps the parser
+ *      recovering token by token, and tree-sitter's recovery then walks ever longer runs of its
+ *      stack: the parse grows faster than the file. The scanner counts, per parse, the scans
+ *      made while recovering and the others. Once recovering scans pass RECOVERY_FLOOR and are
+ *      more than one in RECOVERY_RATIO of the others, patch 1 is off for the rest of that parse:
+ *      upstream's recovery, one ERROR to the end, in linear time. Real COBOL recovers from a
+ *      statement in a few scans and never gets there. The count lives in the scanner's payload,
+ *      so it is per parser, and the extractor makes one parser per file.
+ * Every function and table is `static`, so nothing clashes with the crate's own scanner symbols,
+ * except `wicked_cobol_take_recovery_took_over` (patch 4's report to the extractor).
  */
 #include "tree_sitter/parser.h"
+#include <stdlib.h>
 #include <wctype.h>
 
 enum TokenType {
@@ -34,8 +45,37 @@ enum TokenType {
     EXEC_BLOCK,
 };
 
+// WICKED PATCH 4: the scans one parse made while recovering, and the others.
+typedef struct {
+    unsigned recovering;
+    unsigned other;
+    bool upstream_recovery;
+} WickedCobolScanner;
+
+// Measured on AWS CardDemo's 106 COBOL files (wicked-estate#583): at most 1,295 recovering scans
+// (a procedure copybook) and, in programs, at most 1 per 90 others. Generated non-COBOL text:
+// 0.7 to 2.3 recovering scans per other one.
+#define RECOVERY_FLOOR 8192u
+#define RECOVERY_RATIO 4u
+
+// Set on the parsing thread when patch 4 turns patch 1 off, so the extractor can report the file
+// (never a silent truncation). The parse runs the scanner on the caller's thread.
+#if defined(_MSC_VER)
+#define WICKED_THREAD_LOCAL __declspec(thread)
+#else
+#define WICKED_THREAD_LOCAL __thread
+#endif
+static WICKED_THREAD_LOCAL int wicked_cobol_recovery_took_over = 0;
+
+/* Whether patch 4 turned patch 1 off on this thread since the last call; clears it. */
+int wicked_cobol_take_recovery_took_over(void) {
+    int took = wicked_cobol_recovery_took_over;
+    wicked_cobol_recovery_took_over = 0;
+    return took;
+}
+
 static void *wicked_cobol_scanner_create(void) {
-    return NULL;
+    return calloc(1, sizeof(WickedCobolScanner));
 }
 
 static bool is_white_space(int c) {
@@ -236,10 +276,25 @@ static bool wicked_cobol_scanner_scan(void *payload, TSLexer *lexer,
 
     // WICKED PATCH 1: tree-sitter offers every external token only while it recovers from an
     // error. No parse state of this grammar has all of them valid at once.
-    const bool recovering = valid_symbols[WHITE_SPACES] && valid_symbols[LINE_PREFIX_COMMENT]
+    const bool every_token = valid_symbols[WHITE_SPACES] && valid_symbols[LINE_PREFIX_COMMENT]
         && valid_symbols[LINE_SUFFIX_COMMENT] && valid_symbols[LINE_COMMENT]
         && valid_symbols[COMMENT_ENTRY] && valid_symbols[multiline_string]
         && valid_symbols[EXEC_BLOCK];
+    // WICKED PATCH 4: once recovery has taken over the parse, recover as upstream does.
+    WickedCobolScanner *state = (WickedCobolScanner *)payload;
+    if(state != NULL && !state->upstream_recovery) {
+        if(every_token) {
+            state->recovering++;
+            if(state->recovering > RECOVERY_FLOOR
+               && state->recovering * RECOVERY_RATIO > state->other) {
+                state->upstream_recovery = true;
+                wicked_cobol_recovery_took_over = 1;
+            }
+        } else {
+            state->other++;
+        }
+    }
+    const bool recovering = every_token && !(state != NULL && state->upstream_recovery);
 
     if(valid_symbols[WHITE_SPACES]) {
         if(is_white_space(lexer->lookahead)) {
@@ -358,4 +413,5 @@ static void wicked_cobol_scanner_deserialize(void *payload, const char *buffer, 
 }
 
 static void wicked_cobol_scanner_destroy(void *payload) {
+    free(payload);
 }

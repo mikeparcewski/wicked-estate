@@ -1577,3 +1577,57 @@ fn many_paragraphs_extract_in_linear_time() {
         std::time::Duration::from_secs(30),
     );
 }
+
+#[test]
+fn generated_text_the_grammar_rejects_extracts_in_bounded_time() {
+    // Patch 1's recovery walked ever longer runs of tree-sitter's stack on such text: 10,000 lines
+    // took about 13 s in a debug build, and 8,000 word lines about 30 s (wicked-estate#583). Once
+    // recovery has taken over a parse, scanner patch 4 recovers as upstream does.
+    let text: String = (0..10_000)
+        .map(|i| format!("let value_{i} = compute(&inputs[{i}], |x| x + {i})?;\n"))
+        .collect();
+    assert_extracts_within("JUNKTEXT", &text, std::time::Duration::from_secs(8));
+    // The File node says where the parse became one error to the end, for the index to report.
+    let ex = extract("JUNKTEXT", &text);
+    let file = ex.nodes.iter().find(|n| n.kind == NodeKind::File).unwrap();
+    let line = file.metadata[wicked_estate_extract::treesitter::COBOL_UNPARSED_FROM_LINE]
+        .as_u64()
+        .expect("a line");
+    assert!((1..10_000).contains(&line), "{line}");
+    let words: String = (0..8_000)
+        .map(|i| format!("alpha beta gamma delta epsilon zeta eta theta {i}\n"))
+        .collect();
+    assert_extracts_within("WORDTEXT", &words, std::time::Duration::from_secs(8));
+}
+
+#[test]
+fn a_block_of_unreadable_lines_inside_a_program_still_resyncs() {
+    // 100 lines the grammar cannot read between two paragraphs stay below patch 4's floor: the
+    // parse resyncs after them (patch 1), and the paragraphs after the block get nodes.
+    let mut body = vec!["MAIN-PARA.".to_string(), "    DISPLAY 'START'.".to_string()];
+    for i in 0..100 {
+        body.push(format!(
+            "    let value_{i} = compute(&inputs[{i}], |x| x + {i})?;"
+        ));
+    }
+    body.extend([
+        "NEXT-PARA.".to_string(),
+        "    CALL 'SUBPGM'.".to_string(),
+        "LAST-PARA.".to_string(),
+        "    GOBACK.".to_string(),
+    ]);
+    let body: Vec<&str> = body.iter().map(String::as_str).collect();
+    let ex = extract("JUNKPGM", &program("JUNKPGM", DATA, &body));
+    let names = function_names(&ex);
+    assert!(
+        names.contains(&"NEXT-PARA") && names.contains(&"LAST-PARA"),
+        "{names:?}"
+    );
+    assert_eq!(callers_of(&ex, "SUBPGM"), ["NEXT-PARA"]);
+    let file = ex.nodes.iter().find(|n| n.kind == NodeKind::File).unwrap();
+    assert!(
+        !file
+            .metadata
+            .contains_key(wicked_estate_extract::treesitter::COBOL_UNPARSED_FROM_LINE)
+    );
+}

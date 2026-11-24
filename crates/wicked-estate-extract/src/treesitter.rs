@@ -303,6 +303,28 @@ unsafe extern "C" {
     fn wicked_cobol_language(
         base: *const tree_sitter::ffi::TSLanguage,
     ) -> *const tree_sitter::ffi::TSLanguage;
+    /// Whether scanner patch 4 took over recovery on this thread since the last call; clears it.
+    fn wicked_cobol_take_recovery_took_over() -> std::ffi::c_int;
+}
+
+/// File-node metadata key: the 1-based line from which a COBOL parse is one error to the end of
+/// the file, because recovery took over the parse (scanner patch 4, wicked-estate#583). The
+/// graph has nothing after that line; the index reports the file as `PARTIAL-PARSE`. (A
+/// free-format source is parsed as fixed-format cards, so its line is that text's.)
+pub const COBOL_UNPARSED_FROM_LINE: &str = "cobol_unparsed_from_line";
+
+/// The 1-based line where the error that runs to the end of `tree` starts: on the path of last
+/// children from the root, the first ERROR node that ends where the root does.
+fn cobol_unparsed_from_line(tree: &tree_sitter::Tree) -> u32 {
+    let root = tree.root_node();
+    let mut node = Some(root);
+    while let Some(n) = node {
+        if n.is_error() && n.end_byte() == root.end_byte() {
+            return n.start_position().row as u32 + 1;
+        }
+        node = n.child(n.child_count().saturating_sub(1));
+    }
+    1
 }
 
 fn lang_cobol() -> tree_sitter::Language {
@@ -4720,9 +4742,18 @@ impl TreeSitterExtractor {
         } else {
             None
         };
+        let is_cobol = self.lang_name == "cobol";
+        if is_cobol {
+            // SAFETY: reads and clears a thread-local int of the scanner; no other state.
+            unsafe { wicked_cobol_take_recovery_took_over() };
+        }
         let tree = parser
             .parse(cobol_view.as_deref().unwrap_or(&file.text).as_bytes(), None)
             .ok_or_else(|| Error::Extraction(format!("parse failed for {}", file.path)))?;
+        // SAFETY: as above. The parse ran the scanner on this thread.
+        let cobol_unparsed_from = (is_cobol
+            && unsafe { wicked_cobol_take_recovery_took_over() } != 0)
+            .then(|| cobol_unparsed_from_line(&tree));
         // Reuse the query compiled once at construction time.
         let query = &self.query;
         let names = query.capture_names();
@@ -5642,13 +5673,19 @@ impl TreeSitterExtractor {
         // ── File node + Contains edges ────────────────────────────────────
         let file_symbol = Symbol::file(&file.path).id();
         let mut nodes = Vec::with_capacity(def_nodes.len() + 1 + import_targets.len());
-        nodes.push(Node::new(
+        let mut file_node = Node::new(
             file_symbol.clone(),
             NodeKind::File,
             file.path.clone(),
             file.language.clone(),
             Location::new(&file.path, Span::ZERO),
-        ));
+        );
+        if let Some(line) = cobol_unparsed_from {
+            file_node
+                .metadata
+                .insert(COBOL_UNPARSED_FROM_LINE.to_string(), line.into());
+        }
+        nodes.push(file_node);
         let mut local_edges = Vec::new();
         for d in &defs {
             // Wave 2.6 (Fix A): Contains edges carry the file's location so remove_file()

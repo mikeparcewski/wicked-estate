@@ -2404,6 +2404,8 @@ fn index_path_inner(
         .with(|v| v.get())
         .unwrap_or((chunk_byte_budget, chunk_file_cap));
     let skipped_minified: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    // COBOL files whose parse is one error from a line to the end (scanner patch 4, #583).
+    let partial_parses: std::sync::Mutex<Vec<(String, u64)>> = std::sync::Mutex::new(Vec::new());
 
     // ── EXTRACT + WRITE ────────────────────────────────────────────────────────────────────
     // write-nodes: upsert nodes rows (hot path — prepare_cached, one transaction per chunk).
@@ -2565,6 +2567,21 @@ fn index_path_inner(
                         // A file with no language extractor still gets the extra-edge pass below.
                         base_extraction(&fw.rel, &ext, &text, &ext_map).unwrap_or_default()
                     };
+                    if let Some(line) = extraction
+                        .nodes
+                        .iter()
+                        .filter(|n| n.kind == NodeKind::File)
+                        .find_map(|n| {
+                            n.metadata
+                                .get(wicked_estate_extract::treesitter::COBOL_UNPARSED_FROM_LINE)
+                                .and_then(|v| v.as_u64())
+                        })
+                    {
+                        partial_parses
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push((fw.rel.clone(), line));
+                    }
                     if let Some(meta) = source.as_ref().and_then(|s| s.export_metadata.as_ref()) {
                         wicked_estate_extract::apexlang::apply_export_metadata(
                             &mut extraction,
@@ -2848,6 +2865,16 @@ fn index_path_inner(
         for path in &skipped_min {
             eprintln!("SKIPPED_MINIFIED: {path}");
         }
+    }
+    let mut partial = partial_parses
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner());
+    partial.sort();
+    for (path, line) in &partial {
+        eprintln!(
+            "PARTIAL-PARSE: {path}: the COBOL grammar reads almost none of this file; from line \
+             {line} to the end it is one parse error, so the graph has nothing after that line"
+        );
     }
 
     // ── Emit extraction counters (best-effort) ───────────────────────────────────────────────

@@ -3530,18 +3530,23 @@ mod tests {
     /// The role fixtures' sources, in index order.
     const ROLE_FIXTURES: &[&str] = &[
         "cbl/ACCTPGM.cbl",
+        "cbl/AMBPGM.cbl",
         "cbl/CUSTPGM.cbl",
+        "cbl/DATEPGM.cbl",
         "cbl/FRAGPGM.cbl",
         "cbl/OTHREC.cpy",
         "cbl/OTHPGM.cbl",
         "cbl/RECUR.cbl",
         "cbl/RECUR2.cbl",
+        "cbl/SELFPGM.cbl",
         "cbl/SHIPPGM.cbl",
         "cbl/TWOPGM.cbl",
         "cpy/ACCTFRAG.cpy",
         "cpy/ACCTREC.cpy",
         "cpy/CUSTFRAG.cpy",
         "cpy/CUSTREC.cpy",
+        "cpy/DATEPROC.cpy",
+        "cpy/DATEREC.cpy",
         "cpy/ORDFRAG.cpy",
         "cpy/ORDREC.cpy",
     ];
