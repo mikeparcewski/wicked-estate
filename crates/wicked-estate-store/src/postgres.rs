@@ -138,6 +138,38 @@ fn split_ddl(sql: &str) -> Vec<String> {
         .collect()
 }
 
+/// The ASCII-only fold of `name` that `idx_nodes_name_folded` indexes, in byte order (#577).
+macro_rules! folded_name {
+    () => {
+        "translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') COLLATE \"C\""
+    };
+}
+
+/// The name-prefix lookup statement (#358, #577): `$1` the folded prefix, then (when `bounded`)
+/// `$2` its successor as the exclusive upper bound, then the limit. Both bounds are plain range
+/// conditions on the indexed expression, so the planner searches `idx_nodes_name_folded`.
+fn name_prefix_sql(bounded: bool) -> &'static str {
+    if bounded {
+        concat!(
+            "SELECT data FROM nodes WHERE ",
+            folded_name!(),
+            " >= $1 AND ",
+            folded_name!(),
+            " < $2 ORDER BY ",
+            folded_name!(),
+            ", name COLLATE \"C\", symbol COLLATE \"C\" LIMIT $3"
+        )
+    } else {
+        concat!(
+            "SELECT data FROM nodes WHERE ",
+            folded_name!(),
+            " >= $1 ORDER BY ",
+            folded_name!(),
+            ", name COLLATE \"C\", symbol COLLATE \"C\" LIMIT $2"
+        )
+    }
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
   path    TEXT PRIMARY KEY,
@@ -169,6 +201,10 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT '';
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS requirement_validated_by TEXT;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS requirement_validated_at BIGINT;
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
+-- (#358, #577) Name-prefix lookups (`find_symbols_by_name_prefix`): a range over the ASCII-folded
+-- name in byte order. The expression and collation must match the query's exactly for the planner
+-- to use it; a database created before this gets it on its next open.
+CREATE INDEX IF NOT EXISTS idx_nodes_name_folded ON nodes ((translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')) COLLATE "C");
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file);
 CREATE INDEX IF NOT EXISTS idx_nodes_scope ON nodes(scope);
@@ -223,6 +259,17 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
 CREATE INDEX IF NOT EXISTS idx_edges_file   ON edges(file);
+-- Edge contributions (wicked-estate#543): one row per asserting file for a key asserted by more
+-- than one file (sparse; see the SQLite schema.sql comment).
+CREATE TABLE IF NOT EXISTS edge_files (
+  source TEXT NOT NULL,
+  target TEXT NOT NULL,
+  kind   TEXT NOT NULL,
+  file   TEXT NOT NULL,
+  data   TEXT NOT NULL,
+  PRIMARY KEY (source, target, kind, file)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_files_file ON edge_files(file);
 
 -- TS-S2A support plane (wicked_estate_core::support; docs/ENGINE-CONTRACT.md §3.4) — additive,
 -- created on any older database by this same CREATE ... IF NOT EXISTS DDL on open. Mirrors the
@@ -805,6 +852,10 @@ impl PostgresStore {
                 .execute(&mut *tx)
                 .await?;
             sqlx::query("DELETE FROM edge_base WHERE source = ANY($1) OR target = ANY($1)")
+                .bind(&syms)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM edge_files WHERE source = ANY($1) OR target = ANY($1)")
                 .bind(&syms)
                 .execute(&mut *tx)
                 .await?;
@@ -1406,6 +1457,54 @@ impl GraphWrite for PostgresStore {
         })?;
         for e in edges {
             let kind = serde_json::to_string(&e.kind)?;
+            let data = serde_json::to_string(e)?;
+            let file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
+            if !file.is_empty() {
+                // #543 edge contributions (see SqliteStore::upsert_edges): a second asserting
+                // file records the row's contribution and this one; a recorded key records this
+                // file's latest.
+                rt_block(async {
+                    let c = h.as_conn();
+                    sqlx::query(
+                        // The current contribution: the kept-aside base one for a supported key
+                        // (TS-S2A), else the public row (a supported key's is a projection).
+                        "INSERT INTO edge_files(source, target, kind, file, data) \
+                         SELECT source, target, kind, file, data FROM edge_base \
+                         WHERE source = $1 AND target = $2 AND kind = $3 \
+                           AND file NOT IN ('', $4) \
+                         UNION ALL \
+                         SELECT source, target, kind, file, data FROM edges \
+                         WHERE source = $1 AND target = $2 AND kind = $3 \
+                           AND file NOT IN ('', $4) \
+                           AND NOT EXISTS(SELECT 1 FROM edge_supports \
+                               WHERE source = $1 AND target = $2 AND kind = $3) \
+                         ON CONFLICT DO NOTHING",
+                    )
+                    .bind(&e.source.0)
+                    .bind(&e.target.0)
+                    .bind(&kind)
+                    .bind(file)
+                    .execute(&mut *c)
+                    .await?;
+                    sqlx::query(
+                        "INSERT INTO edge_files(source, target, kind, file, data) \
+                         SELECT $1, $2, $3, $4, $5 WHERE EXISTS( \
+                           SELECT 1 FROM edge_files \
+                           WHERE source = $1 AND target = $2 AND kind = $3) \
+                         ON CONFLICT(source, target, kind, file) \
+                         DO UPDATE SET data = EXCLUDED.data",
+                    )
+                    .bind(&e.source.0)
+                    .bind(&e.target.0)
+                    .bind(&kind)
+                    .bind(file)
+                    .bind(&data)
+                    .execute(&mut *c)
+                    .await?;
+                    Ok::<(), sqlx::Error>(())
+                })
+                .map_err(st)?;
+            }
             if supported {
                 let key: EdgeKey = (e.source.0.clone(), e.target.0.clone(), kind.clone());
                 let handled = rt_block(async {
@@ -1428,8 +1527,6 @@ impl GraphWrite for PostgresStore {
                     continue;
                 }
             }
-            let data = serde_json::to_string(e)?;
-            let file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
             let confidence = e.confidence.get() as f64;
             rt_block(
                 sqlx::query(
@@ -1623,12 +1720,22 @@ impl GraphWrite for PostgresStore {
         let kept: Vec<KeptImport> = {
             let candidates: Vec<(String, String, Option<String>)> = rt_block(async {
                 let rows = sqlx::query(
-                    "SELECT n.symbol, n.data, \
+                    // #543: a live key's contribution from another file (re-asserted below) is
+                    // a survivor too. LEAST ignores NULLs.
+                    "SELECT n.symbol, n.data, LEAST( \
                             (SELECT MIN(e.file) FROM edges e \
                               WHERE e.target = n.symbol \
                                 AND e.file NOT IN ('', $1) \
                                 AND e.source NOT IN \
-                                    (SELECT symbol FROM nodes WHERE file = $1)) AS new_home \
+                                    (SELECT symbol FROM nodes WHERE file = $1)), \
+                            (SELECT MIN(ef.file) FROM edge_files ef \
+                              WHERE ef.target = n.symbol \
+                                AND ef.file NOT IN ('', $1) \
+                                AND ef.source NOT IN \
+                                    (SELECT symbol FROM nodes WHERE file = $1) \
+                                AND EXISTS(SELECT 1 FROM edges e2 \
+                                    WHERE e2.source = ef.source AND e2.target = ef.target \
+                                      AND e2.kind = ef.kind))) AS new_home \
                      FROM nodes n \
                      WHERE n.file = $1 AND n.kind = $2",
                 )
@@ -1653,10 +1760,15 @@ impl GraphWrite for PostgresStore {
                 // The survivor edge at MIN(file) supplies the new location (file + span).
                 let edge_json: Option<String> = rt_block(async {
                     let row = sqlx::query(
-                        "SELECT e.data FROM edges e \
-                         WHERE e.target = $1 AND e.file = $2 \
-                           AND e.source NOT IN (SELECT symbol FROM nodes WHERE file = $3) \
-                         ORDER BY e.kind, e.source LIMIT 1",
+                        "SELECT data FROM ( \
+                           SELECT e.data, 0 AS pri, e.kind, e.source FROM edges e \
+                           WHERE e.target = $1 AND e.file = $2 \
+                             AND e.source NOT IN (SELECT symbol FROM nodes WHERE file = $3) \
+                           UNION ALL \
+                           SELECT ef.data, 1 AS pri, ef.kind, ef.source FROM edge_files ef \
+                           WHERE ef.target = $1 AND ef.file = $2 \
+                             AND ef.source NOT IN (SELECT symbol FROM nodes WHERE file = $3) \
+                         ) x ORDER BY pri, kind, source LIMIT 1",
                     )
                     .bind(&symbol)
                     .bind(&new_file)
@@ -1688,6 +1800,40 @@ impl GraphWrite for PostgresStore {
             }
             kept
         };
+
+        // #543: the other files' contributions to every key this file asserted with them,
+        // re-asserted after the deletes (see SqliteStore::remove_file), then the file's key groups
+        // and every group whose source lives in this file are dropped.
+        let survivors: Vec<Edge> = rt_block(async {
+            let c = h.as_conn();
+            let rows: Vec<String> = sqlx::query_scalar(
+                "SELECT ef.data FROM edge_files ef \
+                 WHERE ef.file <> $1 \
+                   AND (ef.source, ef.target, ef.kind) IN \
+                       (SELECT source, target, kind FROM edge_files WHERE file = $1) \
+                   AND ef.source NOT IN (SELECT symbol FROM nodes WHERE file = $1) \
+                   AND EXISTS(SELECT 1 FROM edges e WHERE e.source = ef.source \
+                              AND e.target = ef.target AND e.kind = ef.kind) \
+                 ORDER BY ef.source, ef.target, ef.kind, ef.file",
+            )
+            .bind(file)
+            .fetch_all(&mut *c)
+            .await?;
+            sqlx::query(
+                "DELETE FROM edge_files \
+                 WHERE (source, target, kind) IN \
+                       (SELECT source, target, kind FROM edge_files WHERE file = $1) \
+                    OR source IN (SELECT symbol FROM nodes WHERE file = $1)",
+            )
+            .bind(file)
+            .execute(&mut *c)
+            .await?;
+            Ok::<Vec<String>, sqlx::Error>(rows)
+        })
+        .map_err(st)?
+        .iter()
+        .map(|d| serde_json::from_str::<Edge>(d))
+        .collect::<std::result::Result<_, _>>()?;
 
         // TS-S2A: retire supported keys' base contributions by exactly the edge predicate, and
         // capture the supported rows this DELETE removes (healed below).
@@ -1743,6 +1889,9 @@ impl GraphWrite for PostgresStore {
         .map_err(st)?;
         // Support is producer-owned: re-project every supported edge the deletes removed.
         rt_block(pg_support_post_delete(h.as_conn(), support))?;
+        drop(h);
+        // #543: the other asserting files still assert their edges.
+        self.upsert_edges(&survivors)?;
 
         Ok(())
     }
@@ -1805,6 +1954,17 @@ impl GraphWrite for PostgresStore {
                 "DELETE FROM edges \
                  WHERE source NOT IN (SELECT symbol FROM nodes) \
                     OR target NOT IN (SELECT symbol FROM nodes)",
+            )
+            .execute(h.as_conn()),
+        )
+        .map_err(st)?;
+        // #543: a pruned edge's contributions go with it (before the support heal re-projects a
+        // supported key's public row, which would otherwise keep them).
+        rt_block(
+            sqlx::query(
+                "DELETE FROM edge_files WHERE NOT EXISTS(SELECT 1 FROM edges e \
+                   WHERE e.source = edge_files.source AND e.target = edge_files.target \
+                     AND e.kind = edge_files.kind)",
             )
             .execute(h.as_conn()),
         )
@@ -2222,30 +2382,21 @@ impl GraphRead for PostgresStore {
 
     /// (#358) `translate` folds A-Z only — the exact ASCII fold `query::name_has_prefix` defines
     /// (Postgres `lower()`/`ILIKE` fold Unicode too, which would admit rows the other stores do
-    /// not). The prefix is LIKE-escaped, so `_` and `%` are literal.
+    /// not). (#577) A byte-order range on `idx_nodes_name_folded`, bounded above by the prefix's
+    /// successor when it has one ([`name_prefix_sql`]); a `LIKE` on the folded name had no index
+    /// to use, so every lookup scanned `nodes`.
     fn find_symbols_by_name_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<Node>> {
         let mut h = self.conn()?;
-        let escaped = prefix
-            .to_ascii_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let pattern = format!("{escaped}%");
+        let lo = prefix.to_ascii_lowercase();
+        let hi = crate::sqlite::prefix_successor(&lo);
         let sql_limit: Option<i64> = limit.map(|l| l as i64);
         let mut nodes = rt_block(async {
-            let rows = sqlx::query(
-                "SELECT data FROM nodes \
-                 WHERE translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
-                                 'abcdefghijklmnopqrstuvwxyz') LIKE $1 ESCAPE '\\' \
-                 ORDER BY translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
-                                    'abcdefghijklmnopqrstuvwxyz') COLLATE \"C\", \
-                          name COLLATE \"C\", symbol COLLATE \"C\" \
-                 LIMIT $2",
-            )
-            .bind(&pattern)
-            .bind(sql_limit)
-            .fetch_all(h.as_conn())
-            .await?;
+            let q = sqlx::query(name_prefix_sql(hi.is_some())).bind(&lo);
+            let q = match &hi {
+                Some(hi) => q.bind(hi),
+                None => q,
+            };
+            let rows = q.bind(sql_limit).fetch_all(h.as_conn()).await?;
             let mut v = Vec::new();
             for row in rows {
                 let json: String = row.try_get("data")?;
@@ -3010,5 +3161,107 @@ mod ddl_tests {
                 "unbalanced quotes (would error in PG): {stmt}"
             );
         }
+    }
+}
+
+/// #577 on a live Postgres (skips without `TEST_POSTGRES_URL`, like tests/postgres_conformance.rs,
+/// and takes the same advisory lock so it never overlaps that suite's table drops).
+#[cfg(test)]
+mod name_prefix_plan_tests {
+    use super::{PostgresStore, name_prefix_sql};
+    use sqlx::Row;
+
+    /// Both name-prefix statements search `idx_nodes_name_folded`, which a writer open creates
+    /// on an existing database. Before #577 the lookup was a `LIKE` on the folded name with no
+    /// index to match it, so every lookup scanned `nodes`. `enable_seqscan = off` makes the
+    /// planner take the index whenever it can, so a `Seq Scan` here means it cannot.
+    #[test]
+    fn the_name_prefix_statements_search_the_folded_name_index_577() {
+        let url = match std::env::var("TEST_POSTGRES_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("name_prefix_plan_tests: TEST_POSTGRES_URL not set — skipping");
+                return;
+            }
+        };
+        const LEASE_KEY: i64 = 0x5749_434B; // "WICK", the key tests/postgres_conformance.rs holds
+        let rt = tokio::runtime::Runtime::new().expect("tokio");
+        let pool = rt
+            .block_on(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url),
+            )
+            .expect("connect");
+        rt.block_on(
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(LEASE_KEY)
+                .execute(&pool),
+        )
+        .expect("lease");
+        drop(PostgresStore::open(&url).expect("open postgres store"));
+        let plan = |bounded: bool| -> String {
+            let sql = format!("EXPLAIN {}", name_prefix_sql(bounded));
+            rt.block_on(async {
+                let mut conn = pool.acquire().await.expect("conn");
+                sqlx::query("SET enable_seqscan = off")
+                    .execute(&mut *conn)
+                    .await
+                    .expect("set");
+                let q = sqlx::query(&sql).bind("alp");
+                let q = if bounded { q.bind("alq") } else { q };
+                let rows = q
+                    .bind(Some(10_i64))
+                    .fetch_all(&mut *conn)
+                    .await
+                    .expect("explain");
+                sqlx::query("RESET enable_seqscan")
+                    .execute(&mut *conn)
+                    .await
+                    .expect("reset");
+                rows.iter()
+                    .map(|r| r.get::<String, _>(0))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        };
+        let bounded = plan(true);
+        let open_above = plan(false);
+        let _ = rt.block_on(
+            sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(LEASE_KEY)
+                .execute(&pool),
+        );
+        // The `Index Cond` of the scan on idx_nodes_name_folded: a bound the planner only
+        // applies as a `Filter` would still walk every name past the prefix.
+        let index_cond = |p: &str| -> String {
+            let mut lines = p
+                .lines()
+                .skip_while(|l| !l.contains("idx_nodes_name_folded"));
+            assert!(
+                lines.next().is_some(),
+                "no scan on idx_nodes_name_folded: {p}"
+            );
+            lines
+                .find(|l| l.trim_start().starts_with("Index Cond:"))
+                .unwrap_or_else(|| panic!("the folded-name scan has no Index Cond: {p}"))
+                .to_string()
+        };
+        for (shape, p) in [("bounded", &bounded), ("open above", &open_above)] {
+            assert!(!p.contains("Seq Scan"), "{shape}: {p}");
+        }
+        let cond = index_cond(&bounded);
+        assert!(
+            cond.contains(">= 'alp'") && cond.contains("< 'alq'"),
+            "both bounds are index conditions: {bounded}"
+        );
+        assert!(
+            !bounded.lines().any(|l| l.contains("Filter:")),
+            "no bound left to a filter: {bounded}"
+        );
+        assert!(
+            index_cond(&open_above).contains(">= 'alp'"),
+            "the lower bound is an index condition: {open_above}"
+        );
     }
 }
