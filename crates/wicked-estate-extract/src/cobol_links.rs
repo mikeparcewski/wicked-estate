@@ -26,6 +26,16 @@
 //! CONTENTS of every literal are blanked. So a `COPY` or an `EXEC SQL` inside a `DISPLAY` literal
 //! is not code. Literal values are read back from the comment-blanked copy at the same offsets.
 //!
+//! **Logical source.** A free-format source, or one with a continued literal, is read as its
+//! [`LogicalSource`]: fixed-format cards with each continued literal on one line. The grammar
+//! parses it, this pass reads it, and every span maps back to the file's own bytes and lines.
+//!
+//! **Ref roles.** Every COBOL ref carries its role in its hints
+//! ([`wicked_estate_core::refs::cobol_ref`]): a data use (with its `OF`/`IN` qualifiers and its
+//! program's COPY list), a procedure label, or a program call. `tag_roles` reads it from the
+//! tree and drops the labels the data-name query also matches; `wicked-estate-resolve` binds each
+//! role only to its own kind of target.
+//!
 //! **Every source is a real node** of this extraction: the program Module whose span holds the
 //! construct (nested programs pick the innermost), else the first program, else the copybook node,
 //! else the File node. Literal inference (dynamic calls, map names), labels and DD names are scoped
@@ -250,7 +260,23 @@ pub(crate) fn source_is_free_format(text: &str) -> bool {
 }
 
 /// Add the COBOL text links to `ex`, the tree-sitter extraction of `file`. See the module docs.
+/// A free-format or continued-literal source is read as its [`LogicalSource`], like the grammar
+/// reads it, and every span maps back to the file at the end.
 pub fn supplement(file: &SourceFile, ex: &mut Extraction) {
+    let Some(logical) = LogicalSource::of(&file.text) else {
+        supplement_text(file, ex);
+        return;
+    };
+    logical.to_logical(ex);
+    let as_parsed = SourceFile {
+        text: logical.text.clone(),
+        ..file.clone()
+    };
+    supplement_text(&as_parsed, ex);
+    logical.to_file(ex, &file.text);
+}
+
+fn supplement_text(file: &SourceFile, ex: &mut Extraction) {
     let free = source_is_free_format(&file.text);
     let (clean, code) = lexical_views(&file.text, free);
     // COPY … REPLACING / REPLACE pseudo-text is replacement text, never source, for every pass.
@@ -277,6 +303,7 @@ pub fn supplement(file: &SourceFile, ex: &mut Extraction) {
         lits,
         decisions: HashMap::new(),
         ddnames: HashSet::new(),
+        copies: HashMap::new(),
     };
     p.exec_cics(&code);
     p.exec_sql(&code);
@@ -427,6 +454,589 @@ fn lexical_views(text: &str, free: bool) -> (String, String) {
 /// Columns 73-80 are identification only on a card of at most 80 columns with column 72 blank.
 pub(crate) fn has_identification_area(body: &[u8]) -> bool {
     body.len() > 72 && body.len() <= 80 && body[71] == b' '
+}
+
+// ── logical source ─────────────────────────────────────────────────────────────────────────────
+
+/// `len` logical bytes at `at` came from the file bytes `from..from + len`, one to one (the
+/// content may be blanked).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Run {
+    at: usize,
+    from: usize,
+    len: usize,
+}
+
+/// Code bytes a fixed-format card holds (columns 8-72).
+const CARD_CODE_COLS: usize = 65;
+
+/// The source the COBOL grammar and the text pass read when it differs from the file:
+///
+/// - **free format** (`>>SOURCE FORMAT FREE`, `$SET SOURCEFORMAT"FREE"`): each line becomes a
+///   fixed-format card (code from column 8, a `*` or `/` comment line in the indicator column), a
+///   line longer than a card is split at a blank outside literals and comments, and directive
+///   lines are blanked. The grammar reads columns 1-6 as the sequence area and 73+ as the
+///   identification area, so free-format code from column 1 would otherwise lose its program.
+/// - **continued literals** (fixed format): a literal still open at the end of a card, continued
+///   by a `-` card whose first non-blank is the same quote, is joined onto one line, so
+///   `PROGRAM('SHIP` + `-    'PGM')` reads `PROGRAM('SHIPPGM')`. The rest of the continuation card
+///   follows on its own line, at its own columns. The first card's part runs to column 72, or to
+///   the end of a shorter line (trailing blanks an editor dropped are not restored).
+///
+/// Every file byte the logical text holds is in a [`Run`], in file order, so every span maps back
+/// to the file's own bytes and lines ([`LogicalSource::to_file`]). Added bytes (card padding,
+/// line breaks) map to the nearest file byte.
+pub struct LogicalSource {
+    pub text: String,
+    runs: Vec<Run>,
+    file_len: usize,
+}
+
+#[derive(Default)]
+struct LogicalBuilder<'a> {
+    src: &'a [u8],
+    out: Vec<u8>,
+    runs: Vec<Run>,
+}
+
+impl LogicalBuilder<'_> {
+    fn copy(&mut self, from: usize, to: usize) {
+        if to <= from {
+            return;
+        }
+        let at = self.out.len();
+        self.out.extend_from_slice(&self.src[from..to]);
+        match self.runs.last_mut() {
+            Some(r) if r.at + r.len == at && r.from + r.len == from => r.len += to - from,
+            _ => self.runs.push(Run {
+                at,
+                from,
+                len: to - from,
+            }),
+        }
+    }
+
+    fn copy_blank(&mut self, from: usize, to: usize) {
+        let at = self.out.len();
+        self.copy(from, to);
+        blank_bytes(&mut self.out, at, at + (to - from));
+    }
+
+    fn add(&mut self, s: &str) {
+        self.out.extend_from_slice(s.as_bytes());
+    }
+
+    fn pad(&mut self, cols: usize) {
+        self.out.extend(std::iter::repeat_n(b' ', cols));
+    }
+
+    /// Lay every free-format line out as a fixed-format card (see [`LogicalSource`]).
+    fn free_format(&mut self) {
+        let src = self.src;
+        let mut start = 0;
+        while start < src.len() {
+            let end = src[start..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(src.len(), |i| start + i + 1);
+            let mut body_end = end;
+            while body_end > start && matches!(src[body_end - 1], b'\n' | b'\r') {
+                body_end -= 1;
+            }
+            let body = &src[start..body_end];
+            let lead = body.iter().take_while(|b| b.is_ascii_whitespace()).count();
+            let rest = &body[lead..];
+            if rest.is_empty() {
+                self.copy(start, end);
+            } else if rest.starts_with(b">>") || rest.starts_with(b"$") {
+                // A compiler directive is not code.
+                self.copy_blank(start, body_end);
+                self.copy(body_end, end);
+            } else if lead == 0
+                && (body[0] == b'/' || (body[0] == b'*' && body.get(1) != Some(&b'>')))
+            {
+                // A comment line: its marker lands in the indicator column.
+                self.pad(6);
+                self.copy(start, end);
+            } else {
+                self.pad(7);
+                let mut s = start;
+                while body_end - s > CARD_CODE_COLS {
+                    let Some(p) = card_split(src, s, body_end) else {
+                        break;
+                    };
+                    self.copy(s, p);
+                    self.add("\n");
+                    self.pad(7);
+                    s = p + 1;
+                }
+                self.copy(s, end);
+            }
+            start = end;
+        }
+    }
+
+    /// Join fixed-format continued literals (see [`LogicalSource`]); false when there is none.
+    fn continued_literals(&mut self) -> bool {
+        let src = self.src;
+        let mut lines: Vec<(usize, usize)> = Vec::new(); // (start, end incl. newline)
+        let mut start = 0;
+        while start < src.len() {
+            let end = src[start..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(src.len(), |i| start + i + 1);
+            lines.push((start, end));
+            start = end;
+        }
+        let stop = |i: usize| -> usize {
+            let (s, e) = lines[i];
+            let mut b = e;
+            while b > s && matches!(src[b - 1], b'\n' | b'\r') {
+                b -= 1;
+            }
+            s + (b - s).min(72)
+        };
+        let card = |i: usize| -> Option<&[u8]> {
+            let (s, e) = lines[i];
+            let b = &src[s..e];
+            (b.len() > 7 && b[..6].iter().all(|c| c.is_ascii_digit() || *c == b' ')).then_some(b)
+        };
+        // The quote that opens the literal a continuation card at `i` carries on, and where.
+        let continuation = |i: usize, q: u8| -> Option<usize> {
+            let b = card(i)?;
+            if b[6] != b'-' {
+                return None;
+            }
+            let s = lines[i].0;
+            let at = (s + 7..stop(i)).find(|&p| src[p] != b' ')?;
+            (src[at] == q).then_some(at)
+        };
+        let mut joined = false;
+        let mut i = 0;
+        let mut col = 0; // where line i's unread code starts (after a joined literal)
+        while i < lines.len() {
+            let (s, e) = lines[i];
+            let open = card(i)
+                .filter(|b| !matches!(b[6], b'*' | b'/'))
+                .and_then(|_| open_literal(src, s + col.max(7), stop(i)));
+            let Some((q, next)) = open.and_then(|q| {
+                (i + 1 < lines.len())
+                    .then(|| continuation(i + 1, q))
+                    .flatten()
+                    .map(|at| (q, at))
+            }) else {
+                self.copy(s + col, e);
+                i += 1;
+                col = 0;
+                continue;
+            };
+            joined = true;
+            self.copy(s + col, stop(i));
+            let (mut j, mut at) = (i + 1, next);
+            loop {
+                let close = literal_close(src, at + 1, stop(j), q);
+                match close {
+                    Some(c) => {
+                        self.copy(at + 1, c + 1);
+                        self.add("\n");
+                        col = c + 1 - lines[j].0;
+                        self.pad(col);
+                        i = j;
+                        break;
+                    }
+                    None => {
+                        self.copy(at + 1, stop(j));
+                        match (j + 1 < lines.len())
+                            .then(|| continuation(j + 1, q))
+                            .flatten()
+                        {
+                            Some(n) => {
+                                j += 1;
+                                at = n;
+                            }
+                            None => {
+                                self.add("\n");
+                                i = j + 1;
+                                col = 0;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        joined
+    }
+}
+
+/// Whether any line is a fixed-format continuation card (`-` in column 7): the cheap test that
+/// spares most sources the logical-source build.
+fn has_continuation_card(text: &str) -> bool {
+    text.split('\n').any(|l| {
+        let b = l.as_bytes();
+        b.len() > 7 && b[6] == b'-' && b[..6].iter().all(|c| c.is_ascii_digit() || *c == b' ')
+    })
+}
+
+/// The quote of a literal still open at `stop`, scanning `src[from..stop]` outside literals.
+fn open_literal(src: &[u8], from: usize, stop: usize) -> Option<u8> {
+    let mut open: Option<u8> = None;
+    let mut i = from;
+    while i < stop {
+        let c = src[i];
+        match open {
+            Some(q) if c == q => open = None, // a doubled quote closes and reopens
+            Some(_) => {}
+            None if c == b'\'' || c == b'"' => open = Some(c),
+            None if c == b'*' && src.get(i + 1) == Some(&b'>') => return None,
+            None => {}
+        }
+        i += 1;
+    }
+    open
+}
+
+/// The closing quote of a literal whose contents start at `from` (a doubled quote is content).
+fn literal_close(src: &[u8], from: usize, stop: usize, q: u8) -> Option<usize> {
+    let mut i = from;
+    while i < stop {
+        if src[i] == q {
+            if i + 1 < stop && src[i + 1] == q {
+                i += 2;
+                continue;
+            }
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The last blank in `src[s..=s + CARD_CODE_COLS]` outside literals and before a `*>` comment:
+/// where a free-format line longer than a card breaks onto the next card.
+fn card_split(src: &[u8], s: usize, body_end: usize) -> Option<usize> {
+    let limit = (s + CARD_CODE_COLS).min(body_end);
+    let mut quote: Option<u8> = None;
+    let mut best = None;
+    for i in s..=limit.min(body_end - 1) {
+        let c = src[i];
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == b'\'' || c == b'"' => quote = Some(c),
+            None if c == b'*' && src.get(i + 1) == Some(&b'>') => return best,
+            None if c == b' ' && i > s => best = Some(i),
+            None => {}
+        }
+    }
+    best
+}
+
+impl LogicalSource {
+    /// `None` when the file is already fixed-format cards with no continued literal: the grammar
+    /// and the text pass read the file itself.
+    pub fn of(text: &str) -> Option<Self> {
+        let mut b = LogicalBuilder {
+            src: text.as_bytes(),
+            ..Default::default()
+        };
+        if source_is_free_format(text) {
+            b.free_format();
+        } else if !has_continuation_card(text) || !b.continued_literals() {
+            return None;
+        }
+        let text_out = match String::from_utf8(b.out) {
+            Ok(s) => s,
+            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+        };
+        Some(Self {
+            text: text_out,
+            runs: b.runs,
+            file_len: text.len(),
+        })
+    }
+
+    /// The file byte a span starting at logical byte `b` starts at.
+    fn file_start(&self, b: usize) -> usize {
+        let k = self.runs.partition_point(|r| r.at + r.len <= b);
+        match self.runs.get(k) {
+            Some(r) if r.at <= b => r.from + (b - r.at),
+            Some(r) => r.from,
+            None => self.file_len,
+        }
+    }
+
+    /// The file byte a span ending (exclusive) at logical byte `b` ends at.
+    fn file_end(&self, b: usize) -> usize {
+        let k = self.runs.partition_point(|r| r.at < b);
+        k.checked_sub(1).map_or(0, |k| {
+            let r = self.runs[k];
+            r.from + (b - r.at).min(r.len)
+        })
+    }
+
+    fn logical_start(&self, f: usize) -> usize {
+        let k = self.runs.partition_point(|r| r.from + r.len <= f);
+        match self.runs.get(k) {
+            Some(r) if r.from <= f => r.at + (f - r.from),
+            Some(r) => r.at,
+            None => self.text.len(),
+        }
+    }
+
+    fn logical_end(&self, f: usize) -> usize {
+        let k = self.runs.partition_point(|r| r.from < f);
+        k.checked_sub(1).map_or(0, |k| {
+            let r = self.runs[k];
+            r.at + (f - r.from).min(r.len)
+        })
+    }
+
+    /// Map every span of `ex` (parsed from [`Self::text`]) back to the file `file_text`.
+    pub fn to_file(&self, ex: &mut Extraction, file_text: &str) {
+        let lines = LineIndex::new(file_text);
+        Self::map(ex, |s| {
+            let a = self.file_start(s.start_byte as usize);
+            let b = self.file_end(s.end_byte as usize).max(a);
+            lines.span(a, b)
+        });
+    }
+
+    /// Map every span of `ex` (file bytes) onto [`Self::text`].
+    pub fn to_logical(&self, ex: &mut Extraction) {
+        let lines = LineIndex::new(&self.text);
+        Self::map(ex, |s| {
+            let a = self.logical_start(s.start_byte as usize);
+            let b = self.logical_end(s.end_byte as usize).max(a);
+            lines.span(a, b)
+        });
+    }
+
+    fn map(ex: &mut Extraction, f: impl Fn(&Span) -> Span) {
+        let one = |s: &mut Span| {
+            if *s != Span::ZERO {
+                *s = f(s);
+            }
+        };
+        for n in &mut ex.nodes {
+            one(&mut n.location.span);
+        }
+        for e in &mut ex.local_edges {
+            if let Some(l) = &mut e.location {
+                one(&mut l.span);
+            }
+        }
+        for r in &mut ex.refs {
+            one(&mut r.location.span);
+        }
+    }
+}
+
+// ── ref roles ──────────────────────────────────────────────────────────────────────────────────
+
+use wicked_estate_core::refs::cobol_ref::{
+    COPIES as COPIES_KEY, DATA as ROLE_DATA, LABEL as ROLE_LABEL, OPEN as OPEN_KEY,
+    PARENTS as PARENTS_KEY, PROGRAM as ROLE_PROGRAM, QUALIFIERS as QUALIFIERS_KEY,
+    ROLE as ROLE_KEY,
+};
+
+fn hint(r: &mut UnresolvedRef, key: &str, value: serde_json::Value) {
+    r.hints.insert(key.to_string(), value);
+}
+
+/// The nearest of `node` and its ancestors (at most `depth` up) whose kind is in `kinds`.
+fn up<'t>(
+    node: tree_sitter::Node<'t>,
+    kinds: &[&str],
+    depth: usize,
+) -> Option<tree_sitter::Node<'t>> {
+    let mut n = Some(node);
+    for _ in 0..=depth {
+        let cur = n?;
+        if kinds.contains(&cur.kind()) {
+            return Some(cur);
+        }
+        n = cur.parent();
+    }
+    None
+}
+
+fn upper_text(n: tree_sitter::Node, src: &[u8]) -> String {
+    n.utf8_text(src).unwrap_or("").trim().to_ascii_uppercase()
+}
+
+/// Tag each COBOL ref of a tree-sitter extraction with its role by its place in the tree, drop
+/// the procedure labels the data-name query also matches (`GO TO P`, `PERFORM P` are qualified
+/// words too), and record each data item's groups on its Field node. Runs on the parsed text,
+/// before any span is mapped back to the file.
+pub(crate) fn tag_roles(
+    tree: &tree_sitter::Tree,
+    src: &[u8],
+    nodes: &mut [Node],
+    refs: &mut Vec<UnresolvedRef>,
+) {
+    let root = tree.root_node();
+    refs.retain_mut(|r| {
+        let span = &r.location.span;
+        let Some(at) =
+            root.descendant_for_byte_range(span.start_byte as usize, span.end_byte as usize)
+        else {
+            return true;
+        };
+        match r.kind {
+            EdgeKind::References => {
+                let Some(q) = up(at, &["qualified_word"], 2) else {
+                    return true;
+                };
+                if q.parent()
+                    .is_some_and(|p| matches!(p.kind(), "label" | "alter_option"))
+                {
+                    return false; // a procedure name, never a data use
+                }
+                let mut cursor = q.walk();
+                let qualifiers: Vec<serde_json::Value> = q
+                    .named_children(&mut cursor)
+                    .filter(|w| w.kind() == "WORD")
+                    .skip(1)
+                    .map(|w| serde_json::Value::String(upper_text(w, src)))
+                    .collect();
+                hint(r, ROLE_KEY, ROLE_DATA.into());
+                if !qualifiers.is_empty() {
+                    hint(r, QUALIFIERS_KEY, serde_json::Value::Array(qualifiers));
+                }
+            }
+            EdgeKind::Calls => {
+                let ctx = up(
+                    at,
+                    &[
+                        "call_statement",
+                        "perform_procedure",
+                        "perform_statement_call_proc",
+                    ],
+                    4,
+                );
+                match ctx.map(|n| n.kind()) {
+                    Some("call_statement") => hint(r, ROLE_KEY, ROLE_PROGRAM.into()),
+                    Some(_) => hint(r, ROLE_KEY, ROLE_LABEL.into()),
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        true
+    });
+    let parents = data_item_parents(root, src);
+    for n in nodes.iter_mut().filter(|n| n.kind == NodeKind::Field) {
+        if let Some((names, open)) = parents.get(&(n.location.span.start_byte as usize)) {
+            let names = names
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect();
+            n.metadata
+                .insert(PARENTS_KEY.to_string(), serde_json::Value::Array(names));
+            if *open {
+                n.metadata
+                    .insert(OPEN_KEY.to_string(), serde_json::Value::Bool(true));
+            }
+        }
+    }
+}
+
+/// Every `data_description` (by start byte) → (its groups and FD, innermost first; whether its
+/// outermost group in this file is not an 01/77 level). Level numbers nest the items: an item
+/// belongs to the nearest earlier item of a lower level, and 01/77 start a new record.
+fn data_item_parents(root: tree_sitter::Node, src: &[u8]) -> HashMap<usize, (Vec<String>, bool)> {
+    let mut out = HashMap::new();
+    // (level, name) of the open groups; the FD (or none) the current record belongs to.
+    let mut stack: Vec<(u32, String)> = Vec::new();
+    let mut record_list: Option<usize> = None;
+    let mut fd: Option<String> = None;
+    let mut cursor = root.walk();
+    let mut todo = vec![root];
+    while let Some(n) = todo.pop() {
+        if n.kind() == "data_description" {
+            let mut c = n.walk();
+            let kids: Vec<_> = n.named_children(&mut c).collect();
+            let level = kids
+                .iter()
+                .find(|k| k.kind() == "level_number")
+                .and_then(|k| upper_text(*k, src).parse::<u32>().ok());
+            let name = kids
+                .iter()
+                .find(|k| k.kind() == "entry_name")
+                .map(|k| upper_text(*k, src))
+                .unwrap_or_default();
+            // A new record list (WORKING-STORAGE, an FD's records) starts a new nesting.
+            let list = up_past(n, "data_description");
+            if list.map(|p| p.id()) != record_list {
+                record_list = list.map(|p| p.id());
+                stack.clear();
+                fd = list.and_then(|p| file_description_name(p, src));
+            }
+            if let Some(level) = level {
+                if matches!(level, 1 | 77) {
+                    stack.clear();
+                } else if !matches!(level, 66 | 88) {
+                    while stack.last().is_some_and(|(l, _)| *l >= level) {
+                        stack.pop();
+                    }
+                }
+                let mut names: Vec<String> = stack
+                    .iter()
+                    .rev()
+                    .map(|(_, s)| s.clone())
+                    .filter(|s| !s.is_empty() && s != "FILLER")
+                    .collect();
+                let open = stack
+                    .first()
+                    .map_or(!matches!(level, 1 | 77), |(l, _)| !matches!(l, 1 | 77));
+                names.extend(fd.clone());
+                out.insert(n.start_byte(), (names, open));
+                if !matches!(level, 66 | 77 | 88) {
+                    stack.push((level, name));
+                }
+            }
+        }
+        let kids: Vec<_> = n.named_children(&mut cursor).collect();
+        todo.extend(kids.into_iter().rev());
+    }
+    out
+}
+
+/// The nearest ancestor of `n` whose kind is not `kind`.
+fn up_past<'t>(n: tree_sitter::Node<'t>, kind: &str) -> Option<tree_sitter::Node<'t>> {
+    let mut p = n.parent();
+    while let Some(x) = p.filter(|x| x.kind() == kind) {
+        p = x.parent();
+    }
+    p
+}
+
+/// The FD/SD name a record list belongs to: the list's `file_description` parent, or the
+/// `file_description_entry` right before it.
+fn file_description_name(list: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    let fd = list
+        .parent()
+        .filter(|p| p.kind() == "file_description")
+        .or_else(|| {
+            list.prev_named_sibling()
+                .filter(|p| p.kind() == "file_description_entry")
+        })?;
+    let mut c = fd.walk();
+    let word = fd
+        .named_children(&mut c)
+        .find(|k| k.kind() == "WORD")
+        .or_else(|| {
+            let mut c2 = fd.walk();
+            fd.named_children(&mut c2)
+                .find(|k| k.kind() == "file_description_entry")
+                .and_then(|e| {
+                    let mut c3 = e.walk();
+                    e.named_children(&mut c3).find(|k| k.kind() == "WORD")
+                })
+        })?;
+    Some(upper_text(word, src))
 }
 
 /// Byte offset → line/column (0-based, like the tree-sitter spans).
@@ -819,6 +1429,8 @@ struct Pass<'a> {
     decisions: HashMap<(Prog, String), Decision>,
     /// (program, UPPERCASE DD name or ASSIGN operand): not data uses.
     ddnames: HashSet<(Prog, String)>,
+    /// Source node (a program, or the copybook/File node) → the copybooks it `COPY`s/`INCLUDE`s.
+    copies: HashMap<SymbolId, BTreeSet<String>>,
 }
 
 /// A CICS option operand: the literal's value, or the data item a bare operand names.
@@ -877,9 +1489,9 @@ impl Pass<'_> {
             return;
         }
         let name = name.to_ascii_uppercase();
-        self.out
-            .refs
-            .push(UnresolvedRef::new(from, name, EdgeKind::References, loc));
+        let mut r = UnresolvedRef::new(from, name, EdgeKind::References, loc);
+        hint(&mut r, ROLE_KEY, ROLE_DATA.into());
+        self.out.refs.push(r);
     }
 
     /// Decide `var` in program `prog` once.
@@ -932,12 +1544,10 @@ impl Pass<'_> {
                             self.dynamic_ref_name(prog, &op.value)
                         };
                         if !raw.is_empty() {
-                            self.out.refs.push(UnresolvedRef::new(
-                                from.clone(),
-                                raw,
-                                EdgeKind::Calls,
-                                loc.clone(),
-                            ));
+                            let mut r =
+                                UnresolvedRef::new(from.clone(), raw, EdgeKind::Calls, loc.clone());
+                            hint(&mut r, ROLE_KEY, ROLE_PROGRAM.into());
+                            self.out.refs.push(r);
                         }
                     }
                 }
@@ -1174,6 +1784,10 @@ impl Pass<'_> {
         if sym == from {
             return;
         }
+        self.copies
+            .entry(from.clone())
+            .or_default()
+            .insert(name.clone());
         self.edge(
             from,
             sym.clone(),
@@ -1296,13 +1910,8 @@ impl Pass<'_> {
                 n.metadata.insert("dynamic_call".to_string(), v);
             }
         }
-        // References are never to a paragraph/section of the same program (PERFORM / GO TO labels
-        // are qualified words too) or to a DD name it ASSIGNs. Kept per site (ENGINE-CONTRACT §2.1).
-        let mut labels: HashSet<(Prog, String)> = HashSet::new();
-        for n in ex.nodes.iter().filter(|n| n.kind == NodeKind::Function) {
-            let prog = self.anchors.prog(n.location.span.start_byte as usize);
-            labels.insert((prog, n.name.to_ascii_uppercase()));
-        }
+        // References are never to a DD name the program ASSIGNs. Procedure labels never become
+        // References at all ([`tag_roles`]). Kept per site (ENGINE-CONTRACT §2.1).
         let mut refs = std::mem::take(&mut ex.refs);
         refs.append(&mut self.out.refs);
         refs.retain(|r| {
@@ -1313,8 +1922,40 @@ impl Pass<'_> {
                 self.anchors.prog(r.location.span.start_byte as usize),
                 r.raw_name.to_ascii_uppercase(),
             );
-            !labels.contains(&key) && !self.ddnames.contains(&key)
+            !self.ddnames.contains(&key)
         });
+        // A data use or label resolves first to the copybooks its program (and every program
+        // that holds it) COPYs.
+        for r in &mut refs {
+            let role = r.hints.get(ROLE_KEY).and_then(|v| v.as_str());
+            if !matches!(role, Some(ROLE_DATA | ROLE_LABEL)) {
+                continue;
+            }
+            let at = r.location.span.start_byte as usize;
+            let holders: Vec<&SymbolId> = match self
+                .anchors
+                .modules
+                .iter()
+                .filter(|(_, _, s, e)| *s <= at && at < *e)
+                .map(|(sym, ..)| sym)
+                .collect::<Vec<_>>()
+            {
+                v if v.is_empty() => vec![&self.anchors.fallback],
+                v => v,
+            };
+            let copies: BTreeSet<&String> = holders
+                .into_iter()
+                .filter_map(|h| self.copies.get(h))
+                .flatten()
+                .collect();
+            if !copies.is_empty() {
+                let list = copies
+                    .into_iter()
+                    .map(|c| serde_json::Value::String(c.clone()))
+                    .collect();
+                hint(r, COPIES_KEY, serde_json::Value::Array(list));
+            }
+        }
         ex.refs = refs;
         // Shared-id records: a definition beats a boundary; never shadow a tree-sitter node.
         let existing: HashSet<SymbolId> = ex.nodes.iter().map(|n| n.symbol.clone()).collect();
@@ -2476,5 +3117,252 @@ mod tests {
         );
         assert!(!clean.contains("note") && !clean.contains("comment") && !clean.contains("000100"));
         assert!(code.contains("\"~~~~~\""), "{code:?}");
+    }
+
+    // ── wicked-estate#545: ref roles ───────────────────────────────────────────────────────
+
+    fn hint_str<'a>(r: &'a UnresolvedRef, key: &str) -> Option<&'a str> {
+        r.hints.get(key).and_then(|v| v.as_str())
+    }
+
+    fn hint_list(r: &UnresolvedRef, key: &str) -> Vec<String> {
+        r.hints
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn refs_named<'a>(ex: &'a Extraction, kind: EdgeKind, name: &str) -> Vec<&'a UnresolvedRef> {
+        ex.refs
+            .iter()
+            .filter(|r| r.kind == kind && r.raw_name == name)
+            .collect()
+    }
+
+    /// A file of the resolver's role fixtures (`wicked-estate-resolve/tests/fixtures/cobol_roles`).
+    fn role_fixture(rel: &str) -> String {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../wicked-estate-resolve/tests/fixtures/cobol_roles");
+        std::fs::read_to_string(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+    }
+
+    fn custpgm() -> Extraction {
+        run("cbl/CUSTPGM.cbl", &role_fixture("cbl/CUSTPGM.cbl"))
+    }
+
+    /// The role fixtures' sources, in index order.
+    const ROLE_FIXTURES: &[&str] = &[
+        "cbl/CUSTPGM.cbl",
+        "cbl/OTHREC.cpy",
+        "cbl/OTHPGM.cbl",
+        "cbl/SHIPPGM.cbl",
+        "cpy/CUSTREC.cpy",
+        "cpy/ORDREC.cpy",
+    ];
+
+    /// The resolver's role tests read `extractions.json`, this extractor's own output for the
+    /// fixture sources. Regenerate it with `UPDATE_COBOL_ROLE_FIXTURE=1`.
+    #[test]
+    fn role_fixture_extractions_are_this_extractors_output() {
+        let all: Vec<Extraction> = ROLE_FIXTURES
+            .iter()
+            .map(|rel| run(rel, &role_fixture(rel)))
+            .collect();
+        let json = serde_json::to_string_pretty(&all).unwrap() + "\n";
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../wicked-estate-resolve/tests/fixtures/cobol_roles/extractions.json");
+        if std::env::var_os("UPDATE_COBOL_ROLE_FIXTURE").is_some() {
+            std::fs::write(&path, &json).unwrap();
+        }
+        let stored = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            stored == json,
+            "extractions.json is stale: rerun with UPDATE_COBOL_ROLE_FIXTURE=1"
+        );
+    }
+
+    /// Row 3: a qualified data use carries its qualifiers and its program's COPY list.
+    #[test]
+    fn row_3_qualified_data_uses_carry_qualifiers_and_copies() {
+        let ex = custpgm();
+        let ids = refs_named(&ex, EdgeKind::References, "ID");
+        assert_eq!(ids.len(), 2, "{:?}", ex.refs);
+        let mut quals: Vec<Vec<String>> =
+            ids.iter().map(|r| hint_list(r, QUALIFIERS_KEY)).collect();
+        quals.sort();
+        assert_eq!(
+            quals,
+            [vec!["CUSTOMER".to_string()], vec!["ORDER-REC".to_string()]]
+        );
+        for r in ids {
+            assert_eq!(hint_str(r, ROLE_KEY), Some(ROLE_DATA));
+            assert_eq!(hint_list(r, COPIES_KEY), ["CUSTREC", "ORDREC"]);
+        }
+        // A copybook item records its groups; a fragment (no 01 level) is open to its includer.
+        let cpy = run(
+            "cpy/CUSTREC.cpy",
+            "       01 CUSTOMER.\n          05 CUST-KEY.\n             10 ID PIC 9(8).\n          05 NAME PIC X(20).\n",
+        );
+        let field = |ex: &Extraction, name: &str| {
+            ex.nodes
+                .iter()
+                .find(|n| n.kind == NodeKind::Field && n.name == name)
+                .unwrap_or_else(|| panic!("{name}: {:?}", names(ex)))
+                .clone()
+        };
+        assert_eq!(
+            field(&cpy, "ID").metadata[PARENTS_KEY],
+            serde_json::json!(["CUST-KEY", "CUSTOMER"])
+        );
+        assert_eq!(
+            field(&cpy, "NAME").metadata[PARENTS_KEY],
+            serde_json::json!(["CUSTOMER"])
+        );
+        assert!(!field(&cpy, "ID").metadata.contains_key(OPEN_KEY));
+        let frag = run("cpy/FRAG.cpy", "          05 ID PIC 9(8).\n");
+        assert_eq!(
+            field(&frag, "ID").metadata[OPEN_KEY],
+            serde_json::json!(true)
+        );
+    }
+
+    /// Rows 4 and 14: a data use spelled like a paragraph of its own program stays a data use
+    /// (it was dropped with the label), and a procedure label never becomes a References ref.
+    #[test]
+    fn row_14_data_use_survives_a_same_named_paragraph_and_labels_are_never_references() {
+        let ex = custpgm();
+        let calc = refs_named(&ex, EdgeKind::References, "CALC");
+        assert_eq!(calc.len(), 1, "the MOVE 3 TO CALC data use: {:?}", ex.refs);
+        assert_eq!(hint_str(calc[0], ROLE_KEY), Some(ROLE_DATA));
+        for label in ["CHECK-PARA", "CHECK-EXIT", "MAIN-PARA"] {
+            assert!(
+                refs_named(&ex, EdgeKind::References, label).is_empty(),
+                "{label}"
+            );
+        }
+        for label in ["CALC", "CHECK-PARA", "CHECK-EXIT"] {
+            let performs = refs_named(&ex, EdgeKind::Calls, label);
+            assert!(!performs.is_empty(), "PERFORM {label}: {:?}", calls(&ex));
+            assert!(
+                performs
+                    .iter()
+                    .all(|r| hint_str(r, ROLE_KEY) == Some(ROLE_LABEL))
+            );
+        }
+        // Host variables and CICS operands are data uses too.
+        let customer = refs_named(&ex, EdgeKind::References, "CUSTOMER");
+        assert!(
+            customer
+                .iter()
+                .any(|r| hint_str(r, ROLE_KEY) == Some(ROLE_DATA))
+        );
+    }
+
+    /// Row 17: CALL 'X' and LINK PROGRAM('X') are program calls, whatever paragraph shares X.
+    #[test]
+    fn row_17_program_calls_are_tagged_program() {
+        let ex = custpgm();
+        let calls = refs_named(&ex, EdgeKind::Calls, "SHIPPGM");
+        assert_eq!(calls.len(), 2, "{:?}", ex.refs);
+        assert!(
+            calls
+                .iter()
+                .all(|r| hint_str(r, ROLE_KEY) == Some(ROLE_PROGRAM))
+        );
+    }
+
+    // ── wicked-estate#544: logical source ──────────────────────────────────────────────────
+
+    fn at<'a>(text: &'a str, span: &Span) -> &'a str {
+        &text[span.start_byte as usize..span.end_byte as usize]
+    }
+
+    /// Row 2: a free-format program written from column 1 gets its Module, and every span is the
+    /// file's own bytes and lines (a line longer than a card is split, not cut).
+    #[test]
+    fn free_format_column_1_program_gets_its_module_with_exact_spans() {
+        let long = format!("    MOVE 1 TO {} CALL 'TAXPGM'.\n", "W-COUNT ".repeat(9));
+        let text = format!(
+            ">>SOURCE FORMAT FREE\nIDENTIFICATION DIVISION.\nPROGRAM-ID. FREEPGM.\nDATA DIVISION.\n\
+             WORKING-STORAGE SECTION.\n01 W-COUNT PIC 9(4).\n*> a comment\nPROCEDURE DIVISION.\n\
+             MAIN-PARA.\n{long}    CALL 'SUBPGM'.\n    STOP RUN.\n"
+        );
+        let ex = run("cbl/FREEPGM.cbl", &text);
+        let module = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Module && n.name == "FREEPGM")
+            .unwrap_or_else(|| panic!("{:?}", names(&ex)));
+        let s = &module.location.span;
+        assert!(
+            at(&text, s).starts_with("IDENTIFICATION DIVISION."),
+            "{s:?}"
+        );
+        assert_eq!((s.start_line, s.start_col), (1, 0));
+        for (name, line) in [("TAXPGM", 9), ("SUBPGM", 10)] {
+            let r = refs_named(&ex, EdgeKind::Calls, name);
+            assert_eq!(r.len(), 1, "{name}: {:?}", calls(&ex));
+            assert_eq!(at(&text, &r[0].location.span), format!("'{name}'"));
+            assert_eq!(r[0].location.span.start_line, line);
+            assert_eq!(r[0].from, module.symbol);
+        }
+        let para = ex.nodes.iter().find(|n| n.name == "MAIN-PARA").unwrap();
+        assert_eq!(para.location.span.start_line, 8);
+        assert_eq!(para.location.span.start_col, 0);
+        assert!(!refs_named(&ex, EdgeKind::References, "W-COUNT").is_empty());
+    }
+
+    /// Row 11: a literal continued on a `-` card is read whole, by the grammar (CALL) and by the
+    /// text pass (LINK), and the ref spans the file's own bytes across both cards.
+    #[test]
+    fn continued_literal_program_names_join() {
+        let card = |code: &str| format!("{code:>72}\n");
+        let text = format!(
+            "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. ORDPGM.\n       PROCEDURE DIVISION.\n       MAIN-PARA.\n{}      -    'PGM') END-EXEC.\n{}      -    'PGM'.\n           EXEC CICS XCTL PROGRAM('PAY\n      -    'PGM') END-EXEC.\n           GOBACK.\n",
+            card("EXEC CICS LINK PROGRAM('SHIP"),
+            card("CALL 'TAX"),
+        );
+        let ex = run("cbl/ORDPGM.cbl", &text);
+        let pgm = module_sym(&ex, "ORDPGM");
+        for (name, from) in [("SHIPPGM", "'SHIP"), ("TAXPGM", "'TAX"), ("PAYPGM", "'PAY")] {
+            let r = refs_named(&ex, EdgeKind::Calls, name);
+            assert_eq!(r.len(), 1, "{name}: {:?}", calls(&ex));
+            assert_eq!(r[0].from, pgm);
+            assert_eq!(hint_str(r[0], ROLE_KEY), Some(ROLE_PROGRAM));
+            let s = &r[0].location.span;
+            assert!(s.end_line > s.start_line, "{name} spans both cards: {s:?}");
+            assert!(text[s.start_byte as usize..].contains(from));
+        }
+        assert!(
+            calls(&ex)
+                .iter()
+                .all(|c| !c.starts_with("SHIP ") && c != "SHIP" && c != "TAX")
+        );
+        let main = ex.nodes.iter().find(|n| n.name == "MAIN-PARA").unwrap();
+        assert_eq!(main.location.span.start_line, 3);
+    }
+
+    #[test]
+    fn logical_source_maps_file_bytes_both_ways() {
+        let text = "       PROCEDURE DIVISION.\n           CALL 'AB\n      -    'CD' USING X.\n           GOBACK.\n";
+        let l = LogicalSource::of(text).expect("a continued literal");
+        assert!(l.text.contains("CALL 'ABCD'"), "{:?}", l.text);
+        let using = text.find("USING").unwrap();
+        let lu = l.logical_start(using);
+        assert_eq!(&l.text[lu..lu + 5], "USING");
+        assert_eq!(l.file_start(lu), using);
+        assert_eq!(l.file_end(l.logical_end(using + 5)), using + 5);
+        let call = l.text.find("'ABCD'").unwrap();
+        assert_eq!(l.file_start(call), text.find("'AB").unwrap());
+        assert_eq!(l.file_end(call + 6), text.find("'CD'").unwrap() + 4);
+        assert!(
+            LogicalSource::of(ORDPGM).is_none(),
+            "fixed format, nothing continued"
+        );
     }
 }

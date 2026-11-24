@@ -22,9 +22,11 @@
 (call_statement
   x: (_) @call.function) @call
 
-; PERFORM <paragraph> → intra-program call
+; PERFORM <paragraph> [THRU <paragraph>] → intra-program call, one per label (the whole
+; `A THRU B` is not a name). SORT/MERGE INPUT/OUTPUT PROCEDURE labels are not calls here.
 (perform_statement_call_proc
-  procedure: (_) @call.function) @call
+  procedure: (perform_procedure
+    (label) @call.function)) @call
 
 ; Data items (WORKING-STORAGE / LINKAGE / copybook fields). Each becomes a node — this is how
 ; "Advanced Data Formats" (COMP/COMP-3/Zoned/Signed usages) and "Complex Copybook Structures"
@@ -36,6 +38,6 @@
 ; Data references by name: every qualified data name (`MOVE 1 TO ORD-ID`, `CALL X USING ORD-REC`,
 ; `REDEFINES A`, `OCCURS … DEPENDING ON CNT`, `ORD-ID OF ORD-REC` → its first WORD) becomes a
 ; `References` ref, which binds to the Field it names, in this file or in a copybook. PERFORM / GO TO
-; labels are also qualified words; the COBOL text supplement (`cobol_links`) drops refs that name a
-; paragraph or section, and dedupes per (source, name).
+; labels are also qualified words: `cobol_links::tag_roles` drops them by their place in the tree,
+; and tags every kept ref with its role (data, label, program) and its OF/IN qualifiers.
 (qualified_word . (WORD) @reference.name)

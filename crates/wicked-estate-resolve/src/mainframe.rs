@@ -20,7 +20,7 @@ use wicked_estate_core::{
 };
 
 /// Languages whose Modules are load-module programs a COBOL dynamic `CALL` can reach.
-const PROGRAM_LANGUAGES: &[&str] = &["cobol", "hlasm", "pli", "c", "cpp"];
+pub(crate) const PROGRAM_LANGUAGES: &[&str] = &["cobol", "hlasm", "pli", "c", "cpp"];
 
 /// Binds `cobol-dynamic-call:<NAME>` refs to the unique program named `<NAME>`. See the module docs.
 #[derive(Debug, Default, Clone, Copy)]

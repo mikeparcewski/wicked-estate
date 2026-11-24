@@ -146,6 +146,9 @@ fn record_overloads(edge: &mut Edge, count: usize) {
 /// written name, and a quoted APEXlang id can spell anything, so "no node is named that" is not
 /// isolation.
 ///
+/// A COBOL ref tagged with its role (wicked-estate#545) is skipped too: only `ScopedNameResolver`
+/// binds it, by role ([`cobol_targets`]).
+///
 /// A `local-binding:` ref (wicked-estate#486) is skipped too: a local's name is not a global
 /// name. `ScopedNameResolver` binds its `<symbol>` form through [`bind_local`] before this check.
 /// An `import-alias:` ref likewise belongs only to `ImportMapResolver`, within its hinted module.
@@ -156,6 +159,7 @@ fn routed_elsewhere(r: &UnresolvedRef) -> bool {
         || r.raw_name.starts_with(CONTAINER_PREFIX)
         || r.raw_name.starts_with(LOCAL_BINDING_PREFIX)
         || r.raw_name.starts_with(IMPORT_ALIAS_PREFIX)
+        || cobol_role(r).is_some()
 }
 
 /// The target of a `local-binding:<name>:<symbol>` ref: exactly that symbol, the definition the
@@ -399,6 +403,31 @@ impl Resolver for ScopedNameResolver {
                 out.push(edge);
                 continue;
             }
+            if let Some(role) = cobol_role(r) {
+                if let Some((winners, tier)) = cobol_targets(r, role, index) {
+                    let overloads = winners.len();
+                    for winner in winners {
+                        let mut edge = Edge::new(
+                            r.from.clone(),
+                            winner.symbol.clone(),
+                            r.kind.clone(),
+                            self.tier(),
+                            self.id(),
+                        )
+                        .with_location(r.location.clone());
+                        edge.confidence = wicked_estate_core::Confidence::new(tier.confidence());
+                        if let Some(label) = tier.label() {
+                            edge.metadata.insert(
+                                "scope".to_string(),
+                                serde_json::Value::String(label.to_string()),
+                            );
+                        }
+                        record_overloads(&mut edge, overloads);
+                        out.push(edge);
+                    }
+                }
+                continue;
+            }
             if routed_elsewhere(r) {
                 continue;
             }
@@ -498,6 +527,162 @@ impl Resolver for ScopedNameResolver {
 
         Ok(out)
     }
+}
+
+// ── COBOL refs by role (wicked-estate#545) ───────────────────────────────────
+
+/// Where a role-tagged COBOL ref found its target; the scoped tiers' confidences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CobolTier {
+    /// In the ref's own file (the program's own storage or paragraphs).
+    SameFile,
+    /// In a copybook the ref's program COPYs.
+    Copied,
+    /// In another copybook (a copybook COPYd by a copybook), or a program anywhere.
+    Elsewhere,
+}
+
+impl CobolTier {
+    fn confidence(self) -> f32 {
+        match self {
+            CobolTier::SameFile => ScopeTier::SameFile.confidence(),
+            CobolTier::Copied => ScopeTier::SameDir.confidence(),
+            CobolTier::Elsewhere => ScopeTier::CrossFile.confidence(),
+        }
+    }
+
+    fn label(self) -> Option<&'static str> {
+        match self {
+            CobolTier::SameFile => ScopeTier::SameFile.label(),
+            CobolTier::Copied => Some("copybook"),
+            CobolTier::Elsewhere => None,
+        }
+    }
+}
+
+/// The role the COBOL extractor tagged a ref with ([`wicked_estate_core::refs::cobol_ref`]).
+fn cobol_role(r: &UnresolvedRef) -> Option<&str> {
+    r.hints
+        .get(wicked_estate_core::refs::cobol_ref::ROLE)
+        .and_then(|v| v.as_str())
+}
+
+fn string_list(v: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    Some(
+        v?.as_array()?
+            .iter()
+            .filter_map(|s| s.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// A copybook's member name: its file stem, uppercased (`cpy/ordrec.cpy` → `ORDREC`), as the
+/// COBOL extractor names it.
+fn copybook_member(path: &str) -> String {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    base.rsplit_once('.')
+        .map_or(base, |(stem, _)| stem)
+        .to_ascii_uppercase()
+}
+
+/// Whether `file` is a copybook: the COBOL extractor gave it a `copybook` node.
+fn is_copybook_file(index: &dyn SymbolIndex, file: &str) -> bool {
+    index
+        .by_name(&copybook_member(file))
+        .iter()
+        .any(|n| n.location.file == file && n.kind == NodeKind::Other("copybook".to_string()))
+}
+
+/// Whether data item `n` satisfies a data use's `OF`/`IN` qualifiers (innermost first): each
+/// names one of its groups, in order. An item of a copybook fragment (`cobol_open`) can also be
+/// qualified by the groups of the program that COPYs it, so qualifiers past its own groups pass.
+/// An item indexed before groups were recorded carries none and is not ruled out.
+fn qualified_by(n: &wicked_estate_core::Node, qualifiers: &[String]) -> bool {
+    use wicked_estate_core::refs::cobol_ref::{OPEN, PARENTS};
+    let Some(parents) = string_list(n.metadata.get(PARENTS)) else {
+        return true;
+    };
+    let open = n.metadata.get(OPEN).and_then(|v| v.as_bool()) == Some(true);
+    let mut groups = parents.iter();
+    qualifiers.iter().all(|q| groups.any(|g| g == q)) || open
+}
+
+/// The targets of a role-tagged COBOL ref, or `None` (it parks) when there is none or the best
+/// tier holds more than one definition.
+///
+/// - **data** binds a COBOL data item (`Field`) that satisfies its `OF`/`IN` qualifiers: one in
+///   its own file, else in a copybook its program COPYs, else in any other copybook. Another
+///   program's storage is a candidate only for a ref written in a copybook, and a paragraph of the
+///   same spelling never is.
+/// - **label** binds a COBOL paragraph or section, by the same tiers.
+/// - **program** binds the unique program `Module` (COBOL, HLASM, PL/I, C, C++), never a
+///   paragraph.
+fn cobol_targets(
+    r: &UnresolvedRef,
+    role: &str,
+    index: &dyn SymbolIndex,
+) -> Option<(Vec<wicked_estate_core::Node>, CobolTier)> {
+    use wicked_estate_core::refs::cobol_ref::{COPIES, DATA, LABEL, PROGRAM, QUALIFIERS};
+    let cobol = |n: &wicked_estate_core::Node, kind: NodeKind| {
+        n.kind == kind && n.language.as_str() == "cobol"
+    };
+    let mut candidates: Vec<_> = index
+        .by_name(&r.raw_name)
+        .into_iter()
+        .filter(|n| n.symbol != r.from && wicked_estate_core::is_structural_symbol(n))
+        .filter(|n| match role {
+            DATA => cobol(n, NodeKind::Field),
+            LABEL => cobol(n, NodeKind::Function),
+            PROGRAM => {
+                n.kind == NodeKind::Module
+                    && mainframe::PROGRAM_LANGUAGES.contains(&n.language.as_str())
+            }
+            _ => false,
+        })
+        .collect();
+    if role == PROGRAM {
+        return one_overload_family(candidates.iter())
+            .then_some((candidates, CobolTier::Elsewhere));
+    }
+    if role == DATA {
+        if let Some(qualifiers) = string_list(r.hints.get(QUALIFIERS)) {
+            candidates.retain(|n| qualified_by(n, &qualifiers));
+        }
+    }
+    let copies: std::collections::HashSet<String> = string_list(r.hints.get(COPIES))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    // Code in a copybook (a COPY in the PROCEDURE DIVISION) sees the storage and paragraphs of
+    // whichever program COPYs it, so for its refs any unique definition stands.
+    let from_copybook = is_copybook_file(index, &r.location.file);
+    let tier_of = |n: &wicked_estate_core::Node| {
+        let file = n.location.file.as_str();
+        if file == r.location.file {
+            Some(CobolTier::SameFile)
+        } else if copies.contains(&copybook_member(file)) {
+            Some(CobolTier::Copied)
+        } else if from_copybook || is_copybook_file(index, file) {
+            Some(CobolTier::Elsewhere)
+        } else {
+            None
+        }
+    };
+    let scored: Vec<_> = candidates
+        .into_iter()
+        .filter_map(|n| tier_of(&n).map(|t| (t, n)))
+        .collect();
+    for tier in [CobolTier::SameFile, CobolTier::Copied, CobolTier::Elsewhere] {
+        let best: Vec<_> = scored
+            .iter()
+            .filter(|(t, _)| *t == tier)
+            .map(|(_, n)| n.clone())
+            .collect();
+        if !best.is_empty() {
+            return one_overload_family(best.iter()).then_some((best, tier));
+        }
+    }
+    None
 }
 
 // ── ImportMapResolver ─────────────────────────────────────────────────────────
@@ -3609,5 +3794,167 @@ mod tests {
                 edges[0].confidence.get()
             );
         }
+    }
+
+    // ── wicked-estate#545: COBOL refs by role ────────────────────────────────────────────
+
+    /// The COBOL extractor's own output for `tests/fixtures/cobol_roles` (pinned by
+    /// `wicked-estate-extract`'s `role_fixture_extractions_are_this_extractors_output`), resolved by
+    /// the production name tiers plus the dynamic-call resolver.
+    fn cobol_role_edges(strip_hints: bool) -> Vec<(String, String, EdgeKind, NodeKind)> {
+        let raw = include_str!("../tests/fixtures/cobol_roles/extractions.json");
+        let all: Vec<wicked_estate_core::Extraction> = serde_json::from_str(raw).unwrap();
+        let nodes: Vec<Node> = all.iter().flat_map(|e| e.nodes.clone()).collect();
+        let mut refs: Vec<UnresolvedRef> = all.iter().flat_map(|e| e.refs.clone()).collect();
+        if strip_hints {
+            refs.iter_mut().for_each(|r| r.hints.clear());
+        }
+        let index = VecIndex(nodes.clone());
+        let edges = resolve_all_with_coverage(
+            &[
+                &NameResolver,
+                &ScopedNameResolver,
+                &ImportMapResolver,
+                &InfraResolver,
+                &DynamicCallResolver,
+            ],
+            &refs,
+            &index,
+        )
+        .unwrap()
+        .edges;
+        let label = |id: &SymbolId| {
+            let n = nodes.iter().find(|n| &n.symbol == id).unwrap();
+            (format!("{}:{}", n.location.file, n.name), n.kind.clone())
+        };
+        let mut out: Vec<_> = edges
+            .iter()
+            .map(|e| {
+                let (target, kind) = label(&e.target);
+                (label(&e.source).0, target, e.kind.clone(), kind)
+            })
+            .collect();
+        out.sort_by_key(|e| format!("{e:?}"));
+        out
+    }
+
+    fn targets_of(
+        edges: &[(String, String, EdgeKind, NodeKind)],
+        kind: EdgeKind,
+        name: &str,
+    ) -> Vec<String> {
+        edges
+            .iter()
+            .filter(|(src, t, k, _)| {
+                src == "cbl/CUSTPGM.cbl:CUSTPGM" && *k == kind && t.rsplit(':').next() == Some(name)
+            })
+            .map(|(_, t, _, _)| t.clone())
+            .collect()
+    }
+
+    /// Row 3: `ID OF CUSTOMER` / `ID IN ORDER-REC` bind the item of each record, and an unqualified
+    /// use binds the copybook the program COPYs, not a same-directory copybook it does not.
+    #[test]
+    fn cobol_row_3_qualified_data_uses_bind_the_copied_record() {
+        let edges = cobol_role_edges(false);
+        let mut ids = targets_of(&edges, EdgeKind::References, "ID");
+        ids.sort();
+        assert_eq!(
+            ids,
+            ["cpy/CUSTREC.cpy:ID", "cpy/ORDREC.cpy:ID"],
+            "{edges:#?}"
+        );
+        assert_eq!(
+            targets_of(&edges, EdgeKind::References, "CUST-NAME"),
+            ["cpy/CUSTREC.cpy:CUST-NAME"]
+        );
+        // Before: an OF-qualified use was its first word only, and same-dir ranking won: both
+        // uses bound the copybook the program does not COPY.
+        let before = cobol_role_edges(true);
+        assert_eq!(
+            targets_of(&before, EdgeKind::References, "ID"),
+            ["cbl/OTHREC.cpy:ID"]
+        );
+        assert_eq!(
+            targets_of(&before, EdgeKind::References, "CUST-NAME"),
+            ["cbl/OTHREC.cpy:CUST-NAME"]
+        );
+    }
+
+    /// Row 4: a data use never binds another program's paragraph of the same spelling.
+    #[test]
+    fn cobol_row_4_data_use_never_binds_a_paragraph() {
+        let edges = cobol_role_edges(false);
+        assert!(
+            targets_of(&edges, EdgeKind::References, "WS-DONE").is_empty(),
+            "{edges:#?}"
+        );
+        assert!(
+            edges
+                .iter()
+                .all(|(_, _, k, t)| *k != EdgeKind::References || *t == NodeKind::Field)
+        );
+        let before = cobol_role_edges(true);
+        assert_eq!(
+            targets_of(&before, EdgeKind::References, "WS-DONE"),
+            ["cbl/OTHPGM.cbl:WS-DONE"]
+        );
+    }
+
+    /// Row 14: a data item spelled like a paragraph of its program: the data use binds the item,
+    /// the PERFORM binds the paragraph.
+    #[test]
+    fn cobol_row_14_data_use_and_label_of_one_spelling_bind_by_role() {
+        let edges = cobol_role_edges(false);
+        assert_eq!(
+            targets_of(&edges, EdgeKind::References, "CALC"),
+            ["cbl/CUSTPGM.cbl:CALC"]
+        );
+        let calc: Vec<_> = edges
+            .iter()
+            .filter(|(_, t, _, _)| t == "cbl/CUSTPGM.cbl:CALC")
+            .map(|(_, _, k, n)| (k.clone(), n.clone()))
+            .collect();
+        assert!(
+            calc.contains(&(EdgeKind::References, NodeKind::Field)),
+            "{calc:?}"
+        );
+        assert!(
+            calc.contains(&(EdgeKind::Calls, NodeKind::Function)),
+            "{calc:?}"
+        );
+        for label in ["CHECK-PARA", "CHECK-EXIT"] {
+            assert_eq!(
+                targets_of(&edges, EdgeKind::Calls, label),
+                [format!("cbl/CUSTPGM.cbl:{label}")]
+            );
+        }
+    }
+
+    /// Row 17: `CALL 'SHIPPGM'` and `LINK PROGRAM('SHIPPGM')` bind the program, not the local
+    /// paragraph SHIPPGM.
+    #[test]
+    fn cobol_row_17_program_calls_bind_the_program_module() {
+        let edges = cobol_role_edges(false);
+        let ship: Vec<_> = edges
+            .iter()
+            .filter(|(src, t, k, _)| {
+                src == "cbl/CUSTPGM.cbl:CUSTPGM" && *k == EdgeKind::Calls && t.ends_with(":SHIPPGM")
+            })
+            .map(|(_, t, _, n)| (t.clone(), n.clone()))
+            .collect();
+        assert_eq!(
+            ship,
+            [("cbl/SHIPPGM.cbl:SHIPPGM".to_string(), NodeKind::Module)],
+            "{edges:#?}"
+        );
+        let before = cobol_role_edges(true);
+        assert!(
+            before
+                .iter()
+                .any(|(_, t, k, n)| t == "cbl/CUSTPGM.cbl:SHIPPGM"
+                    && *k == EdgeKind::Calls
+                    && *n == NodeKind::Function)
+        );
     }
 }
