@@ -1338,45 +1338,120 @@ fn a_cycle_no_unnamed_paragraph_reaches_is_run_from_its_first_paragraph() {
 
 #[test]
 fn a_qualified_perform_of_a_same_named_paragraph_is_not_a_self_jump() {
-    // FIRST-SECTION's A-PARA performs SECOND-SECTION's A-PARA: a call, and FIRST-SECTION's A-PARA
-    // (named by no statement) is still the program's.
-    let text = program(
+    // FIRST-SECTION's A-PARA performs SECOND-SECTION's A-PARA. Paragraph ids carry no section
+    // (#580), so the two share one id: the call is not stored (no self-edges), and that A-PARA
+    // is still run by the program.
+    let ex = extract(
         "QUALPGM",
+        &program(
+            "QUALPGM",
+            DATA,
+            &[
+                "FIRST-SECTION SECTION.",
+                "A-PARA.",
+                "    PERFORM A-PARA OF SECOND-SECTION",
+                "    GOBACK.",
+                "SECOND-SECTION SECTION.",
+                "A-PARA.",
+                "    CALL 'SUBPGM'.",
+            ],
+        ),
+    );
+    assert!(ex.local_edges.iter().all(|e| e.source != e.target));
+    assert_eq!(
+        calls_from(&ex, "QUALPGM"),
+        ["A-PARA", "FIRST-SECTION", "SECOND-SECTION"]
+    );
+    // A differently named paragraph of FIRST-SECTION performs A-PARA OF SECOND-SECTION: a local
+    // call from it on the PERFORM line, though FIRST-SECTION has an A-PARA too.
+    let text = program(
+        "QUALTWO",
         DATA,
         &[
             "FIRST-SECTION SECTION.",
-            "A-PARA.",
+            "MAIN-PARA.",
             "    PERFORM A-PARA OF SECOND-SECTION",
             "    GOBACK.",
+            "A-PARA.",
+            "    DISPLAY 'FIRST'.",
             "SECOND-SECTION SECTION.",
             "A-PARA.",
             "    CALL 'SUBPGM'.",
         ],
     );
-    let ex = extract("QUALPGM", &text);
-    let paras: std::collections::BTreeSet<_> = ex
-        .nodes
+    let ex = extract("QUALTWO", &text);
+    let line = text
+        .lines()
+        .position(|l| l.trim() == "PERFORM A-PARA OF SECOND-SECTION")
+        .unwrap() as u32;
+    let main = &node(&ex, "MAIN-PARA").symbol;
+    let performed: Vec<&str> = ex
+        .local_edges
         .iter()
-        .filter(|n| n.name == "A-PARA" && n.kind == NodeKind::Function)
-        .map(|n| n.symbol.clone())
+        .filter(|e| e.kind == EdgeKind::Calls && &e.source == main)
+        .filter(|e| {
+            e.location
+                .as_ref()
+                .is_some_and(|l| l.span.start_line == line)
+        })
+        .map(|e| name_of(&ex, &e.target))
         .collect();
-    // Paragraph ids carry no section (#580), so the two may share one id: then the call is not
-    // stored (no self-edges). With two ids, the PERFORM is a call, never a jump to itself.
-    assert!(ex.local_edges.iter().all(|e| e.source != e.target));
-    if paras.len() == 2 {
-        let line = text
-            .lines()
-            .position(|l| l.trim() == "PERFORM A-PARA OF SECOND-SECTION")
-            .unwrap() as u32;
-        assert!(
-            ex.local_edges.iter().any(|e| e.kind == EdgeKind::Calls
-                && e.location
-                    .as_ref()
-                    .is_some_and(|l| l.span.start_line == line)),
-            "{:?}",
-            ex.local_edges
-        );
-    }
+    assert_eq!(performed, ["A-PARA"], "{:?}", ex.local_edges);
+}
+
+#[test]
+fn a_paragraph_a_cycle_performs_is_not_run_by_the_program() {
+    // LOOP-A and LOOP-B jump to each other, and LOOP-A performs HELPER, defined before them. The
+    // program runs INIT and the cycle's first paragraph; HELPER's one caller is LOOP-A.
+    let ex = extract(
+        "HELPPGM",
+        &program(
+            "HELPPGM",
+            DATA,
+            &[
+                "INIT.",
+                "    DISPLAY 'START'.",
+                "HELPER.",
+                "    CALL 'SUBPGM'.",
+                "LOOP-A.",
+                "    PERFORM HELPER",
+                "    GO TO LOOP-B.",
+                "LOOP-B.",
+                "    GO TO LOOP-A.",
+            ],
+        ),
+    );
+    assert_eq!(calls_from(&ex, "HELPPGM"), ["INIT", "LOOP-A"]);
+    assert_eq!(callers_of(&ex, "HELPER"), ["LOOP-A"]);
+    assert_eq!(callers_of(&ex, "SUBPGM"), ["HELPER"]);
+}
+
+#[test]
+fn a_thru_range_to_an_unknown_name_still_runs_the_named_sections_paragraphs() {
+    // The range end names no header, so the range is unknown: the PERFORM runs WORK-SECTION
+    // (and so its paragraphs), and NO-SUCH-PARA stays a name.
+    let ex = extract(
+        "THRUSECT",
+        &program(
+            "THRUSECT",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    PERFORM WORK-SECTION THRU NO-SUCH-PARA",
+                "    GOBACK.",
+                "WORK-SECTION SECTION.",
+                "WORK-1.",
+                "    CALL 'SUBPGM'.",
+                "WORK-2.",
+                "    EXIT.",
+            ],
+        ),
+    );
+    assert_eq!(
+        calls_from(&ex, "MAIN-PARA"),
+        ["NO-SUCH-PARA", "WORK-1", "WORK-2", "WORK-SECTION"]
+    );
+    assert_eq!(calls_from(&ex, "THRUSECT"), ["MAIN-PARA"]);
 }
 
 #[test]

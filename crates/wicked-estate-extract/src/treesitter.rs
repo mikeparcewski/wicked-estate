@@ -1786,7 +1786,8 @@ fn cobol_division_of(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
 ///   section's last paragraph. An endpoint is `name [OF|IN section]` (see
 ///   [`CobolDivision::endpoint`]); the call names the paragraph. When X or Y is not one header
 ///   there (a typo, a name in another program, an ambiguous name) the range is unknown, and
-///   only X and Y are returned, by name, so they still resolve or park.
+///   only X and Y are returned: each one header names as above (a section with its paragraphs),
+///   the other by name, so it still resolves or parks.
 /// - `GO TO A [B …] [DEPENDING ON X]` transfers control to each label, looked up the same way;
 ///   a GO TO of a section runs its paragraphs.
 ///
@@ -1864,29 +1865,27 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
         let Some((from, start)) = endpoint(first) else {
             continue;
         };
-        // One endpoint on its own: its header when known, else its name.
+        // One endpoint on its own: its header (and a section's paragraphs) when known, else its
+        // name.
         let single = |out: &mut Vec<CobolFlowCall>, name: String, at: Option<usize>, label| match (
             at, div,
         ) {
-            (Some(i), Some(d)) => out.push(CobolFlowCall {
-                name,
-                pos,
-                span: ts_span(label),
-                header: Some(d.headers[i].start),
-            }),
+            (Some(i), Some(d)) => run(out, d, i, i, pos, ts_span(label)),
             _ => by_name(out, name, label),
         };
         match labels.get(1).copied() {
             // PERFORM X: X, and a section's paragraphs.
-            None => match (start, div) {
-                (Some(s), Some(d)) => run(&mut out, d, s, s, pos, ts_span(first)),
-                _ => by_name(&mut out, from, first),
-            },
+            None => single(&mut out, from, start, first),
             Some(last) => {
                 let end = endpoint(last);
                 match (start, end.as_ref().and_then(|(_, e)| *e), div) {
                     (Some(s), Some(e), Some(d)) if s <= e => {
-                        single(&mut out, from, Some(s), first);
+                        out.push(CobolFlowCall {
+                            name: from,
+                            pos,
+                            span: ts_span(first),
+                            header: Some(d.headers[s].start),
+                        });
                         let h = &d.headers;
                         for p in &h[s + 1..=h[e].last] {
                             out.push(CobolFlowCall {
@@ -1897,7 +1896,7 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
                             });
                         }
                     }
-                    // The range is unknown: X and Y only.
+                    // The range is unknown: X and Y only (a section with its paragraphs).
                     _ => {
                         single(&mut out, from, start, first);
                         if let Some((to, at)) = end {
@@ -1909,6 +1908,98 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
         }
     }
     out
+}
+
+/// The innermost COBOL program at each byte, as `(from byte, program)` steps sorted by byte (look
+/// one up with the last step at or before it). Programs nest or follow one another, so one sweep
+/// over them in source order, with a stack of the open ones, builds the steps: linear in the
+/// definitions plus a sort of the programs.
+fn cobol_program_steps<'d>(
+    defs: &'d [DefRec],
+    def_nodes: &[Node],
+) -> Vec<(usize, Option<&'d SymbolId>)> {
+    let mut first: HashMap<&SymbolId, &DefRec> = HashMap::new();
+    for d in defs {
+        first.entry(&d.symbol).or_insert(d);
+    }
+    let mut programs: Vec<&DefRec> = def_nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Module)
+        .filter_map(|n| first.get(&n.symbol).copied())
+        .collect();
+    programs.sort_by_key(|d| (d.start, std::cmp::Reverse(d.end)));
+    let mut steps = Vec::new();
+    let mut open: Vec<&DefRec> = Vec::new();
+    let close = |open: &mut Vec<&'d DefRec>, steps: &mut Vec<(usize, Option<&'d SymbolId>)>, at| {
+        while let Some(&top) = open.last() {
+            if top.end > at {
+                break;
+            }
+            open.pop();
+            steps.push((top.end, open.last().map(|d| &d.symbol)));
+        }
+    };
+    for p in programs {
+        close(&mut open, &mut steps, p.start);
+        steps.push((p.start, Some(&p.symbol)));
+        open.push(p);
+    }
+    close(&mut open, &mut steps, usize::MAX);
+    steps
+}
+
+/// The strongly connected component of each vertex of a graph given as adjacency lists, as an id
+/// below the vertex count (Tarjan's algorithm, iterative: linear in vertices and edges).
+fn strongly_connected(next: &[Vec<usize>]) -> Vec<usize> {
+    const NONE: usize = usize::MAX;
+    let n = next.len();
+    let (mut index, mut low) = (vec![NONE; n], vec![0; n]);
+    let mut on_stack = vec![false; n];
+    let mut component = vec![NONE; n];
+    let (mut stack, mut work) = (Vec::new(), Vec::<(usize, usize)>::new());
+    let (mut count, mut components) = (0, 0);
+    for root in 0..n {
+        if index[root] != NONE {
+            continue;
+        }
+        index[root] = count;
+        low[root] = count;
+        count += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        work.push((root, 0));
+        while let Some(&(v, i)) = work.last() {
+            if let Some(&w) = next[v].get(i) {
+                work.last_mut().expect("non-empty").1 += 1;
+                if index[w] == NONE {
+                    index[w] = count;
+                    low[w] = count;
+                    count += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(u, _)) = work.last() {
+                low[u] = low[u].min(low[v]);
+            }
+            if low[v] == index[v] {
+                while let Some(w) = stack.pop() {
+                    on_stack[w] = false;
+                    component[w] = components;
+                    if w == v {
+                        break;
+                    }
+                }
+                components += 1;
+            }
+        }
+    }
+    component
 }
 
 /// Give the next header its whole line, then trim the preceding paragraph's trailing whitespace.
@@ -5404,22 +5495,14 @@ impl Extractor for TreeSitterExtractor {
                     .checked_sub(1)?;
                 (pos < defs[units[k]].end).then_some(k)
             };
-            let program_defs: Vec<&DefRec> = def_nodes
-                .iter()
-                .filter(|n| n.kind == NodeKind::Module)
-                .filter_map(|n| defs.iter().find(|d| d.symbol == n.symbol))
-                .collect();
-            // The innermost program holding `pos`.
+            // The innermost program holding `pos`, from sorted (from byte, program) steps.
+            let steps = cobol_program_steps(&defs, &def_nodes);
             let program_at = |pos: usize| {
-                program_defs
-                    .iter()
-                    .filter(|d| d.start <= pos && pos < d.end)
-                    .min_by_key(|d| d.end - d.start)
-                    .map(|d| d.symbol.clone())
+                let i = steps.partition_point(|s| s.0 <= pos).checked_sub(1)?;
+                steps[i].1.cloned()
             };
             // The flow graph between units, for which units the program runs itself.
             let mut next: Vec<Vec<usize>> = vec![Vec::new(); units.len()];
-            let mut called = vec![false; units.len()];
             let mut from_program: Vec<usize> = Vec::new();
             for call in cobol_flow_calls(&tree, src) {
                 let name = fold_cobol_name(&self.lang_name, call.name);
@@ -5436,7 +5519,6 @@ impl Extractor for TreeSitterExtractor {
                     (Some(t), Some(from)) if from == defs[units[t]].symbol => {}
                     (Some(t), Some(from)) => {
                         cobol_flow_edges.push((from, defs[units[t]].symbol.clone(), call.span));
-                        called[t] = true;
                         match source {
                             Some(k) => next[k].push(t),
                             None => from_program.push(t),
@@ -5453,31 +5535,38 @@ impl Extractor for TreeSitterExtractor {
             // A paragraph or section that no flow statement of its program reaches is run by the
             // program itself: where the program starts, one that control falls into from the
             // paragraph before it, a DECLARATIVES handler, or dead code (the graph cannot tell
-            // these apart without flow analysis). The program calls it, bound by symbol. First
-            // every unit nothing calls; then, in source order, the first unit of each cycle no
-            // such unit reaches. Lineage from a program so reaches every paragraph's calls, and
-            // a unit with a caller gains the program only when it starts an unreached cycle.
+            // these apart without flow analysis). The program calls it, bound by symbol: the first
+            // unit, in source order, of each strongly connected component of the flow graph that
+            // no other unit calls (a unit nothing calls, or a cycle nothing outside it enters),
+            // unless a statement before the first paragraph reaches it. Lineage from a program so
+            // reaches every paragraph's calls, and a unit another unit reaches keeps that caller
+            // only.
             let mut seen = vec![false; units.len()];
-            let mark = |k: usize, seen: &mut Vec<bool>| {
-                let mut stack = vec![k];
-                while let Some(k) = stack.pop() {
-                    if !std::mem::replace(&mut seen[k], true) {
-                        stack.extend(next[k].iter().copied());
+            let mut stack = from_program;
+            while let Some(k) = stack.pop() {
+                if !std::mem::replace(&mut seen[k], true) {
+                    stack.extend(next[k].iter().copied());
+                }
+            }
+            let component = strongly_connected(&next);
+            let mut entered = vec![false; units.len()];
+            for (k, targets) in next.iter().enumerate() {
+                for &t in targets {
+                    if component[t] != component[k] {
+                        entered[component[t]] = true;
                     }
                 }
-            };
-            for &t in &from_program {
-                mark(t, &mut seen);
             }
-            for pass in [false, true] {
-                for (k, &unit) in units.iter().enumerate() {
-                    if seen[k] || (!pass && called[k]) {
-                        continue;
+            let mut runs: HashSet<(SymbolId, SymbolId)> = HashSet::new();
+            for (k, &unit) in units.iter().enumerate() {
+                if seen[k] || std::mem::replace(&mut entered[component[k]], true) {
+                    continue;
+                }
+                if let Some(program) = program_at(defs[unit].start) {
+                    let run = (program, defs[unit].symbol.clone());
+                    if runs.insert(run.clone()) {
+                        cobol_runs.push(run);
                     }
-                    if let Some(program) = program_at(defs[unit].start) {
-                        cobol_runs.push((program, defs[unit].symbol.clone()));
-                    }
-                    mark(k, &mut seen);
                 }
             }
             // A call starts from the paragraph or section it is in, never also from its program:
@@ -9041,6 +9130,65 @@ See the [docs](docs/).
     }
 
     #[test]
+    fn cobol_program_steps_pick_the_innermost_program_at_each_byte() {
+        // OUTER holds A-PARA and the nested INNER; NEXT follows OUTER; LAST starts where NEXT
+        // ends. A paragraph is no program.
+        let rec = |name: &str, start, end| DefRec {
+            symbol: Symbol::synthetic("test", name).id(),
+            start,
+            end,
+            name: name.to_string(),
+        };
+        let defs = vec![
+            rec("OUTER", 0, 100),
+            rec("A-PARA", 10, 20),
+            rec("INNER", 50, 90),
+            rec("NEXT", 100, 150),
+            rec("LAST", 150, 160),
+        ];
+        let node = |d: &DefRec, kind| {
+            Node::new(
+                d.symbol.clone(),
+                kind,
+                d.name.clone(),
+                Language::new("cobol"),
+                Location::new("p.cbl", Span::ZERO),
+            )
+        };
+        let def_nodes: Vec<Node> = defs
+            .iter()
+            .map(|d| {
+                let kind = if d.name == "A-PARA" {
+                    NodeKind::Function
+                } else {
+                    NodeKind::Module
+                };
+                node(d, kind)
+            })
+            .collect();
+        let steps = cobol_program_steps(&defs, &def_nodes);
+        let at = |pos: usize| {
+            let i = steps.partition_point(|s| s.0 <= pos).checked_sub(1)?;
+            let sym = steps[i].1?;
+            defs.iter()
+                .find(|d| &d.symbol == sym)
+                .map(|d| d.name.as_str())
+        };
+        for (pos, want) in [
+            (0, Some("OUTER")),
+            (15, Some("OUTER")),
+            (50, Some("INNER")),
+            (89, Some("INNER")),
+            (90, Some("OUTER")),
+            (100, Some("NEXT")),
+            (150, Some("LAST")),
+            (160, None),
+        ] {
+            assert_eq!(at(pos), want, "byte {pos}: {steps:?}");
+        }
+    }
+
+    #[test]
     fn cobol_perform_and_data_reference_names_fold() {
         let code = concat!(
             "       identification division.\n",
@@ -9059,16 +9207,24 @@ See the [docs](docs/).
             .unwrap()
             .extract(&sf("price.cbl", "cobol", code))
             .unwrap();
-        let main = ex
-            .nodes
-            .iter()
-            .find(|n| n.kind == NodeKind::Function && n.name == "MAIN-PARA")
-            .expect("MAIN-PARA");
-        // The PERFORM names a header of its own division: a local edge bound to it.
-        assert!(
-            ex.local_edges
+        let para = |name: &str| {
+            ex.nodes
                 .iter()
-                .any(|e| e.kind == EdgeKind::Calls && e.target == main.symbol)
+                .find(|n| n.kind == NodeKind::Function && n.name == name)
+                .unwrap_or_else(|| panic!("{name}"))
+                .symbol
+                .clone()
+        };
+        let (entry, main) = (para("ENTRY-PARA"), para("MAIN-PARA"));
+        // The lowercase PERFORM names a header of its own division: a local edge from the
+        // paragraph that makes it, on the PERFORM line (row 7), bound to MAIN-PARA.
+        assert!(
+            ex.local_edges.iter().any(|e| e.kind == EdgeKind::Calls
+                && e.source == entry
+                && e.target == main
+                && e.location.as_ref().is_some_and(|l| l.span.start_line == 7)),
+            "{:?}",
+            ex.local_edges
         );
         assert!(
             ex.refs
