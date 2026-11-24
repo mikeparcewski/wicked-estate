@@ -13,6 +13,11 @@
  *      `PERFORM X THRU Y` with no period), the upstream scanner returned false as soon as the
  *      next character was not `"`, before it tried EXEC_BLOCK. `EXEC CICS ...` there became an
  *      ERROR. The literal branch now runs only on `"`, and the EXEC branch is still tried.
+ *   3. An EXEC block with no END-EXEC. The upstream scan looked for END-EXEC up to the end of the
+ *      file. With patches 1 and 2 the parser retries at every later EXEC, so a run of unterminated
+ *      blocks cost a scan to EOF each (quadratic). A block never holds another `EXEC` word, so the
+ *      scan now fails at the next `EXEC` that starts a word: each failing scan stops at the next
+ *      opener. A terminated block is matched exactly as before.
  * Every function and table is `static`, so nothing clashes with the crate's own scanner symbols.
  */
 #include "tree_sitter/parser.h"
@@ -145,9 +150,25 @@ static bool scan_exec_block(TSLexer *lexer) {
     // Scan until END-EXEC (case insensitive state machine)
     const char *end_exec = "END-EXEC";
     int state = 0;
+    // WICKED PATCH 3: fail at the next `EXEC` + whitespace that starts a word (not END-EXEC's).
+    const char *exec_word = "EXEC";
+    int next = 0;
+    bool word_start = false;
 
     while (lexer->lookahead != 0) {
         char c = lexer->lookahead;
+
+        if (next == 4) {
+            if (iswspace(c)) {
+                return false;
+            }
+            next = 0;
+        } else if (next > 0) {
+            next = char_eq_i(c, exec_word[next]) ? next + 1 : 0;
+        } else if (word_start && char_eq_i(c, 'E')) {
+            next = 1;
+        }
+        word_start = iswspace(c);
 
         if (char_eq_i(c, end_exec[state])) {
             state++;

@@ -310,8 +310,13 @@ static RE_PROCEDURE_END: LazyLock<Regex> = LazyLock::new(|| {
 pub(crate) fn grammar_view(text: &str) -> Option<String> {
     let free = source_is_free_format(text);
     let (_, code) = lexical_views(text, free);
+    // Pseudo-text is one COPY operand: `~` then spaces (line breaks kept), so it is one word.
     let code = RE_PSEUDO_TEXT
-        .replace_all(&code, |c: &regex::Captures| blank(&c[0]))
+        .replace_all(&code, |c: &regex::Captures| {
+            let mut b = blank(&c[0]);
+            b.replace_range(0..1, "~");
+            b
+        })
         .into_owned();
     // (COPY's first byte, the end of what is hidden, whether that end is its own period)
     let mut ranges: Vec<(usize, usize, bool)> = Vec::new();
@@ -330,8 +335,8 @@ pub(crate) fn grammar_view(text: &str) -> Option<String> {
             }
             let named = div.end() + c.end();
             let (stop, period) = match copy_statement_end(&code, named, end) {
-                Some(p) => (p, true),
-                None => (named, false),
+                Ok(p) => (p, true),
+                Err(clause_end) => (clause_end, false),
             };
             ranges.push((from, stop, period));
         }
@@ -342,82 +347,106 @@ pub(crate) fn grammar_view(text: &str) -> Option<String> {
     }
     let mut view = text.as_bytes().to_vec();
     for (from, to, period) in ranges {
-        // `COPY` → `EXIT`; the rest up to (not including) the period → spaces. A COPY with no
-        // period of its own (a compile error) hides only `COPY <member>` (6 bytes or more) and
-        // becomes `EXIT.`, so a paragraph header after it still parses.
-        let stmt: &[u8] = if period { b"EXIT" } else { b"EXIT." };
-        view[from..from + stmt.len()].copy_from_slice(stmt);
-        for b in &mut view[from + stmt.len()..to] {
+        // `COPY` → `EXIT`; the rest up to (not including) the period → spaces, line breaks kept.
+        view[from..from + 4].copy_from_slice(b"EXIT");
+        for b in &mut view[from + 4..to] {
             if *b != b'\n' && *b != b'\r' {
                 *b = b' ';
             }
+        }
+        // A COPY with no period of its own (a compile error) hides its words through its last
+        // complete clause, and gets a period on that word's last byte (never a line break), so
+        // a header after it parses.
+        if !period {
+            view[to - 1] = b'.';
         }
     }
     // Only ASCII bytes were written over whole statements' bytes, so this is valid UTF-8.
     String::from_utf8(view).ok()
 }
 
-/// The byte of the period that ends the COPY statement whose member name ends at `named`, or
-/// `None` when it has none (a compile error).
+/// `Ok`: the byte of the period that ends the COPY statement whose member name ends at `named`.
+/// `Err`: it has none (a compile error); the end of its last complete clause (`named` at least).
 ///
-/// The period must follow the statement's own words: `OF|IN <library>`, `SUPPRESS`, and after
-/// `REPLACING` the operand pairs, `[LEADING|TRAILING] <operand> BY <operand>`. Pseudo-text and
-/// literal operands are already blank in `code`; a word operand stands next to its `BY`. Any other
-/// word (the next statement, or the next paragraph's header) means no period of its own, so the
-/// scan stops within the statement and the whole pass stays linear.
-fn copy_statement_end(code: &str, named: usize, end: usize) -> Option<usize> {
-    let mut words = Vec::new();
-    let mut i = named;
+/// The words after the member must be the statement's own clauses, in order:
+/// `[OF|IN library] [SUPPRESS] [REPLACING {[LEADING|TRAILING] operand BY operand}…]`, and the
+/// period may only follow a complete clause. A literal is one word in `code` (its contents are
+/// `~`), and so is pseudo-text (see [`grammar_view`]). Any other word (the next statement, or the
+/// next paragraph's header) means no period of its own. One forward pass with a fixed state, so
+/// the scan stops within the statement.
+fn copy_statement_end(code: &str, named: usize, end: usize) -> Result<usize, usize> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum At {
+        /// After the member name or a library: OF/IN, SUPPRESS, REPLACING or the period.
+        Head,
+        /// After OF/IN: the library name.
+        Library,
+        /// After REPLACING or LEADING/TRAILING: a first operand.
+        First,
+        /// After a first operand: BY.
+        By,
+        /// After BY: a second operand.
+        Second,
+        /// After a complete pair: another pair or the period.
+        Pair,
+    }
+    let mut at = At::Head;
+    let mut library = false;
+    let mut complete = named;
     let bytes = code.as_bytes();
+    let sep = |b: u8| b.is_ascii_whitespace() || b == b',' || b == b';';
+    let mut i = named;
     while i < end {
-        let b = bytes[i];
-        if b.is_ascii_whitespace() || b == b',' || b == b';' {
+        if sep(bytes[i]) {
             i += 1;
             continue;
         }
         let start = i;
-        while i < end && !(bytes[i].is_ascii_whitespace() || bytes[i] == b',' || bytes[i] == b';') {
+        while i < end && !sep(bytes[i]) {
             i += 1;
         }
-        let word = &code[start..i];
         // A period ends the statement when a separator or the end follows it.
-        let (word, period) = match word.strip_suffix('.') {
+        let (word, period) = match code[start..i].strip_suffix('.') {
             Some(w) => (w, Some(i - 1)),
-            None => (word, None),
+            None => (&code[start..i], None),
         };
         if !word.is_empty() {
-            words.push(word.to_ascii_uppercase());
-            // Words are judged once their neighbours are known: the word before the last.
-            if words.len() >= 2 && !copy_word_fits(&words, words.len() - 2) {
-                return None;
+            let w = word.to_ascii_uppercase();
+            at = match (at, w.as_str()) {
+                (At::Head, "OF" | "IN") if !library => {
+                    library = true;
+                    At::Library
+                }
+                (At::Head, "SUPPRESS") => At::Head,
+                (At::Head, "REPLACING") => At::First,
+                (At::Library, w) if !is_copy_keyword(w) => At::Head,
+                (At::First | At::Pair, "LEADING" | "TRAILING") => At::First,
+                (At::First | At::Pair, w) if !is_copy_keyword(w) => At::By,
+                (At::By, "BY") => At::Second,
+                (At::Second, w) if !is_copy_keyword(w) => At::Pair,
+                _ => return Err(complete),
+            };
+            if matches!(at, At::Head | At::Pair) {
+                complete = start + word.len();
             }
         }
         if let Some(p) = period {
-            let fits = words.last().is_none() || copy_word_fits(&words, words.len() - 1);
-            return fits.then_some(p);
+            return if matches!(at, At::Head | At::Pair) {
+                Ok(p)
+            } else {
+                Err(complete)
+            };
         }
     }
-    None
+    Err(complete)
 }
 
-/// Whether `words[i]` (the words after a COPY's member name) can be part of that COPY statement.
-fn copy_word_fits(words: &[String], i: usize) -> bool {
-    let w = words[i].as_str();
-    let before = i.checked_sub(1).map(|j| words[j].as_str());
-    let after = words.get(i + 1).map(String::as_str);
-    let replacing = words[..i].iter().any(|w| w == "REPLACING");
-    match w {
-        "REPLACING" => !replacing,
-        "OF" | "IN" | "SUPPRESS" => !replacing,
-        "BY" | "LEADING" | "TRAILING" => replacing,
-        _ if !replacing => matches!(before, Some("OF" | "IN")),
-        _ => {
-            before == Some("BY")
-                || matches!(after, Some("BY"))
-                || before == Some("LEADING")
-                || before == Some("TRAILING")
-        }
-    }
+/// The words of a COPY statement's own clauses.
+fn is_copy_keyword(w: &str) -> bool {
+    matches!(
+        w,
+        "OF" | "IN" | "SUPPRESS" | "REPLACING" | "BY" | "LEADING" | "TRAILING"
+    )
 }
 
 // ── lexical views ──────────────────────────────────────────────────────────────────────────────
@@ -1070,7 +1099,8 @@ impl Pass<'_> {
             let whole = c.get(0).unwrap();
             let body = c.get(1).unwrap();
             let prog = self.anchors.prog(whole.start());
-            let (from, _) = self.anchors.at(whole.start());
+            let (from, program_id) = self.anchors.at(whole.start());
+            let program_id = program_id.map(str::to_ascii_uppercase);
             let loc = self.loc(whole.start(), whole.end());
             let verb = body
                 .as_str()
@@ -1089,9 +1119,11 @@ impl Pass<'_> {
                         };
                         if !raw.is_empty() {
                             // From the paragraph, and from the program too (a call to another
-                            // program is the program's: lineage walks Calls only).
+                            // program is the program's: lineage walks Calls only). A LINK or XCTL
+                            // of the program itself gets no program twin: a self-edge.
                             let unit = self.anchors.unit(whole.start());
-                            if unit != from {
+                            let own = op.literal && program_id.as_deref() == Some(raw.as_str());
+                            if unit != from && !own {
                                 self.out.refs.push(UnresolvedRef::new(
                                     from.clone(),
                                     raw.clone(),
@@ -2698,6 +2730,18 @@ mod tests {
         let view = grammar_view(&text).unwrap();
         assert_eq!(view.matches("EXIT").count(), 50);
         assert_eq!(view.matches("MOVE A TO B").count(), 50);
+        // Clauses out of order, or a repeated library, are not this COPY's: member only.
+        let text = "       PROCEDURE DIVISION.\n".to_string()
+            + &line(&format!("COPY BOOK{}", " OF".repeat(2000)))
+            + &line("NEXT-PARA.");
+        let view = grammar_view(&text).unwrap();
+        assert_eq!(view.len(), text.len());
+        assert!(view.contains("NEXT-PARA.") && view.contains(" OF OF"));
+        assert_eq!(
+            view.matches('\n').count(),
+            text.matches('\n').count(),
+            "line breaks are kept"
+        );
     }
 
     #[test]

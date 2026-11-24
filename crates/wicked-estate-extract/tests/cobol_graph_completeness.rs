@@ -715,3 +715,209 @@ fn a_call_to_another_program_is_also_the_programs_call() {
     assert_eq!(calls_from(&ex, "CALLPGM"), ["NEXTPGM", "SUBPGM"]);
     assert_eq!(calls_from(&ex, "MAIN-PARA"), ["1000-CALL"]);
 }
+
+// ── round-1 re-review folds ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn an_unterminated_copy_replacing_does_not_take_the_next_paragraph() {
+    let text = program(
+        "COPYREP",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    COPY CSSETATY REPLACING ==A== BY ==B==",
+            "AFTER-PARA.",
+            "    CALL 'SUBPGM'.",
+        ],
+    );
+    let ex = extract("COPYREP", &text);
+    assert_eq!(function_names(&ex), ["MAIN-PARA", "AFTER-PARA"]);
+    assert_eq!(calls_from(&ex, "AFTER-PARA"), ["SUBPGM"]);
+}
+
+#[test]
+fn copy_operands_that_are_literals_end_at_the_copy_period() {
+    let text = program(
+        "COPYLIT",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    COPY 'CSUTLDPY' OF 'SYSLIB'.",
+            "    COPY CSSETATY REPLACING 'OLD' BY 'NEW'.",
+            "NEXT-PARA.",
+            "    CALL 'SUBPGM'.",
+        ],
+    );
+    assert_covered_to_eof("COPYLIT", &text, &["MAIN-PARA", "NEXT-PARA"]);
+    assert_eq!(
+        calls_from(&extract("COPYLIT", &text), "NEXT-PARA"),
+        ["SUBPGM"]
+    );
+}
+
+#[test]
+fn an_unterminated_copy_split_over_lines_keeps_every_line_break() {
+    let text = program(
+        "COPYNL",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    COPY",
+            "        CSUTLDPY",
+            "NEXT-PARA.",
+            "    CALL 'SUBPGM'.",
+        ],
+    );
+    let ex = extract("COPYNL", &text);
+    let line = text.lines().position(|l| l.trim() == "NEXT-PARA.").unwrap() as u32;
+    assert_eq!(node(&ex, "NEXT-PARA").location.span.start_line, line);
+    let call = ex.refs.iter().find(|r| r.raw_name == "SUBPGM").unwrap();
+    assert_eq!(call.location.span.start_line, line + 1);
+}
+
+#[test]
+fn a_thru_range_ending_at_a_section_runs_the_sections_paragraphs() {
+    let text = program(
+        "SECTHRU",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    PERFORM A-PARA THRU SEC-B",
+            "    PERFORM SEC-B",
+            "    GOBACK.",
+            "SEC-A SECTION.",
+            "A-PARA.",
+            "    EXIT.",
+            "SEC-B SECTION.",
+            "B1-PARA.",
+            "    EXIT.",
+            "B2-PARA.",
+            "    EXIT.",
+            "SEC-C SECTION.",
+            "C-PARA.",
+            "    EXIT.",
+        ],
+    );
+    let ex = extract("SECTHRU", &text);
+    assert_eq!(
+        calls_from(&ex, "MAIN-PARA"),
+        ["A-PARA", "B1-PARA", "B2-PARA", "SEC-B"]
+    );
+}
+
+#[test]
+fn a_paragraph_named_like_the_program_it_calls_keeps_its_call() {
+    let text = program(
+        "ORDPGM",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    PERFORM SHIPPGM.",
+            "SHIPPGM.",
+            "    CALL 'SHIPPGM' USING WS-A.",
+        ],
+    );
+    let ex = extract("ORDPGM", &text);
+    let para = ex
+        .nodes
+        .iter()
+        .find(|n| n.name == "SHIPPGM" && n.kind == NodeKind::Function)
+        .unwrap();
+    assert!(
+        ex.refs
+            .iter()
+            .any(|r| r.from == para.symbol && r.raw_name == "SHIPPGM"),
+        "the paragraph's CALL is not a self-jump"
+    );
+    assert_eq!(calls_from(&ex, "ORDPGM"), ["SHIPPGM"]);
+}
+
+#[test]
+fn a_dynamic_call_through_an_item_named_like_the_program_keeps_both_refs() {
+    let text = program(
+        "DRIVER",
+        &["01  DRIVER        PIC X(8) VALUE 'SUBPGM'."],
+        &["MAIN-PARA.", "    CALL DRIVER."],
+    );
+    let ex = extract("DRIVER", &text);
+    let program = ex
+        .nodes
+        .iter()
+        .find(|n| n.name == "DRIVER" && n.kind == NodeKind::Module)
+        .unwrap();
+    let from_program: Vec<_> = ex
+        .refs
+        .iter()
+        .filter(|r| r.from == program.symbol && r.kind == EdgeKind::Calls)
+        .map(|r| r.raw_name.as_str())
+        .collect();
+    assert_eq!(from_program, ["cobol-dynamic-call:SUBPGM"]);
+    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["cobol-dynamic-call:SUBPGM"]);
+}
+
+#[test]
+fn a_call_or_xctl_of_the_program_itself_has_no_program_twin() {
+    let text = program(
+        "SELFPGM",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    CALL 'SELFPGM'",
+            "    EXEC CICS XCTL PROGRAM('SELFPGM') END-EXEC.",
+        ],
+    );
+    let ex = extract("SELFPGM", &text);
+    let program = ex
+        .nodes
+        .iter()
+        .find(|n| n.name == "SELFPGM" && n.kind == NodeKind::Module)
+        .unwrap();
+    assert!(
+        !ex.refs
+            .iter()
+            .any(|r| r.from == program.symbol && r.kind == EdgeKind::Calls),
+        "a program → itself ref is a self-edge"
+    );
+    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["SELFPGM"]);
+}
+
+#[test]
+fn an_exec_block_without_end_exec_stops_at_the_next_exec() {
+    // The scan for END-EXEC used to run on to the next block's END-EXEC, swallowing the header
+    // between them (and to EOF for each later EXEC when none followed: quadratic).
+    let text = program(
+        "EXECNOEND",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    EXEC CICS RETURN.",
+            "NEXT-PARA.",
+            "    EXEC SQL SELECT A INTO :WS-A FROM T END-EXEC",
+            "    CALL 'SUBPGM'.",
+        ],
+    );
+    let ex = extract("EXECNOEND", &text);
+    assert_eq!(function_names(&ex), ["MAIN-PARA", "NEXT-PARA"]);
+    assert_eq!(calls_from(&ex, "NEXT-PARA"), ["SUBPGM"]);
+}
+
+#[test]
+fn the_last_paragraph_covers_the_last_line_without_a_trailing_newline() {
+    let text = program(
+        "NOEOL",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    PERFORM LAST-PARA.",
+            "LAST-PARA.",
+            "    EXEC CICS LINK PROGRAM('SUBPGM') COMMAREA(WS-A) END-EXEC.",
+        ],
+    );
+    let text = text.trim_end_matches('\n').to_string();
+    let ex = assert_covered_to_eof("NOEOL", &text, &["MAIN-PARA", "LAST-PARA"]);
+    assert_eq!(
+        node(&ex, "LAST-PARA").location.span.end_line,
+        text.lines().count() as u32 - 1
+    );
+    assert_eq!(refs_from(&ex, "LAST-PARA"), ["WS-A"]);
+}

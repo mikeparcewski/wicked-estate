@@ -313,6 +313,8 @@ fn documented_edges() -> Vec<(&'static str, NodeKind, EdgeKind)> {
         // cobol_links.rs (+ the tree-sitter COBOL extractor): calls and data uses start from the
         // paragraph, which the program contains; every other link starts from the program.
         ("cbl/", NodeKind::Function, EdgeKind::Calls),
+        // ...and a call to another program from the program too (lineage walks Calls only).
+        ("cbl/", NodeKind::Module, EdgeKind::Calls),
         ("cbl/", NodeKind::Module, EdgeKind::Contains),
         ("cbl/", NodeKind::Module, EdgeKind::Imports),
         ("cbl/", NodeKind::Function, EdgeKind::References),
