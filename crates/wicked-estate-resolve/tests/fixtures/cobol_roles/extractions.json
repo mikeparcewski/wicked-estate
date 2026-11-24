@@ -1,0 +1,3942 @@
+[
+  {
+    "nodes": [
+      {
+        "symbol": "file . cbl/ACCTPGM.cbl:",
+        "kind": "file",
+        "name": "cbl/ACCTPGM.cbl",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#",
+        "kind": "module",
+        "name": "ACCTPGM",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 276,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 9,
+            "end_col": 18
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#ACCT.",
+        "kind": "field",
+        "name": "ACCT",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 177,
+            "end_byte": 184,
+            "start_line": 5,
+            "start_col": 7,
+            "end_line": 5,
+            "end_col": 14
+          }
+        },
+        "signature": "01 ACCT",
+        "metadata": {
+          "cobol_parents": [],
+          "cobol_program": "ACCTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#BAL.",
+        "kind": "field",
+        "name": "BAL",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 196,
+            "end_byte": 211,
+            "start_line": 6,
+            "start_col": 10,
+            "end_line": 6,
+            "end_col": 25
+          }
+        },
+        "signature": "05 BAL PIC 9(4)",
+        "metadata": {
+          "cobol_parents": [
+            "ACCT"
+          ],
+          "cobol_program": "ACCTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#MAIN-PARA().",
+        "kind": "function",
+        "name": "MAIN-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 247,
+            "end_byte": 276,
+            "start_line": 8,
+            "start_col": 7,
+            "end_line": 9,
+            "end_col": 18
+          }
+        },
+        "signature": "MAIN-PARA.",
+        "metadata": {
+          "behaviour": "stub",
+          "behaviour_reason": "exit_only",
+          "cobol_program": "ACCTPGM"
+        }
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/ACCTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/ACCTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#ACCT.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/ACCTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#BAL.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/ACCTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#",
+        "target": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#",
+        "target": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#MAIN-PARA().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cbl/CUSTPGM.cbl:",
+        "kind": "file",
+        "name": "cbl/CUSTPGM.cbl",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "kind": "module",
+        "name": "CUSTPGM",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 844,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 31,
+            "end_col": 16
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CALC.",
+        "kind": "field",
+        "name": "CALC",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 162,
+            "end_byte": 178,
+            "start_line": 6,
+            "start_col": 7,
+            "end_line": 6,
+            "end_col": 23
+          }
+        },
+        "signature": "01 CALC PIC 9(4)",
+        "metadata": {
+          "cobol_parents": [],
+          "cobol_program": "CUSTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#WS-FRAGS.",
+        "kind": "field",
+        "name": "WS-FRAGS",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 187,
+            "end_byte": 198,
+            "start_line": 7,
+            "start_col": 7,
+            "end_line": 7,
+            "end_col": 18
+          }
+        },
+        "signature": "01 WS-FRAGS",
+        "metadata": {
+          "cobol_parents": [],
+          "cobol_program": "CUSTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "kind": "function",
+        "name": "MAIN-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 277,
+            "end_byte": 707,
+            "start_line": 11,
+            "start_col": 7,
+            "end_line": 23,
+            "end_col": 28
+          }
+        },
+        "signature": "MAIN-PARA.",
+        "metadata": {
+          "behaviour": "real",
+          "cobol_program": "CUSTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CALC().",
+        "kind": "function",
+        "name": "CALC",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 715,
+            "end_byte": 737,
+            "start_line": 24,
+            "start_col": 7,
+            "end_line": 25,
+            "end_col": 16
+          }
+        },
+        "signature": "CALC.",
+        "metadata": {
+          "behaviour": "stub",
+          "behaviour_reason": "exit_only",
+          "cobol_program": "CUSTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CHECK-PARA().",
+        "kind": "function",
+        "name": "CHECK-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 745,
+            "end_byte": 773,
+            "start_line": 26,
+            "start_col": 7,
+            "end_line": 27,
+            "end_col": 16
+          }
+        },
+        "signature": "CHECK-PARA.",
+        "metadata": {
+          "behaviour": "stub",
+          "behaviour_reason": "exit_only",
+          "cobol_program": "CUSTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CHECK-EXIT().",
+        "kind": "function",
+        "name": "CHECK-EXIT",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 781,
+            "end_byte": 811,
+            "start_line": 28,
+            "start_col": 7,
+            "end_line": 29,
+            "end_col": 18
+          }
+        },
+        "signature": "CHECK-EXIT.",
+        "metadata": {
+          "behaviour": "stub",
+          "behaviour_reason": "exit_only",
+          "cobol_program": "CUSTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#SHIPPGM().",
+        "kind": "function",
+        "name": "SHIPPGM",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 819,
+            "end_byte": 844,
+            "start_line": 30,
+            "start_col": 7,
+            "end_line": 31,
+            "end_col": 16
+          }
+        },
+        "signature": "SHIPPGM.",
+        "metadata": {
+          "behaviour": "stub",
+          "behaviour_reason": "exit_only",
+          "cobol_program": "CUSTPGM"
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic CUSTREC:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "CUSTREC",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 126,
+            "end_byte": 133,
+            "start_line": 4,
+            "start_col": 12,
+            "end_line": 4,
+            "end_col": 19
+          }
+        },
+        "metadata": {
+          "boundary_reason": "COPY CUSTREC: no copybook source named CUSTREC is indexed",
+          "is_declaration": true
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic ORDREC:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "ORDREC",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 147,
+            "end_byte": 153,
+            "start_line": 5,
+            "start_col": 12,
+            "end_line": 5,
+            "end_col": 18
+          }
+        },
+        "metadata": {
+          "boundary_reason": "COPY ORDREC: no copybook source named ORDREC is indexed",
+          "is_declaration": true
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic CUSTFRAG:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "CUSTFRAG",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 212,
+            "end_byte": 220,
+            "start_line": 8,
+            "start_col": 12,
+            "end_line": 8,
+            "end_col": 20
+          }
+        },
+        "metadata": {
+          "boundary_reason": "COPY CUSTFRAG: no copybook source named CUSTFRAG is indexed",
+          "is_declaration": true
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic ORDFRAG:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "ORDFRAG",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 234,
+            "end_byte": 241,
+            "start_line": 9,
+            "start_col": 12,
+            "end_line": 9,
+            "end_col": 19
+          }
+        },
+        "metadata": {
+          "boundary_reason": "COPY ORDFRAG: no copybook source named ORDFRAG is indexed",
+          "is_declaration": true
+        }
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/CUSTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/CUSTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CALC.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/CUSTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#WS-FRAGS.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/CUSTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/CUSTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CALC().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/CUSTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CHECK-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/CUSTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CHECK-EXIT().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/CUSTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#SHIPPGM().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CALC().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CHECK-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CHECK-EXIT().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#SHIPPGM().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CALC().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 514,
+            "end_byte": 518,
+            "start_line": 18,
+            "start_col": 19,
+            "end_line": 18,
+            "end_col": 23
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CHECK-PARA().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 539,
+            "end_byte": 549,
+            "start_line": 19,
+            "start_col": 19,
+            "end_line": 19,
+            "end_col": 29
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CHECK-EXIT().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 555,
+            "end_byte": 565,
+            "start_line": 19,
+            "start_col": 35,
+            "end_line": 19,
+            "end_col": 45
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#CHECK-EXIT().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 696,
+            "end_byte": 706,
+            "start_line": 23,
+            "start_col": 17,
+            "end_line": 23,
+            "end_col": 27
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#SHIPPGM().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "cobol-copybook synthetic CUSTREC:",
+        "kind": "imports",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 126,
+            "end_byte": 133,
+            "start_line": 4,
+            "start_col": 12,
+            "end_line": 4,
+            "end_col": 19
+          }
+        },
+        "metadata": {
+          "via": "copy"
+        }
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "cobol-copybook synthetic ORDREC:",
+        "kind": "imports",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 147,
+            "end_byte": 153,
+            "start_line": 5,
+            "start_col": 12,
+            "end_line": 5,
+            "end_col": 18
+          }
+        },
+        "metadata": {
+          "via": "copy"
+        }
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "cobol-copybook synthetic CUSTFRAG:",
+        "kind": "imports",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 212,
+            "end_byte": 220,
+            "start_line": 8,
+            "start_col": 12,
+            "end_line": 8,
+            "end_col": 20
+          }
+        },
+        "metadata": {
+          "via": "copy"
+        }
+      },
+      {
+        "source": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#",
+        "target": "cobol-copybook synthetic ORDFRAG:",
+        "kind": "imports",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 234,
+            "end_byte": 241,
+            "start_line": 9,
+            "start_col": 12,
+            "end_line": 9,
+            "end_col": 19
+          }
+        },
+        "metadata": {
+          "via": "copy"
+        }
+      }
+    ],
+    "refs": [
+      {
+        "from": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "raw_name": "ID",
+        "kind": "references",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 309,
+            "end_byte": 311,
+            "start_line": 12,
+            "start_col": 21,
+            "end_line": 12,
+            "end_col": 23
+          }
+        },
+        "hints": {
+          "cobol_copies": [
+            "CUSTFRAG",
+            "CUSTREC",
+            "ORDFRAG",
+            "ORDREC"
+          ],
+          "cobol_of": [
+            "CUSTOMER"
+          ],
+          "cobol_programs": [
+            "CUSTPGM"
+          ],
+          "cobol_role": "data"
+        }
+      },
+      {
+        "from": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "raw_name": "ID",
+        "kind": "references",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 346,
+            "end_byte": 348,
+            "start_line": 13,
+            "start_col": 21,
+            "end_line": 13,
+            "end_col": 23
+          }
+        },
+        "hints": {
+          "cobol_copies": [
+            "CUSTFRAG",
+            "CUSTREC",
+            "ORDFRAG",
+            "ORDREC"
+          ],
+          "cobol_of": [
+            "ORDER-REC"
+          ],
+          "cobol_programs": [
+            "CUSTPGM"
+          ],
+          "cobol_role": "data"
+        }
+      },
+      {
+        "from": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "raw_name": "CALC",
+        "kind": "references",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 384,
+            "end_byte": 388,
+            "start_line": 14,
+            "start_col": 21,
+            "end_line": 14,
+            "end_col": 25
+          }
+        },
+        "hints": {
+          "cobol_copies": [
+            "CUSTFRAG",
+            "CUSTREC",
+            "ORDFRAG",
+            "ORDREC"
+          ],
+          "cobol_programs": [
+            "CUSTPGM"
+          ],
+          "cobol_role": "data"
+        }
+      },
+      {
+        "from": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "raw_name": "CUST-NAME",
+        "kind": "references",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 416,
+            "end_byte": 425,
+            "start_line": 15,
+            "start_col": 26,
+            "end_line": 15,
+            "end_col": 35
+          }
+        },
+        "hints": {
+          "cobol_copies": [
+            "CUSTFRAG",
+            "CUSTREC",
+            "ORDFRAG",
+            "ORDREC"
+          ],
+          "cobol_programs": [
+            "CUSTPGM"
+          ],
+          "cobol_role": "data"
+        }
+      },
+      {
+        "from": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "raw_name": "WS-DONE",
+        "kind": "references",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 448,
+            "end_byte": 455,
+            "start_line": 16,
+            "start_col": 21,
+            "end_line": 16,
+            "end_col": 28
+          }
+        },
+        "hints": {
+          "cobol_copies": [
+            "CUSTFRAG",
+            "CUSTREC",
+            "ORDFRAG",
+            "ORDREC"
+          ],
+          "cobol_programs": [
+            "CUSTPGM"
+          ],
+          "cobol_role": "data"
+        }
+      },
+      {
+        "from": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "raw_name": "FID",
+        "kind": "references",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 478,
+            "end_byte": 481,
+            "start_line": 17,
+            "start_col": 21,
+            "end_line": 17,
+            "end_col": 24
+          }
+        },
+        "hints": {
+          "cobol_copies": [
+            "CUSTFRAG",
+            "CUSTREC",
+            "ORDFRAG",
+            "ORDREC"
+          ],
+          "cobol_of": [
+            "CUSTOMER"
+          ],
+          "cobol_programs": [
+            "CUSTPGM"
+          ],
+          "cobol_role": "data"
+        }
+      },
+      {
+        "from": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "raw_name": "SHIPPGM",
+        "kind": "calls",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 583,
+            "end_byte": 592,
+            "start_line": 20,
+            "start_col": 16,
+            "end_line": 20,
+            "end_col": 25
+          }
+        },
+        "hints": {
+          "cobol_role": "program"
+        }
+      },
+      {
+        "from": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "raw_name": "SHIPPGM",
+        "kind": "calls",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 605,
+            "end_byte": 677,
+            "start_line": 21,
+            "start_col": 11,
+            "end_line": 22,
+            "end_col": 19
+          }
+        },
+        "hints": {
+          "cobol_role": "program"
+        }
+      },
+      {
+        "from": "ts-cobol . . . cbl/CUSTPGM/CUSTPGM#MAIN-PARA().",
+        "raw_name": "CUSTOMER",
+        "kind": "references",
+        "location": {
+          "file": "cbl/CUSTPGM.cbl",
+          "span": {
+            "start_byte": 605,
+            "end_byte": 677,
+            "start_line": 21,
+            "start_col": 11,
+            "end_line": 22,
+            "end_col": 19
+          }
+        },
+        "hints": {
+          "cobol_copies": [
+            "CUSTFRAG",
+            "CUSTREC",
+            "ORDFRAG",
+            "ORDREC"
+          ],
+          "cobol_programs": [
+            "CUSTPGM"
+          ],
+          "cobol_role": "data"
+        }
+      }
+    ]
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cbl/FRAGPGM.cbl:",
+        "kind": "file",
+        "name": "cbl/FRAGPGM.cbl",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#",
+        "kind": "module",
+        "name": "FRAGPGM",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 249,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 9,
+            "end_col": 18
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#ACCT.",
+        "kind": "field",
+        "name": "ACCT",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 121,
+            "end_byte": 128,
+            "start_line": 4,
+            "start_col": 7,
+            "end_line": 4,
+            "end_col": 14
+          }
+        },
+        "signature": "01 ACCT",
+        "metadata": {
+          "cobol_parents": [],
+          "cobol_program": "FRAGPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#MAIN-PARA().",
+        "kind": "function",
+        "name": "MAIN-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 186,
+            "end_byte": 249,
+            "start_line": 7,
+            "start_col": 7,
+            "end_line": 9,
+            "end_col": 18
+          }
+        },
+        "signature": "MAIN-PARA.",
+        "metadata": {
+          "behaviour": "real",
+          "cobol_program": "FRAGPGM"
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic ACCTFRAG:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "ACCTFRAG",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 142,
+            "end_byte": 150,
+            "start_line": 5,
+            "start_col": 12,
+            "end_line": 5,
+            "end_col": 20
+          }
+        },
+        "metadata": {
+          "boundary_reason": "COPY ACCTFRAG: no copybook source named ACCTFRAG is indexed",
+          "is_declaration": true
+        }
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/FRAGPGM.cbl:",
+        "target": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/FRAGPGM.cbl:",
+        "target": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#ACCT.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/FRAGPGM.cbl:",
+        "target": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#",
+        "target": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#",
+        "target": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#MAIN-PARA().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#",
+        "target": "cobol-copybook synthetic ACCTFRAG:",
+        "kind": "imports",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 142,
+            "end_byte": 150,
+            "start_line": 5,
+            "start_col": 12,
+            "end_line": 5,
+            "end_col": 20
+          }
+        },
+        "metadata": {
+          "via": "copy"
+        }
+      }
+    ],
+    "refs": [
+      {
+        "from": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#MAIN-PARA().",
+        "raw_name": "BAL",
+        "kind": "references",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 218,
+            "end_byte": 221,
+            "start_line": 8,
+            "start_col": 21,
+            "end_line": 8,
+            "end_col": 24
+          }
+        },
+        "hints": {
+          "cobol_copies": [
+            "ACCTFRAG"
+          ],
+          "cobol_of": [
+            "ACCT"
+          ],
+          "cobol_programs": [
+            "FRAGPGM"
+          ],
+          "cobol_role": "data"
+        }
+      }
+    ]
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cbl/OTHREC.cpy:",
+        "kind": "file",
+        "name": "cbl/OTHREC.cpy",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/OTHREC/OTHER-REC.",
+        "kind": "field",
+        "name": "OTHER-REC",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 77,
+            "end_byte": 89,
+            "start_line": 1,
+            "start_col": 7,
+            "end_line": 1,
+            "end_col": 19
+          }
+        },
+        "signature": "01 OTHER-REC",
+        "metadata": {
+          "cobol_copybook": "OTHREC",
+          "cobol_parents": []
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/OTHREC/CUST-NAME.",
+        "kind": "field",
+        "name": "CUST-NAME",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 101,
+            "end_byte": 123,
+            "start_line": 2,
+            "start_col": 10,
+            "end_line": 2,
+            "end_col": 32
+          }
+        },
+        "signature": "05 CUST-NAME PIC X(20)",
+        "metadata": {
+          "cobol_copybook": "OTHREC",
+          "cobol_parents": [
+            "OTHER-REC"
+          ]
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/OTHREC/ID.",
+        "kind": "field",
+        "name": "ID",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 135,
+            "end_byte": 149,
+            "start_line": 3,
+            "start_col": 10,
+            "end_line": 3,
+            "end_col": 24
+          }
+        },
+        "signature": "05 ID PIC 9(8)",
+        "metadata": {
+          "cobol_copybook": "OTHREC",
+          "cobol_parents": [
+            "OTHER-REC"
+          ]
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic OTHREC:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "OTHREC",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "signature": "COPYBOOK",
+        "metadata": {}
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/OTHREC.cpy:",
+        "target": "ts-cobol . . . cbl/OTHREC/OTHER-REC.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/OTHREC.cpy:",
+        "target": "ts-cobol . . . cbl/OTHREC/CUST-NAME.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/OTHREC.cpy:",
+        "target": "ts-cobol . . . cbl/OTHREC/ID.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic OTHREC:",
+        "target": "ts-cobol . . . cbl/OTHREC/OTHER-REC.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic OTHREC:",
+        "target": "ts-cobol . . . cbl/OTHREC/CUST-NAME.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic OTHREC:",
+        "target": "ts-cobol . . . cbl/OTHREC/ID.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/OTHREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cbl/OTHPGM.cbl:",
+        "kind": "file",
+        "name": "cbl/OTHPGM.cbl",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/OTHPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/OTHPGM/OTHPGM#",
+        "kind": "module",
+        "name": "OTHPGM",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/OTHPGM.cbl",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 199,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 5,
+            "end_col": 18
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/OTHPGM/OTHPGM#WS-DONE().",
+        "kind": "function",
+        "name": "WS-DONE",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/OTHPGM.cbl",
+          "span": {
+            "start_byte": 172,
+            "end_byte": 199,
+            "start_line": 4,
+            "start_col": 7,
+            "end_line": 5,
+            "end_col": 18
+          }
+        },
+        "signature": "WS-DONE.",
+        "metadata": {
+          "behaviour": "stub",
+          "behaviour_reason": "exit_only",
+          "cobol_program": "OTHPGM"
+        }
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/OTHPGM.cbl:",
+        "target": "ts-cobol . . . cbl/OTHPGM/OTHPGM#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/OTHPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/OTHPGM.cbl:",
+        "target": "ts-cobol . . . cbl/OTHPGM/OTHPGM#WS-DONE().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/OTHPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/OTHPGM/OTHPGM#",
+        "target": "ts-cobol . . . cbl/OTHPGM/OTHPGM#WS-DONE().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/OTHPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/OTHPGM/OTHPGM#",
+        "target": "ts-cobol . . . cbl/OTHPGM/OTHPGM#WS-DONE().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/OTHPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cbl/RECUR.cbl:",
+        "kind": "file",
+        "name": "cbl/RECUR.cbl",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/RECUR.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/RECUR/RECUR#",
+        "kind": "module",
+        "name": "RECUR",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/RECUR.cbl",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 146,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 5,
+            "end_col": 18
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/RECUR/RECUR#MAIN-PARA().",
+        "kind": "function",
+        "name": "MAIN-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/RECUR.cbl",
+          "span": {
+            "start_byte": 92,
+            "end_byte": 146,
+            "start_line": 3,
+            "start_col": 7,
+            "end_line": 5,
+            "end_col": 18
+          }
+        },
+        "signature": "MAIN-PARA.",
+        "metadata": {
+          "behaviour": "real",
+          "cobol_program": "RECUR"
+        }
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/RECUR.cbl:",
+        "target": "ts-cobol . . . cbl/RECUR/RECUR#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/RECUR.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/RECUR.cbl:",
+        "target": "ts-cobol . . . cbl/RECUR/RECUR#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/RECUR.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/RECUR/RECUR#",
+        "target": "ts-cobol . . . cbl/RECUR/RECUR#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/RECUR.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/RECUR/RECUR#",
+        "target": "ts-cobol . . . cbl/RECUR/RECUR#MAIN-PARA().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/RECUR.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": [
+      {
+        "from": "ts-cobol . . . cbl/RECUR/RECUR#MAIN-PARA().",
+        "raw_name": "RECUR",
+        "kind": "calls",
+        "location": {
+          "file": "cbl/RECUR.cbl",
+          "span": {
+            "start_byte": 119,
+            "end_byte": 126,
+            "start_line": 4,
+            "start_col": 16,
+            "end_line": 4,
+            "end_col": 23
+          }
+        },
+        "hints": {
+          "cobol_role": "program"
+        }
+      }
+    ]
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cbl/RECUR2.cbl:",
+        "kind": "file",
+        "name": "cbl/RECUR2.cbl",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/RECUR2.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/RECUR2/RECUR#",
+        "kind": "module",
+        "name": "RECUR",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/RECUR2.cbl",
+          "span": {
+            "start_byte": 72,
+            "end_byte": 186,
+            "start_line": 1,
+            "start_col": 7,
+            "end_line": 5,
+            "end_col": 18
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/RECUR2/RECUR#MAIN-PARA().",
+        "kind": "function",
+        "name": "MAIN-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/RECUR2.cbl",
+          "span": {
+            "start_byte": 157,
+            "end_byte": 186,
+            "start_line": 4,
+            "start_col": 7,
+            "end_line": 5,
+            "end_col": 18
+          }
+        },
+        "signature": "MAIN-PARA.",
+        "metadata": {
+          "behaviour": "stub",
+          "behaviour_reason": "exit_only",
+          "cobol_program": "RECUR"
+        }
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/RECUR2.cbl:",
+        "target": "ts-cobol . . . cbl/RECUR2/RECUR#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/RECUR2.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/RECUR2.cbl:",
+        "target": "ts-cobol . . . cbl/RECUR2/RECUR#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/RECUR2.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/RECUR2/RECUR#",
+        "target": "ts-cobol . . . cbl/RECUR2/RECUR#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/RECUR2.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/RECUR2/RECUR#",
+        "target": "ts-cobol . . . cbl/RECUR2/RECUR#MAIN-PARA().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/RECUR2.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cbl/SHIPPGM.cbl:",
+        "kind": "file",
+        "name": "cbl/SHIPPGM.cbl",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/SHIPPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/SHIPPGM/SHIPPGM#",
+        "kind": "module",
+        "name": "SHIPPGM",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/SHIPPGM.cbl",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 123,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 4,
+            "end_col": 18
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/SHIPPGM/SHIPPGM#MAIN-PARA().",
+        "kind": "function",
+        "name": "MAIN-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/SHIPPGM.cbl",
+          "span": {
+            "start_byte": 94,
+            "end_byte": 123,
+            "start_line": 3,
+            "start_col": 7,
+            "end_line": 4,
+            "end_col": 18
+          }
+        },
+        "signature": "MAIN-PARA.",
+        "metadata": {
+          "behaviour": "stub",
+          "behaviour_reason": "exit_only",
+          "cobol_program": "SHIPPGM"
+        }
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/SHIPPGM.cbl:",
+        "target": "ts-cobol . . . cbl/SHIPPGM/SHIPPGM#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/SHIPPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/SHIPPGM.cbl:",
+        "target": "ts-cobol . . . cbl/SHIPPGM/SHIPPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/SHIPPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/SHIPPGM/SHIPPGM#",
+        "target": "ts-cobol . . . cbl/SHIPPGM/SHIPPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/SHIPPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/SHIPPGM/SHIPPGM#",
+        "target": "ts-cobol . . . cbl/SHIPPGM/SHIPPGM#MAIN-PARA().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/SHIPPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cbl/TWOPGM.cbl:",
+        "kind": "file",
+        "name": "cbl/TWOPGM.cbl",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/TWOPGM/FIRSTPGM#",
+        "kind": "module",
+        "name": "FIRSTPGM",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 265,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 9,
+            "end_col": 28
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/TWOPGM/FIRSTPGM#MAIN-PARA().",
+        "kind": "function",
+        "name": "MAIN-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 170,
+            "end_byte": 236,
+            "start_line": 6,
+            "start_col": 7,
+            "end_line": 8,
+            "end_col": 18
+          }
+        },
+        "signature": "MAIN-PARA.",
+        "metadata": {
+          "behaviour": "real",
+          "cobol_program": "FIRSTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#",
+        "kind": "module",
+        "name": "SECONDPGM",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 273,
+            "end_byte": 543,
+            "start_line": 10,
+            "start_col": 7,
+            "end_line": 19,
+            "end_col": 29
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#CUST-NAME.",
+        "kind": "field",
+        "name": "CUST-NAME",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 389,
+            "end_byte": 411,
+            "start_line": 14,
+            "start_col": 7,
+            "end_line": 14,
+            "end_col": 29
+          }
+        },
+        "signature": "01 CUST-NAME PIC X(20)",
+        "metadata": {
+          "cobol_parents": [],
+          "cobol_program": "SECONDPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#MAIN-PARA().",
+        "kind": "function",
+        "name": "MAIN-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 447,
+            "end_byte": 513,
+            "start_line": 16,
+            "start_col": 7,
+            "end_line": 18,
+            "end_col": 18
+          }
+        },
+        "signature": "MAIN-PARA.",
+        "metadata": {
+          "behaviour": "real",
+          "cobol_program": "SECONDPGM"
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic CUSTREC:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "CUSTREC",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 127,
+            "end_byte": 134,
+            "start_line": 4,
+            "start_col": 12,
+            "end_line": 4,
+            "end_col": 19
+          }
+        },
+        "metadata": {
+          "boundary_reason": "COPY CUSTREC: no copybook source named CUSTREC is indexed",
+          "is_declaration": true
+        }
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/TWOPGM.cbl:",
+        "target": "ts-cobol . . . cbl/TWOPGM/FIRSTPGM#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/TWOPGM.cbl:",
+        "target": "ts-cobol . . . cbl/TWOPGM/FIRSTPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/TWOPGM.cbl:",
+        "target": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/TWOPGM.cbl:",
+        "target": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#CUST-NAME.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/TWOPGM.cbl:",
+        "target": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/TWOPGM/FIRSTPGM#",
+        "target": "ts-cobol . . . cbl/TWOPGM/FIRSTPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#",
+        "target": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/TWOPGM/FIRSTPGM#",
+        "target": "ts-cobol . . . cbl/TWOPGM/FIRSTPGM#MAIN-PARA().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#",
+        "target": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#MAIN-PARA().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/TWOPGM/FIRSTPGM#",
+        "target": "cobol-copybook synthetic CUSTREC:",
+        "kind": "imports",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 127,
+            "end_byte": 134,
+            "start_line": 4,
+            "start_col": 12,
+            "end_line": 4,
+            "end_col": 19
+          }
+        },
+        "metadata": {
+          "via": "copy"
+        }
+      }
+    ],
+    "refs": [
+      {
+        "from": "ts-cobol . . . cbl/TWOPGM/FIRSTPGM#MAIN-PARA().",
+        "raw_name": "CUST-NAME",
+        "kind": "references",
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 207,
+            "end_byte": 216,
+            "start_line": 7,
+            "start_col": 26,
+            "end_line": 7,
+            "end_col": 35
+          }
+        },
+        "hints": {
+          "cobol_copies": [
+            "CUSTREC"
+          ],
+          "cobol_programs": [
+            "FIRSTPGM"
+          ],
+          "cobol_role": "data"
+        }
+      },
+      {
+        "from": "ts-cobol . . . cbl/TWOPGM/SECONDPGM#MAIN-PARA().",
+        "raw_name": "CUST-NAME",
+        "kind": "references",
+        "location": {
+          "file": "cbl/TWOPGM.cbl",
+          "span": {
+            "start_byte": 484,
+            "end_byte": 493,
+            "start_line": 17,
+            "start_col": 26,
+            "end_line": 17,
+            "end_col": 35
+          }
+        },
+        "hints": {
+          "cobol_programs": [
+            "SECONDPGM"
+          ],
+          "cobol_role": "data"
+        }
+      }
+    ]
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cpy/ACCTFRAG.cpy:",
+        "kind": "file",
+        "name": "cpy/ACCTFRAG.cpy",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ACCTFRAG/BAL.",
+        "kind": "field",
+        "name": "BAL",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTFRAG.cpy",
+          "span": {
+            "start_byte": 10,
+            "end_byte": 25,
+            "start_line": 0,
+            "start_col": 10,
+            "end_line": 0,
+            "end_col": 25
+          }
+        },
+        "signature": "05 BAL PIC 9(4)",
+        "metadata": {
+          "cobol_copybook": "ACCTFRAG",
+          "cobol_open": true,
+          "cobol_parents": []
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic ACCTFRAG:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "ACCTFRAG",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "signature": "COPYBOOK",
+        "metadata": {}
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cpy/ACCTFRAG.cpy:",
+        "target": "ts-cobol . . . cpy/ACCTFRAG/BAL.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ACCTFRAG:",
+        "target": "ts-cobol . . . cpy/ACCTFRAG/BAL.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cpy/ACCTREC.cpy:",
+        "kind": "file",
+        "name": "cpy/ACCTREC.cpy",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ACCTREC/ACCT.",
+        "kind": "field",
+        "name": "ACCT",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 77,
+            "end_byte": 84,
+            "start_line": 1,
+            "start_col": 7,
+            "end_line": 1,
+            "end_col": 14
+          }
+        },
+        "signature": "01 ACCT",
+        "metadata": {
+          "cobol_copybook": "ACCTREC",
+          "cobol_parents": []
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ACCTREC/BAL.",
+        "kind": "field",
+        "name": "BAL",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 96,
+            "end_byte": 111,
+            "start_line": 2,
+            "start_col": 10,
+            "end_line": 2,
+            "end_col": 25
+          }
+        },
+        "signature": "05 BAL PIC 9(4)",
+        "metadata": {
+          "cobol_copybook": "ACCTREC",
+          "cobol_parents": [
+            "ACCT"
+          ]
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic ACCTREC:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "ACCTREC",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "signature": "COPYBOOK",
+        "metadata": {}
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cpy/ACCTREC.cpy:",
+        "target": "ts-cobol . . . cpy/ACCTREC/ACCT.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cpy/ACCTREC.cpy:",
+        "target": "ts-cobol . . . cpy/ACCTREC/BAL.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ACCTREC:",
+        "target": "ts-cobol . . . cpy/ACCTREC/ACCT.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ACCTREC:",
+        "target": "ts-cobol . . . cpy/ACCTREC/BAL.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cpy/CUSTFRAG.cpy:",
+        "kind": "file",
+        "name": "cpy/CUSTFRAG.cpy",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/CUSTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/CUSTFRAG/CUSTOMER.",
+        "kind": "field",
+        "name": "CUSTOMER",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/CUSTFRAG.cpy",
+          "span": {
+            "start_byte": 66,
+            "end_byte": 77,
+            "start_line": 1,
+            "start_col": 10,
+            "end_line": 1,
+            "end_col": 21
+          }
+        },
+        "signature": "05 CUSTOMER",
+        "metadata": {
+          "cobol_copybook": "CUSTFRAG",
+          "cobol_open": true,
+          "cobol_parents": []
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/CUSTFRAG/FID.",
+        "kind": "field",
+        "name": "FID",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/CUSTFRAG.cpy",
+          "span": {
+            "start_byte": 92,
+            "end_byte": 107,
+            "start_line": 2,
+            "start_col": 13,
+            "end_line": 2,
+            "end_col": 28
+          }
+        },
+        "signature": "10 FID PIC 9(4)",
+        "metadata": {
+          "cobol_copybook": "CUSTFRAG",
+          "cobol_open": true,
+          "cobol_parents": [
+            "CUSTOMER"
+          ]
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic CUSTFRAG:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "CUSTFRAG",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/CUSTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "signature": "COPYBOOK",
+        "metadata": {}
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cpy/CUSTFRAG.cpy:",
+        "target": "ts-cobol . . . cpy/CUSTFRAG/CUSTOMER.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/CUSTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cpy/CUSTFRAG.cpy:",
+        "target": "ts-cobol . . . cpy/CUSTFRAG/FID.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/CUSTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic CUSTFRAG:",
+        "target": "ts-cobol . . . cpy/CUSTFRAG/CUSTOMER.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/CUSTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic CUSTFRAG:",
+        "target": "ts-cobol . . . cpy/CUSTFRAG/FID.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/CUSTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cpy/CUSTREC.cpy:",
+        "kind": "file",
+        "name": "cpy/CUSTREC.cpy",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/CUSTREC/CUSTOMER.",
+        "kind": "field",
+        "name": "CUSTOMER",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 18,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 0,
+            "end_col": 18
+          }
+        },
+        "signature": "01 CUSTOMER",
+        "metadata": {
+          "cobol_copybook": "CUSTREC",
+          "cobol_parents": []
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/CUSTREC/ID.",
+        "kind": "field",
+        "name": "ID",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 30,
+            "end_byte": 44,
+            "start_line": 1,
+            "start_col": 10,
+            "end_line": 1,
+            "end_col": 24
+          }
+        },
+        "signature": "05 ID PIC 9(8)",
+        "metadata": {
+          "cobol_copybook": "CUSTREC",
+          "cobol_parents": [
+            "CUSTOMER"
+          ]
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/CUSTREC/CUST-NAME.",
+        "kind": "field",
+        "name": "CUST-NAME",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 56,
+            "end_byte": 78,
+            "start_line": 2,
+            "start_col": 10,
+            "end_line": 2,
+            "end_col": 32
+          }
+        },
+        "signature": "05 CUST-NAME PIC X(20)",
+        "metadata": {
+          "cobol_copybook": "CUSTREC",
+          "cobol_parents": [
+            "CUSTOMER"
+          ]
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic CUSTREC:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "CUSTREC",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "signature": "COPYBOOK",
+        "metadata": {}
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cpy/CUSTREC.cpy:",
+        "target": "ts-cobol . . . cpy/CUSTREC/CUSTOMER.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cpy/CUSTREC.cpy:",
+        "target": "ts-cobol . . . cpy/CUSTREC/ID.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cpy/CUSTREC.cpy:",
+        "target": "ts-cobol . . . cpy/CUSTREC/CUST-NAME.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic CUSTREC:",
+        "target": "ts-cobol . . . cpy/CUSTREC/CUSTOMER.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic CUSTREC:",
+        "target": "ts-cobol . . . cpy/CUSTREC/ID.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic CUSTREC:",
+        "target": "ts-cobol . . . cpy/CUSTREC/CUST-NAME.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/CUSTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cpy/ORDFRAG.cpy:",
+        "kind": "file",
+        "name": "cpy/ORDFRAG.cpy",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ORDFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ORDFRAG/ORDER-REC.",
+        "kind": "field",
+        "name": "ORDER-REC",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ORDFRAG.cpy",
+          "span": {
+            "start_byte": 10,
+            "end_byte": 22,
+            "start_line": 0,
+            "start_col": 10,
+            "end_line": 0,
+            "end_col": 22
+          }
+        },
+        "signature": "05 ORDER-REC",
+        "metadata": {
+          "cobol_copybook": "ORDFRAG",
+          "cobol_open": true,
+          "cobol_parents": []
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ORDFRAG/FID.",
+        "kind": "field",
+        "name": "FID",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ORDFRAG.cpy",
+          "span": {
+            "start_byte": 37,
+            "end_byte": 52,
+            "start_line": 1,
+            "start_col": 13,
+            "end_line": 1,
+            "end_col": 28
+          }
+        },
+        "signature": "10 FID PIC 9(4)",
+        "metadata": {
+          "cobol_copybook": "ORDFRAG",
+          "cobol_open": true,
+          "cobol_parents": [
+            "ORDER-REC"
+          ]
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic ORDFRAG:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "ORDFRAG",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ORDFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "signature": "COPYBOOK",
+        "metadata": {}
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cpy/ORDFRAG.cpy:",
+        "target": "ts-cobol . . . cpy/ORDFRAG/ORDER-REC.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ORDFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cpy/ORDFRAG.cpy:",
+        "target": "ts-cobol . . . cpy/ORDFRAG/FID.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ORDFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ORDFRAG:",
+        "target": "ts-cobol . . . cpy/ORDFRAG/ORDER-REC.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ORDFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ORDFRAG:",
+        "target": "ts-cobol . . . cpy/ORDFRAG/FID.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ORDFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cpy/ORDREC.cpy:",
+        "kind": "file",
+        "name": "cpy/ORDREC.cpy",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ORDREC/ORDER-REC.",
+        "kind": "field",
+        "name": "ORDER-REC",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 19,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 0,
+            "end_col": 19
+          }
+        },
+        "signature": "01 ORDER-REC",
+        "metadata": {
+          "cobol_copybook": "ORDREC",
+          "cobol_parents": []
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ORDREC/ID.",
+        "kind": "field",
+        "name": "ID",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 31,
+            "end_byte": 45,
+            "start_line": 1,
+            "start_col": 10,
+            "end_line": 1,
+            "end_col": 24
+          }
+        },
+        "signature": "05 ID PIC 9(8)",
+        "metadata": {
+          "cobol_copybook": "ORDREC",
+          "cobol_parents": [
+            "ORDER-REC"
+          ]
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ORDREC/ORD-QTY.",
+        "kind": "field",
+        "name": "ORD-QTY",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 57,
+            "end_byte": 76,
+            "start_line": 2,
+            "start_col": 10,
+            "end_line": 2,
+            "end_col": 29
+          }
+        },
+        "signature": "05 ORD-QTY PIC 9(4)",
+        "metadata": {
+          "cobol_copybook": "ORDREC",
+          "cobol_parents": [
+            "ORDER-REC"
+          ]
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic ORDREC:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "ORDREC",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "signature": "COPYBOOK",
+        "metadata": {}
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cpy/ORDREC.cpy:",
+        "target": "ts-cobol . . . cpy/ORDREC/ORDER-REC.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cpy/ORDREC.cpy:",
+        "target": "ts-cobol . . . cpy/ORDREC/ID.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cpy/ORDREC.cpy:",
+        "target": "ts-cobol . . . cpy/ORDREC/ORD-QTY.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ORDREC:",
+        "target": "ts-cobol . . . cpy/ORDREC/ORDER-REC.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ORDREC:",
+        "target": "ts-cobol . . . cpy/ORDREC/ID.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ORDREC:",
+        "target": "ts-cobol . . . cpy/ORDREC/ORD-QTY.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ORDREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  }
+]

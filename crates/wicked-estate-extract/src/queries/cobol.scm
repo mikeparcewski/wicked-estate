@@ -2,7 +2,7 @@
 ; Node types + fields verified against arborium-cobol-2.18.0 node-types.json:
 ;   paragraph_header.name = WORD|integer ; section_header.name = WORD|integer ;
 ;   program_definition (node) ; call_statement.x (the called program) ;
-;   perform_statement_call_proc.procedure (the PERFORMed paragraph).
+;   perform_statement_call_proc.procedure (the PERFORMed paragraph: read by the extractor).
 
 ; PROGRAM-ID NAME ... → a program is a module named by its PROGRAM-ID. Naming it lets cross-program
 ; refs resolve to it: a JCL `EXEC PGM=NAME`, an HLASM `CALL NAME`, or another COBOL `CALL 'NAME'`.
@@ -22,9 +22,10 @@
 (call_statement
   x: (_) @call.function) @call
 
-; PERFORM <paragraph> → intra-program call
-(perform_statement_call_proc
-  procedure: (_) @call.function) @call
+; PERFORM <paragraph> [THRU <paragraph>], SORT/MERGE INPUT|OUTPUT PROCEDURE and GO TO calls are read
+; by the extractor (`cobol_flow_calls`), not here: a range calls every paragraph through its end, an
+; endpoint may be qualified (`A OF SEC`, a call to A in SEC), and `GO TO A B DEPENDING ON X` calls two
+; (a query match keeps one capture per statement).
 
 ; Data items (WORKING-STORAGE / LINKAGE / copybook fields). Each becomes a node — this is how
 ; "Advanced Data Formats" (COMP/COMP-3/Zoned/Signed usages) and "Complex Copybook Structures"
@@ -36,6 +37,6 @@
 ; Data references by name: every qualified data name (`MOVE 1 TO ORD-ID`, `CALL X USING ORD-REC`,
 ; `REDEFINES A`, `OCCURS … DEPENDING ON CNT`, `ORD-ID OF ORD-REC` → its first WORD) becomes a
 ; `References` ref, which binds to the Field it names, in this file or in a copybook. PERFORM / GO TO
-; labels are also qualified words; the COBOL text supplement (`cobol_links`) drops refs that name a
-; paragraph or section, and dedupes per (source, name).
+; labels are also qualified words: `cobol_links::tag_roles` drops them by their place in the tree,
+; and tags every kept ref with its role (data, label, program) and its OF/IN qualifiers.
 (qualified_word . (WORD) @reference.name)

@@ -2,8 +2,9 @@
 //! [`crate::cobol_links`].
 //!
 //! The index pipeline does not use this type: it runs the tree-sitter COBOL extractor and then
-//! [`crate::cobol_links::supplement`] over the same extraction, so every link starts from the real
-//! program Module node. This extractor is for callers that want the EXEC CICS / EXEC SQL / COPY
+//! [`crate::cobol_links::supplement`] over the same extraction, so every link starts from a real
+//! node: calls and data uses from the paragraph or section that makes them (from the program
+//! before its first paragraph), every other link from the program Module. This extractor is for callers that want the EXEC CICS / EXEC SQL / COPY
 //! links of one file without the grammar: it parses the file with the COBOL grammar itself and
 //! returns the full supplemented extraction (File node, program, paragraphs, fields, links).
 //!
@@ -72,10 +73,19 @@ mod tests {
             .expect("program module")
             .symbol
             .clone();
+        // The LINK is a call, so it starts from the paragraph issuing it; the table read is a
+        // program-level link.
+        let para = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Function && n.name == "MAIN-PARA")
+            .expect("paragraph")
+            .symbol
+            .clone();
         assert!(
             ex.refs
                 .iter()
-                .any(|r| r.raw_name == "PAYPGM" && r.kind == EdgeKind::Calls && r.from == pgm)
+                .any(|r| r.raw_name == "PAYPGM" && r.kind == EdgeKind::Calls && r.from == para)
         );
         let customer = Symbol::synthetic("db2", "CUSTOMER").id();
         assert!(ex.local_edges.iter().any(|e| e.source == pgm

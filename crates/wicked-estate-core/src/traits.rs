@@ -134,7 +134,8 @@ pub trait GraphRead: Send {
     /// on a symbol-name miss (wicked-estate#358). Rows are ordered by
     /// [`crate::query::name_prefix_order`] BEFORE `limit` applies, so a capped pool is the same
     /// rows on every store. The default scans [`find_symbols`](Self::find_symbols); a store with
-    /// a name index overrides it (SQLite: a `lower(name)` range; Postgres: an escaped `LIKE`).
+    /// a name index overrides it (SQLite: a `lower(name)` range; Postgres: a byte-order range on
+    /// the ASCII-folded name, `COLLATE "C"`).
     fn find_symbols_by_name_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<Node>> {
         let mut out: Vec<Node> = self
             .find_symbols(&SymbolQuery::default())?

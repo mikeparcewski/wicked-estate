@@ -45,6 +45,21 @@ ColdFusion CFML (tag + cfscript) tree-sitter grammar
              Copyright (c) 2014 Gareth Edwards & Gavin Baumanis
              The full license text ships in the directory (LICENSE).
 -------------------------------------------------------------------------------
+COBOL tree-sitter external scanner (patched)
+  Path:      crates/wicked-estate-extract/vendor/tree-sitter-cobol-scanner/
+  Origin:    scanner.c and tree_sitter/parser.h copied from the arborium-cobol
+             2.18.0 crate (grammar/scanner.c, grammar/src/tree_sitter/parser.h),
+             which packages https://github.com/zharinov/tree-sitter-cobol at
+             befb226951b65585617f42ecbe526d00c124100c; three patches, marked
+             WICKED PATCH in scanner.c. The parse tables stay in the crate.
+  License:   MIT License (the terms of this product's LICENSE file)
+             Copyright (c) 2016 Max Brunsfeld
+             The upstream license text ships in the directory (LICENSE).
+             arborium's packaging edits to scanner.c (the tree_sitter_cobol_*
+             symbol names, a fixed MAX_KEYWORDS buffer), from
+             https://github.com/bearcove/arborium: MIT License,
+             Copyright (c) 2024 Amos Wenger
+-------------------------------------------------------------------------------
 Visual Basic 6 tree-sitter grammar
   Path:      crates/wicked-estate-extract/vendor/tree-sitter-vb6/
   Crate:     wicked-estate-tree-sitter-vb6
