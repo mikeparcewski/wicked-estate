@@ -15,9 +15,10 @@
  *      ERROR. The literal branch now runs only on `"`, and the EXEC branch is still tried.
  *   3. An EXEC block with no END-EXEC. The upstream scan looked for END-EXEC up to the end of the
  *      file. With patches 1 and 2 the parser retries at every later EXEC, so a run of unterminated
- *      blocks cost a scan to EOF each (quadratic). A block never holds another `EXEC` word, so the
- *      scan now fails at the next `EXEC` that starts a word: each failing scan stops at the next
- *      opener. A terminated block is matched exactly as before.
+ *      blocks cost a scan to EOF each (quadratic). A block never holds another block opener
+ *      (`EXEC` then SQL / CICS / DLI) outside its literals and comments, so the scan now fails at
+ *      the next one: each failing scan stops at the next opener. A terminated block is matched
+ *      exactly as before.
  * Every function and table is `static`, so nothing clashes with the crate's own scanner symbols.
  */
 #include "tree_sitter/parser.h"
@@ -150,25 +151,62 @@ static bool scan_exec_block(TSLexer *lexer) {
     // Scan until END-EXEC (case insensitive state machine)
     const char *end_exec = "END-EXEC";
     int state = 0;
-    // WICKED PATCH 3: fail at the next `EXEC` + whitespace that starts a word (not END-EXEC's).
+    // WICKED PATCH 3: fail at the next block opener: a word `EXEC`, then blanks, then a word
+    // starting like SQL / CICS / DLI (the opener test above), outside literals and comments.
+    // `next`: letters of `EXEC` matched at a word start; 4 = all of them, 5 = blanks after.
     const char *exec_word = "EXEC";
     int next = 0;
     bool word_start = false;
+    int quote = 0;
+    bool comment = false;
+    int prev = 0;
+    int col = (int)lexer->get_column(lexer);
 
     while (lexer->lookahead != 0) {
         char c = lexer->lookahead;
+        int w = lexer->lookahead;
 
-        if (next == 4) {
-            if (iswspace(c)) {
-                return false;
+        if (w == '\n') {
+            comment = false;
+            quote = 0;
+            next = next >= 4 ? 5 : 0;
+            word_start = true;
+        } else if (comment) {
+        } else if (quote) {
+            if (w == quote) {
+                quote = 0;
             }
+        } else if (col == 6 && (w == '*' || w == '/')) {
+            comment = true;
+        } else if (w == '\'' || w == '"') {
+            quote = w;
             next = 0;
-        } else if (next > 0) {
-            next = char_eq_i(c, exec_word[next]) ? next + 1 : 0;
-        } else if (word_start && char_eq_i(c, 'E')) {
-            next = 1;
+            word_start = false;
+        } else if ((w == '-' && prev == '-') || (w == '>' && prev == '*')) {
+            comment = true;
+            next = 0;
+        } else {
+            if (next >= 4) {
+                if (is_white_space(w)) {
+                    next = 5;
+                } else if (next == 5) {
+                    int t = towlower(w);
+                    if (t == 's' || t == 'c' || t == 'd') {
+                        return false;
+                    }
+                    next = 0;
+                } else {
+                    next = 0;
+                }
+            } else if (next > 0) {
+                next = char_eq_i(w, exec_word[next]) ? next + 1 : 0;
+            } else if (word_start && char_eq_i(w, 'E')) {
+                next = 1;
+            }
+            word_start = is_white_space(w) || w == '.';
         }
-        word_start = iswspace(c);
+        prev = w;
+        col = w == '\n' ? 0 : col + 1;
 
         if (char_eq_i(c, end_exec[state])) {
             state++;

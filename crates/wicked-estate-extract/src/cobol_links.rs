@@ -310,13 +310,19 @@ static RE_PROCEDURE_END: LazyLock<Regex> = LazyLock::new(|| {
 pub(crate) fn grammar_view(text: &str) -> Option<String> {
     let free = source_is_free_format(text);
     let (_, code) = lexical_views(text, free);
-    // Pseudo-text is one COPY operand: `~` then spaces (line breaks kept), so it is one word.
+    // Pseudo-text is one COPY operand: spaces (line breaks kept) then `~` on its closing `=`, so
+    // it is one word that ends where the pseudo-text ends. EXEC blocks hold no COPY statement
+    // (`EXEC CICS ISSUE COPY` is not one).
     let code = RE_PSEUDO_TEXT
         .replace_all(&code, |c: &regex::Captures| {
             let mut b = blank(&c[0]);
-            b.replace_range(0..1, "~");
+            let end = b.len();
+            b.replace_range(end - 1..end, "~");
             b
         })
+        .into_owned();
+    let code = RE_EXEC_ANY
+        .replace_all(&code, |c: &regex::Captures| blank(&c[0]))
         .into_owned();
     // (COPY's first byte, the end of what is hidden, whether that end is its own period)
     let mut ranges: Vec<(usize, usize, bool)> = Vec::new();
@@ -445,7 +451,15 @@ fn copy_statement_end(code: &str, named: usize, end: usize) -> Result<usize, usi
 fn is_copy_keyword(w: &str) -> bool {
     matches!(
         w,
-        "OF" | "IN" | "SUPPRESS" | "REPLACING" | "BY" | "LEADING" | "TRAILING"
+        "OF" | "IN"
+            | "SUPPRESS"
+            | "REPLACING"
+            | "BY"
+            | "LEADING"
+            | "TRAILING"
+            | "COPY"
+            | "EXEC"
+            | "END-EXEC"
     )
 }
 
@@ -1131,12 +1145,15 @@ impl Pass<'_> {
                                     loc.clone(),
                                 ));
                             }
-                            self.out.refs.push(UnresolvedRef::new(
-                                unit,
-                                raw,
-                                EdgeKind::Calls,
-                                loc.clone(),
-                            ));
+                            // From the program itself (before any paragraph): no self-edge.
+                            if !(unit == from && own) {
+                                self.out.refs.push(UnresolvedRef::new(
+                                    unit,
+                                    raw,
+                                    EdgeKind::Calls,
+                                    loc.clone(),
+                                ));
+                            }
                         }
                     }
                 }

@@ -775,34 +775,54 @@ fn an_unterminated_copy_split_over_lines_keeps_every_line_break() {
     assert_eq!(call.location.span.start_line, line + 1);
 }
 
-#[test]
-fn a_thru_range_ending_at_a_section_runs_the_sections_paragraphs() {
-    let text = program(
+/// MAIN-PARA runs `perform`; sections SEC-A (A-PARA), SEC-B (B1-PARA, B2-PARA), SEC-C (C-PARA).
+fn sections(perform: &str) -> Extraction {
+    extract(
         "SECTHRU",
-        DATA,
-        &[
-            "MAIN-PARA.",
+        &program(
+            "SECTHRU",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                perform,
+                "    GOBACK.",
+                "SEC-A SECTION.",
+                "A-PARA.",
+                "    EXIT.",
+                "SEC-B SECTION.",
+                "B1-PARA.",
+                "    EXIT.",
+                "B2-PARA.",
+                "    EXIT.",
+                "SEC-C SECTION.",
+                "C-PARA.",
+                "    EXIT.",
+            ],
+        ),
+    )
+}
+
+#[test]
+fn a_section_runs_its_paragraphs_however_it_is_performed() {
+    // Each statement on its own, so one expansion cannot hide another's miss.
+    for (perform, calls) in [
+        ("    PERFORM SEC-B", &["B1-PARA", "B2-PARA", "SEC-B"][..]),
+        (
+            "    PERFORM SEC-B THRU SEC-B",
+            &["B1-PARA", "B2-PARA", "SEC-B"][..],
+        ),
+        (
             "    PERFORM A-PARA THRU SEC-B",
-            "    PERFORM SEC-B",
-            "    GOBACK.",
-            "SEC-A SECTION.",
-            "A-PARA.",
-            "    EXIT.",
-            "SEC-B SECTION.",
-            "B1-PARA.",
-            "    EXIT.",
-            "B2-PARA.",
-            "    EXIT.",
-            "SEC-C SECTION.",
-            "C-PARA.",
-            "    EXIT.",
-        ],
-    );
-    let ex = extract("SECTHRU", &text);
-    assert_eq!(
-        calls_from(&ex, "MAIN-PARA"),
-        ["A-PARA", "B1-PARA", "B2-PARA", "SEC-B"]
-    );
+            &["A-PARA", "B1-PARA", "B2-PARA", "SEC-B"][..],
+        ),
+        ("    PERFORM B1-PARA THRU B1-PARA", &["B1-PARA"][..]),
+    ] {
+        assert_eq!(
+            calls_from(&sections(perform), "MAIN-PARA"),
+            calls,
+            "{perform}"
+        );
+    }
 }
 
 #[test]
@@ -920,4 +940,139 @@ fn the_last_paragraph_covers_the_last_line_without_a_trailing_newline() {
         text.lines().count() as u32 - 1
     );
     assert_eq!(refs_from(&ex, "LAST-PARA"), ["WS-A"]);
+}
+
+// ── round-1 second re-review folds ───────────────────────────────────────────────────────────
+
+#[test]
+fn an_unterminated_copy_hides_its_whole_last_pseudo_text_operand() {
+    let text = program(
+        "COPYPSE",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    COPY CSSETATY REPLACING ==A== BY ==PERFORM 1000-WORK==",
+            "AFTER-PARA.",
+            "    CALL 'SUBPGM'.",
+            "1000-WORK.",
+            "    EXIT.",
+        ],
+    );
+    let ex = extract("COPYPSE", &text);
+    assert_eq!(
+        function_names(&ex),
+        ["MAIN-PARA", "AFTER-PARA", "1000-WORK"]
+    );
+    assert!(
+        calls_from(&ex, "MAIN-PARA").is_empty(),
+        "replacement text is not code"
+    );
+    assert_eq!(calls_from(&ex, "AFTER-PARA"), ["SUBPGM"]);
+}
+
+#[test]
+fn copy_and_exec_words_are_never_copy_operands() {
+    // `COPY BOOK1 OF` (no library) then another COPY: the second COPY is its own statement, so
+    // `BOOK2.` does not become a paragraph. `EXEC CICS ISSUE COPY END-EXEC` is no COPY at all.
+    let text = program(
+        "COPYKW",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    COPY BOOK1 OF",
+            "    COPY BOOK2.",
+            "    EXEC CICS ISSUE COPY END-EXEC",
+            "    CALL 'SUBPGM'.",
+            "NEXT-PARA.",
+            "    EXIT.",
+        ],
+    );
+    let ex = extract("COPYKW", &text);
+    assert_eq!(function_names(&ex), ["MAIN-PARA", "NEXT-PARA"]);
+    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["SUBPGM"]);
+}
+
+#[test]
+fn exec_words_in_comments_and_literals_do_not_end_an_exec_block() {
+    // The block text is not COBOL: header-shaped lines in it (GHOST-A, GHOST-B) are no paragraphs.
+    let text = program(
+        "EXECCMT",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    PERFORM 1000-INIT",
+            "    EXEC CICS",
+            "@COMMENT@",
+            "GHOST-A.",
+            "         RETURN",
+            "    END-EXEC",
+            "    EXEC SQL SELECT A INTO :WS-A FROM T",
+            "         WHERE B = 'EXEC SQL' -- EXEC SQL",
+            "GHOST-B.",
+            "    END-EXEC.",
+            "1000-INIT.",
+            "    EXIT.",
+        ],
+    )
+    .replace("       @COMMENT@", "      *    EXEC CICS OLD-CALL");
+    let ex = extract("EXECCMT", &text);
+    assert_eq!(function_names(&ex), ["MAIN-PARA", "1000-INIT"]);
+    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["1000-INIT"]);
+    assert_eq!(refs_from(&ex, "MAIN-PARA"), ["WS-A"]);
+}
+
+#[test]
+fn declaratives_sections_end_at_end_declaratives() {
+    let text = program(
+        "DECLPGM",
+        DATA,
+        &[
+            "DECLARATIVES.",
+            "ERR-SECTION SECTION.",
+            "    USE AFTER STANDARD ERROR PROCEDURE ON INFILE.",
+            "ERR-PARA.",
+            "    EXIT.",
+            "END DECLARATIVES.",
+            "MAIN-PARA.",
+            "    PERFORM ERR-SECTION",
+            "    GOBACK.",
+            "WORK-PARA.",
+            "    EXIT.",
+        ],
+    );
+    let ex = extract("DECLPGM", &text);
+    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["ERR-PARA", "ERR-SECTION"]);
+}
+
+#[test]
+fn before_the_first_paragraph_only_a_literal_self_call_is_dropped() {
+    let text = program(
+        "PAYROLL",
+        DATA,
+        &[
+            "    PERFORM PAYROLL",
+            "    CALL 'PAYROLL'",
+            "    EXEC CICS XCTL PROGRAM('PAYROLL') END-EXEC",
+            "    GOBACK.",
+            "PAYROLL.",
+            "    EXIT.",
+        ],
+    );
+    let ex = extract("PAYROLL", &text);
+    let program = ex
+        .nodes
+        .iter()
+        .find(|n| n.name == "PAYROLL" && n.kind == NodeKind::Module)
+        .unwrap();
+    let lines: Vec<u32> = ex
+        .refs
+        .iter()
+        .filter(|r| r.from == program.symbol && r.kind == EdgeKind::Calls)
+        .map(|r| r.location.span.start_line)
+        .collect();
+    let perform = text
+        .lines()
+        .position(|l| l.trim() == "PERFORM PAYROLL")
+        .unwrap() as u32;
+    assert_eq!(lines, [perform], "only the PERFORM of paragraph PAYROLL");
 }

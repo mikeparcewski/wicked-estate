@@ -1627,15 +1627,18 @@ struct CobolHeader {
     last: usize,
 }
 
-/// The headers of one PROCEDURE DIVISION in source order, and their indexes by name.
+/// The headers of one PROCEDURE DIVISION in source order, and their indexes: by name, and (for
+/// paragraphs) by name and section.
 struct CobolDivision {
     headers: Vec<CobolHeader>,
     by_name: HashMap<String, Vec<usize>>,
+    by_section: HashMap<(String, Option<String>), Vec<usize>>,
 }
 
 impl CobolDivision {
     fn of(division: tree_sitter::Node, src: &[u8]) -> Self {
-        let mut found: Vec<(usize, String, bool)> = Vec::new();
+        // (start, name, is a section, the parent: the division or its DECLARATIVES)
+        let mut found: Vec<(usize, String, bool, usize)> = Vec::new();
         let mut walk = vec![division];
         while let Some(n) = walk.pop() {
             if is_cobol_header(n) {
@@ -1643,7 +1646,8 @@ impl CobolDivision {
                     .child_by_field_name("name")
                     .and_then(|w| cobol_label_words(w, src).into_iter().next())
                 {
-                    found.push((n.start_byte(), name, n.kind() == "section_header"));
+                    let parent = n.parent().map_or(0, |p| p.id());
+                    found.push((n.start_byte(), name, n.kind() == "section_header", parent));
                 }
                 continue;
             }
@@ -1651,13 +1655,17 @@ impl CobolDivision {
                 walk.push(n.child(i).unwrap());
             }
         }
-        found.sort_by_key(|(start, _, _)| *start);
+        found.sort_by_key(|(start, _, _, _)| *start);
         let mut headers: Vec<CobolHeader> = Vec::with_capacity(found.len());
-        let mut section: Option<(String, usize)> = None;
-        for (i, (start, name, is_section)) in found.into_iter().enumerate() {
+        // The open section; it ends at END DECLARATIVES (a header with another parent).
+        let mut section: Option<(String, usize, usize)> = None;
+        for (i, (start, name, is_section, parent)) in found.into_iter().enumerate() {
+            if section.as_ref().is_some_and(|(_, _, p)| *p != parent) {
+                section = None;
+            }
             if is_section {
-                section = Some((name.clone(), i));
-            } else if let Some((_, s)) = &section {
+                section = Some((name.clone(), i, parent));
+            } else if let Some((_, s, _)) = &section {
                 headers[*s].last = i;
             }
             headers.push(CobolHeader {
@@ -1665,7 +1673,7 @@ impl CobolDivision {
                 section: if is_section {
                     None
                 } else {
-                    section.as_ref().map(|(n, _)| n.clone())
+                    section.as_ref().map(|(n, _, _)| n.clone())
                 },
                 name,
                 is_section,
@@ -1673,10 +1681,21 @@ impl CobolDivision {
             });
         }
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_section: HashMap<(String, Option<String>), Vec<usize>> = HashMap::new();
         for (i, h) in headers.iter().enumerate() {
             by_name.entry(h.name.clone()).or_default().push(i);
+            if !h.is_section {
+                by_section
+                    .entry((h.name.clone(), h.section.clone()))
+                    .or_default()
+                    .push(i);
+            }
         }
-        Self { headers, by_name }
+        Self {
+            headers,
+            by_name,
+            by_section,
+        }
     }
 
     /// The section of the statement at `pos`: that of the last header before it.
@@ -1698,19 +1717,22 @@ impl CobolDivision {
     /// the one in `own` (the referring statement's section), as COBOL reads it. `None` when no
     /// single header matches.
     fn endpoint(&self, words: &[String], own: Option<&str>) -> Option<usize> {
-        let mut hits = self.by_name.get(words.first()?)?.clone();
-        let qualifier = match words.get(1).map(String::as_str) {
-            Some("OF" | "IN") => words.last().map(String::as_str),
+        let in_section = |name: &String, section: Option<&str>| {
+            self.by_section
+                .get(&(name.clone(), section.map(str::to_string)))
+                .map(Vec::as_slice)
+        };
+        let hits = match words {
+            [name] => match self.by_name.get(name)?.as_slice() {
+                [one] => Some(std::slice::from_ref(one)),
+                _ => in_section(name, own),
+            },
+            [name, kw, section] if matches!(kw.as_str(), "OF" | "IN") => {
+                in_section(name, Some(section))
+            }
             _ => None,
         };
-        if let Some(q) = qualifier {
-            hits.retain(|&i| self.headers[i].section.as_deref() == Some(q));
-        } else if hits.len() > 1 {
-            hits.retain(|&i| {
-                !self.headers[i].is_section && self.headers[i].section.as_deref() == own
-            });
-        }
-        match hits.as_slice() {
+        match hits? {
             [one] => Some(*one),
             _ => None,
         }
@@ -1814,7 +1836,7 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<(String, usize,
         };
         let to_span = ts_span(*last);
         match (start, div.endpoint(&to_words, own)) {
-            (Some(s), Some(e)) if s < e => {
+            (Some(s), Some(e)) if s <= e => {
                 let h = &div.headers;
                 for p in &h[s + 1..=h[e].last] {
                     out.push((p.name.clone(), pos, to_span));
@@ -5299,9 +5321,14 @@ impl Extractor for TreeSitterExtractor {
             // self-edges (the resolvers drop a self-candidate), so a jump to the paragraph or
             // section it sits in would park or bind to a same-named paragraph in another
             // program: no call.
+            let unit_starts: HashSet<usize> = cobol_units.iter().map(|&i| defs[i].start).collect();
             for (name, pos, span) in cobol_flow_calls(&tree, src) {
                 let name = fold_cobol_name(&self.lang_name, name);
-                if enclosing_def(&defs, pos).is_some_and(|d| d.name.eq_ignore_ascii_case(&name)) {
+                // Only a paragraph or section can jump to itself; a PERFORM before the first
+                // paragraph of a paragraph named like the program is not a self-edge.
+                if enclosing_def(&defs, pos).is_some_and(|d| {
+                    unit_starts.contains(&d.start) && d.name.eq_ignore_ascii_case(&name)
+                }) {
                     continue;
                 }
                 raw_refs.push((name, EdgeKind::Calls, pos, span));
@@ -5329,6 +5356,17 @@ impl Extractor for TreeSitterExtractor {
                 })
                 .collect();
             raw_refs.extend(projected);
+            // A literal CALL of the program itself made before its first paragraph starts from
+            // the program: a self-edge, so no ref (one made in a paragraph is kept above).
+            raw_refs.retain(|(name, ek, pos, _)| {
+                let Some(&(program, true)) = program_of_call.get(pos) else {
+                    return true;
+                };
+                let module = enclosing_def(&defs, program);
+                *ek != EdgeKind::Calls
+                    || enclosing_def(&defs, *pos).map(|d| d.start) != module.map(|d| d.start)
+                    || !module.is_some_and(|m| m.name.eq_ignore_ascii_case(name))
+            });
             for node in &mut def_nodes {
                 let start = node.location.span.start_byte as usize;
                 if let Some(&true_end) = end_map.get(&start) {
