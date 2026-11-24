@@ -197,9 +197,10 @@ fn install_fts_stamp_triggers(conn: &Connection) -> Result<()> {
 /// a read does not. A `DROP` and re-`CREATE` of the table (the keyed rebuilds, #420 and later)
 /// resets the counter but changes the schema version, as does a dropped stamp trigger. FTS5's own
 /// `rebuild` command also resets the counter; no build issues it, and it keeps every rowid. A row
-/// rewrite that carries no token changes none of it: such a row matches no query (`symbol` is
-/// UNINDEXED), and this build's next write of that rowid deletes it by rowid. `None` when a
-/// record is absent.
+/// rewrite that carries no token changes none of it, and is not caught: the only read of
+/// `nodes_fts` is a `MATCH` (`find_symbols`), which such a row never answers
+/// (`symbol` is UNINDEXED), so it gives no wrong hit, before or after its node is erased. `None`
+/// when a record is absent.
 fn fts_fingerprint(conn: &Connection) -> Result<Option<String>> {
     let mut stmt = conn
         .prepare_cached("SELECT block FROM nodes_fts_data WHERE id IN (1, 10) ORDER BY id")
@@ -10217,19 +10218,40 @@ mod tests {
     }
 
     /// #589 (review r1): a keyed rebuild by a build between #420 and #571 drops and re-creates
-    /// `nodes_fts`, which resets FTS5's write counter, so an older binary's writes after it could
-    /// bring a stamped counter back. The re-created table moves the schema version: the stamp no
-    /// longer holds, and the pre-#420 writer's row after it is rebuilt.
+    /// `nodes_fts`, which resets FTS5's write counter. A pre-#420 writer's re-index of `a` after it
+    /// (a delete by symbol text and an insert on an automatic rowid, each its own autocommit)
+    /// brings both FTS5 records back to the stamped bytes with `a` off its sid. The re-created
+    /// table moved the schema version, so the stamp no longer holds: the read-only check refuses
+    /// the store and the next writer open rebuilds it.
     #[test]
     fn a_rebuild_that_resets_the_fts_counter_ends_the_stamp_589() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reset.db");
         verified_abc(&path);
+        let records = |c: &Connection| {
+            let state = fts_fingerprint(c).unwrap().expect("both FTS5 records");
+            state.rsplit_once('.').unwrap().0.to_string()
+        };
         let conn = Connection::open(&path).unwrap();
         assert!(fts_stamped(&conn).unwrap(), "fixture: verified");
+        let stamped = records(&conn);
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         rebuild_fts_all(&conn).unwrap();
         conn.execute_batch("COMMIT").unwrap();
+        conn.execute_batch(
+            "DELETE FROM nodes_fts WHERE symbol = 'a'; \
+             INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES('a', 'a', '', 'doca');",
+        )
+        .unwrap();
+        assert_eq!(
+            records(&conn),
+            stamped,
+            "fixture: FTS5's records replay the stamped bytes"
+        );
+        assert!(
+            !fts_rowid_migrated(&conn).unwrap(),
+            "fixture: `a` is off its sid"
+        );
         assert!(
             fts_stamp(&conn).unwrap().is_some(),
             "fixture: the meta row is kept"
@@ -10238,12 +10260,11 @@ mod tests {
             !fts_stamped(&conn).unwrap(),
             "a re-created table is not the one verified"
         );
-        conn.execute_batch(
-            "DELETE FROM nodes_fts WHERE symbol = 'a'; \
-             INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES('a', 'a', '', 'doca');",
-        )
-        .unwrap();
         drop(conn);
+        let err = SqliteStore::open_readonly_current(&path)
+            .err()
+            .expect("the read-only check refuses rows off their sids");
+        assert!(err.to_string().contains("not all keyed"), "{err}");
         let store = SqliteStore::open(&path).unwrap();
         assert_fts_keyed_by_sid(&store);
     }
