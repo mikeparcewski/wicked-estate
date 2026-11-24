@@ -2216,12 +2216,20 @@ fn index_path_inner(
             .map(|fw| fw.rel.clone())
             .collect();
         // The mirror holds exactly the text estate extracts from (#405 redaction, same length
-        // and line breaks), read through the confined root.
+        // and line breaks), read through the confined root. A minified file estate does not
+        // extract is mirrored empty: codegraph would otherwise report facts about it that have
+        // no estate node to land on (a vendored jquery.min.js held 884 of Alamofire's 1,065).
         let read = |raw: &str| -> Option<String> {
             let text = confined_root.as_ref()?.read_rel_to_string(Path::new(raw))?;
-            Some(wicked_estate_extract::redact::redact_source(raw, &text))
+            let redacted = wicked_estate_extract::redact::redact_source(raw, &text);
+            Some(if is_minified_or_huge(&redacted) {
+                String::new()
+            } else {
+                redacted
+            })
         };
         let input = codegraph::PrepareInput {
+            root,
             prefix: scope.as_deref().unwrap_or(""),
             files,
             configs: codegraph_configs.clone(),
@@ -2244,15 +2252,22 @@ fn index_path_inner(
             }
         }
     }
-    if codegraph_state.is_none() {
-        // Off (or failed): files the last codegraph run answered go back to estate's resolvers.
-        codegraph_forced.extend(
-            stored_fingerprints
-                .iter()
-                .filter(|(path, fp)| fp.starts_with("ok|") && work_by_rel.contains_key(*path))
-                .map(|(path, _)| path.clone()),
-        );
-    }
+    // Files the last codegraph run answered that it does not cover now (codegraph off or
+    // failed, or the file's language dropped out of `--codegraph-languages`) go back to estate's
+    // resolvers. This run's fingerprints omit them, so the next run does not force them again.
+    codegraph_forced.extend(
+        stored_fingerprints
+            .iter()
+            .filter(|(path, fp)| {
+                fp.starts_with("ok|")
+                    && work_by_rel.contains_key(*path)
+                    && codegraph_state
+                        .as_ref()
+                        .and_then(|cg| cg.verdict(path))
+                        .is_none()
+            })
+            .map(|(path, _)| path.clone()),
+    );
     changed_seed.extend(codegraph_forced.iter().cloned());
 
     // Call-derived value-flow edges can be stored with a changed callee-owned parameter/return

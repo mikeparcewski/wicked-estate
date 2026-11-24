@@ -244,9 +244,15 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Size and newest mtime over the bundle: the cache key for its tree digest.
-fn bundle_stamp(dir: &Path) -> std::io::Result<(u64, u64, u128)> {
-    let (mut files, mut bytes, mut newest) = (0u64, 0u64, 0u128);
+/// The cache key for the bundle's tree digest: a sha256 over every file's path, size, mtime,
+/// ctime, inode and device. A content change moves the file's ctime, which user space cannot
+/// set back (`touch -r` restores the mtime only), so an edit that keeps the size and the mtime
+/// still misses the cache. `None` where the platform exposes no ctime: hash every run there.
+#[cfg(unix)]
+fn bundle_stamp(dir: &Path) -> std::io::Result<Option<String>> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+    let mut lines = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         for entry in std::fs::read_dir(&d)? {
@@ -256,21 +262,35 @@ fn bundle_stamp(dir: &Path) -> std::io::Result<(u64, u64, u128)> {
                 stack.push(entry.path());
                 continue;
             }
-            files += 1;
-            bytes += meta.len();
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos());
-            newest = newest.max(mtime);
+            lines.push(format!(
+                "{}\0{}|{}.{}|{}.{}|{}|{}",
+                entry.path().display(),
+                meta.len(),
+                meta.mtime(),
+                meta.mtime_nsec(),
+                meta.ctime(),
+                meta.ctime_nsec(),
+                meta.ino(),
+                meta.dev()
+            ));
         }
     }
-    Ok((files, bytes, newest))
+    lines.sort();
+    let mut h = Sha256::new();
+    for l in &lines {
+        h.update(l.as_bytes());
+        h.update(b"\n");
+    }
+    Ok(Some(hex(&h.finalize())))
+}
+
+#[cfg(not(unix))]
+fn bundle_stamp(_dir: &Path) -> std::io::Result<Option<String>> {
+    Ok(None)
 }
 
 /// Check the bundle is the pinned release for this platform. The tree digest is cached in the
-/// state dir under the bundle's file count, size and newest mtime.
+/// state dir under [`bundle_stamp`]; any file added, removed or rewritten re-hashes the tree.
 fn verify_bundle(cfg: &CodegraphConfig) -> std::result::Result<(), String> {
     let pkg = std::fs::read_to_string(cfg.bundle.join("lib").join("package.json"))
         .map_err(|e| format!("bundle has no readable lib/package.json ({e})"))?;
@@ -292,17 +312,12 @@ fn verify_bundle(cfg: &CodegraphConfig) -> std::result::Result<(), String> {
         return Err(format!("no pinned codegraph bundle digest for {platform}"));
     };
     let stamp = bundle_stamp(&cfg.bundle).map_err(|e| format!("cannot read the bundle ({e})"))?;
-    let canonical = dunce::canonicalize(&cfg.bundle).unwrap_or_else(|_| cfg.bundle.clone());
-    let cache_key = format!(
-        "{}|{}|{}|{}",
-        canonical.display(),
-        stamp.0,
-        stamp.1,
-        stamp.2
-    );
     let cache = cfg.state_dir.join("bundle-verified");
-    if std::fs::read_to_string(&cache).ok().as_deref() == Some(&format!("{cache_key}|{pinned}")) {
-        return Ok(());
+    let cache_line = stamp.map(|stamp| format!("{stamp}|{pinned}"));
+    if let Some(line) = &cache_line {
+        if std::fs::read_to_string(&cache).ok().as_deref() == Some(line.as_str()) {
+            return Ok(());
+        }
     }
     let digest =
         bundle_tree_digest(&cfg.bundle).map_err(|e| format!("cannot hash the bundle ({e})"))?;
@@ -311,7 +326,9 @@ fn verify_bundle(cfg: &CodegraphConfig) -> std::result::Result<(), String> {
             "bundle tree digest {digest} does not match the pinned {PINNED_VERSION} digest for {platform}"
         ));
     }
-    let _ = std::fs::write(&cache, format!("{cache_key}|{pinned}"));
+    if let Some(line) = cache_line {
+        let _ = std::fs::write(&cache, line);
+    }
     Ok(())
 }
 
@@ -742,6 +759,10 @@ pub struct Prepared {
 
 /// Inputs from the caller for [`prepare`].
 pub struct PrepareInput<'a> {
+    /// The indexed root. The state dir may sit under it only below a dot directory, which the
+    /// walker skips (the default `.wicked-estate/graph.db.codegraph`); elsewhere the mirror's
+    /// copies would be indexed as sources.
+    pub root: &'a Path,
     pub prefix: &'a str,
     /// Every switched file in this run's work set.
     pub files: Vec<MirrorFile>,
@@ -755,6 +776,27 @@ pub struct PrepareInput<'a> {
     pub stored: BTreeMap<String, String>,
 }
 
+/// Refuse a state dir the walker would index: under `root` with no dot directory on the way.
+fn state_dir_outside_sources(state_dir: &Path, root: &Path) -> std::result::Result<(), String> {
+    let (Ok(state), Ok(root)) = (dunce::canonicalize(state_dir), dunce::canonicalize(root)) else {
+        return Ok(());
+    };
+    let Ok(rel) = state.strip_prefix(&root) else {
+        return Ok(());
+    };
+    let hidden = rel
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+    if hidden {
+        Ok(())
+    } else {
+        Err(format!(
+            "the codegraph state dir {} is inside the indexed root, where its mirror would be indexed; keep the graph file outside the repo or under a dot directory",
+            rel.display()
+        ))
+    }
+}
+
 /// Run codegraph and decide the per-file verdicts. Returns the prepared state and the unchanged
 /// files to re-extract (their codegraph facts or verdict changed since the last run), or the
 /// reason codegraph cannot be used this run.
@@ -762,7 +804,16 @@ pub fn prepare(
     cfg: &CodegraphConfig,
     input: PrepareInput<'_>,
 ) -> std::result::Result<(Prepared, Vec<String>), String> {
+    // Absolute paths: codegraph runs with the mirror as its working directory, so a relative
+    // bundle or mirror path would resolve against the wrong directory.
+    let absolute = |p: &Path| std::path::absolute(p).map_err(|e| format!("{}: {e}", p.display()));
+    let cfg = &CodegraphConfig {
+        bundle: absolute(&cfg.bundle)?,
+        state_dir: absolute(&cfg.state_dir)?,
+        ..cfg.clone()
+    };
     std::fs::create_dir_all(&cfg.state_dir).map_err(|e| format!("state dir: {e}"))?;
+    state_dir_outside_sources(&cfg.state_dir, input.root)?;
     #[cfg(test)]
     if let Some(sql) = TEST_DATABASE_SQL.with(|t| t.borrow().clone()) {
         // Tests stand a recorded codegraph database (real bundle output, see
@@ -1139,7 +1190,33 @@ impl Prepared {
         // Outer definitions first, so a nested one can hang under a minted owner.
         unmatched.sort_by_key(|(d, p)| (p.clone(), d.start_line, std::cmp::Reverse(d.end_line)));
         for (d, path) in unmatched {
+            if is_package_declaration(d) {
+                // `package p;` holds the file's imports in codegraph; estate's File node does.
+                map.ids
+                    .insert(d.id.clone(), Symbol::file(path.clone()).id());
+                continue;
+            }
             if !mint_in.contains(&path) || map.ambiguous.contains_key(&path) {
+                continue;
+            }
+            if !mintable(d) {
+                continue;
+            }
+            // Only module- and type-level definitions: estate keeps function bodies flat
+            // (ADR-002, `enclosing_chain`), so a helper nested in a callback gets no id of its
+            // own. Minting one would need a position ordinal, which moves under edits.
+            let declared_at_top = match parent
+                .get(d.id.as_str())
+                .and_then(|p| self.snap.nodes.get(*p))
+            {
+                None => true,
+                Some(p) => {
+                    p.kind == "file"
+                        || is_package_declaration(p)
+                        || cg_class(&p.kind) == Some(KindClass::Type)
+                }
+            };
+            if !declared_at_top {
                 continue;
             }
             let Some(kind) = map_node_kind(&d.kind) else {
@@ -1301,24 +1378,31 @@ impl Prepared {
         let mut unresolved = Vec::new();
         let mut covered: HashSet<(String, u32, String)> = HashSet::new();
         let mut dropped = 0usize;
-        for r in refs {
-            let tail = name_tail(&r.raw_name);
-            let key = (
+        let key_of = |r: &UnresolvedRef| {
+            (
                 r.location.file.clone(),
                 r.location.span.start_line,
-                tail.clone(),
-            );
+                name_tail(&r.raw_name),
+            )
+        };
+        // Estate refs sharing a (file, line, name) key. A key with one estate ref binds to every
+        // codegraph site on it; a shared key binds each ref only to the site at its own column,
+        // so `new A().run(); unknown.run()` never hands A.run to the second call.
+        let mut per_key: HashMap<(String, u32, String), usize> = HashMap::new();
+        for r in refs {
+            *per_key.entry(key_of(r)).or_default() += 1;
+        }
+        for r in refs {
+            let key = key_of(r);
             covered.insert(key.clone());
             let mut hits: Vec<usize> = sites.get(&key).cloned().unwrap_or_default();
-            if hits.len() > 1 {
-                let exact: Vec<usize> = hits
-                    .iter()
-                    .copied()
-                    .filter(|i| self.snap.edges[*i].col == Some(r.location.span.start_col))
-                    .collect();
-                if !exact.is_empty() {
-                    hits = exact;
-                }
+            let exact: Vec<usize> = hits
+                .iter()
+                .copied()
+                .filter(|i| self.snap.edges[*i].col == Some(r.location.span.start_col))
+                .collect();
+            if !exact.is_empty() || per_key.get(&key).copied().unwrap_or(0) > 1 {
+                hits = exact;
             }
             let mut bound = false;
             for i in hits {
@@ -1425,6 +1509,27 @@ impl Prepared {
         *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) += dropped;
         (edges, unresolved)
     }
+}
+
+/// Whether a codegraph definition estate lacks becomes an estate node. Not minted: a one-line
+/// `namespace`/`module` (a file-level `package p;` declaration: estate's ids do not nest under
+/// it), and a name that is not an identifier (an anonymous class `<T$anon@84>`, an annotation
+/// value `local.server.port`): estate never names a definition that way.
+fn mintable(d: &CgNode) -> bool {
+    if is_package_declaration(d) {
+        return false;
+    }
+    let mut chars = d.name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// A one-line `namespace`/`module`: a file-level declaration (`package p;`, `namespace X;`), not a
+/// block that contains definitions.
+fn is_package_declaration(d: &CgNode) -> bool {
+    matches!(d.kind.as_str(), "namespace" | "module") && d.start_line == d.end_line
 }
 
 /// The last `#` (type) descriptor of an estate id: the owner type of a member.
@@ -1581,6 +1686,36 @@ mod tests {
                 "both() must call {target}: {both:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_same_line_call_codegraph_left_unresolved_never_takes_its_neighbours_target() {
+        // Codex r1 (W20): codegraph answered `new A().run()` but not `new B().run()` on the same
+        // line. The second call must park, not inherit A.run through the shared (line, name) key.
+        let sql = format!("{FIXTURE_SQL}\nDELETE FROM edges WHERE id = 29;");
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(&sql));
+        let calls = edges(&store, EdgeKind::Calls);
+        let both = calls_from(&calls, "ts-typescript . . . src/same/both().");
+        let a_run = "ts-typescript . . . src/same/A#run().";
+        assert_eq!(
+            both.iter().filter(|(_, t, _)| t == a_run).count(),
+            1,
+            "only the A call binds A.run: {both:?}"
+        );
+        assert!(
+            !both
+                .iter()
+                .any(|(_, t, _)| t == "ts-typescript . . . src/same/B#run()."),
+            "{both:?}"
+        );
+        let parked = store
+            .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}run"))
+            .unwrap();
+        assert_eq!(parked.len(), 1, "the B call parks: {parked:?}");
+        assert_eq!(parked[0].location.file, "src/same.ts");
     }
 
     #[test]
@@ -1749,6 +1884,48 @@ mod tests {
     }
 
     #[test]
+    fn narrowing_the_languages_returns_the_dropped_files_to_estates_resolvers() {
+        // Codex r1 (W20): a file codegraph answered last run whose language is no longer
+        // selected must not keep codegraph's edges after an unchanged re-index.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
+        let ts_from_codegraph = |store: &SqliteStore| {
+            edges(store, EdgeKind::Calls)
+                .into_iter()
+                .filter(|(s, _, by)| s.starts_with("ts-typescript") && by.starts_with("codegraph:"))
+                .count()
+        };
+        assert!(ts_from_codegraph(&store) > 0);
+        let java_only = CodegraphConfig {
+            languages: vec!["java".into()],
+            ..config(tmp.path())
+        };
+        index(
+            &mut store,
+            &fixture_root(),
+            Some(&java_only),
+            Some(FIXTURE_SQL),
+        );
+        assert_eq!(ts_from_codegraph(&store), 0);
+        let fps = parse_fingerprints(store.meta_get_key(FINGERPRINTS_META).as_deref());
+        assert!(fps.keys().all(|p| p.ends_with(".java")), "{fps:?}");
+        // Java stays answered by codegraph.
+        assert!(
+            edges(&store, EdgeKind::Calls)
+                .iter()
+                .any(|(s, _, by)| s.starts_with("ts-java") && by.starts_with("codegraph:"))
+                || store
+                    .all_edges()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.source.0.starts_with("ts-java")
+                        && e.resolved_by.starts_with("codegraph:"))
+        );
+    }
+
+    #[test]
     fn an_unchanged_file_whose_codegraph_facts_moved_is_re_resolved() {
         // A sync can change an unchanged file's edges (a target file changed under it). Estate
         // is the one sync owner: the file's fingerprint moved, so it re-extracts and re-binds.
@@ -1805,6 +1982,41 @@ mod tests {
     }
 
     #[test]
+    fn a_minified_file_estate_does_not_extract_is_mirrored_empty() {
+        // Codegraph's facts about a vendored bundle have no estate node to land on.
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for e in std::fs::read_dir(from).unwrap() {
+                let e = e.unwrap();
+                if e.file_type().unwrap().is_dir() {
+                    copy(&e.path(), &to.join(e.file_name()));
+                } else {
+                    std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        copy(&fixture_root(), &root);
+        let minified = format!("var a=1;{}\n", "a=a+1;".repeat(10_000));
+        std::fs::create_dir_all(root.join("src/vendor")).unwrap();
+        std::fs::write(root.join("src/vendor/lib.min.js"), &minified).unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
+        let tree = cfg.state_dir.join("tree");
+        assert_eq!(
+            std::fs::read_to_string(tree.join("src/vendor/lib.min.js")).unwrap(),
+            ""
+        );
+        assert!(
+            !std::fs::read_to_string(tree.join("src/svc.ts"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn a_bundle_that_is_not_the_pinned_release_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg = config(tmp.path());
@@ -1831,6 +2043,66 @@ mod tests {
     }
 
     #[test]
+    fn a_state_dir_the_walker_would_index_is_refused_and_a_dot_directory_is_not() {
+        // Codex r1 (W12): the mirror under a non-hidden state dir inside the root would be
+        // indexed as a second copy of every switched source.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let read = |_: &str| -> Option<String> { None };
+        let run = |state_dir: PathBuf| {
+            let cfg = CodegraphConfig {
+                state_dir,
+                ..config(tmp.path())
+            };
+            TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = Some(FIXTURE_SQL.to_string()));
+            let out = prepare(
+                &cfg,
+                PrepareInput {
+                    root: &root,
+                    prefix: "",
+                    files: Vec::new(),
+                    configs: Vec::new(),
+                    read: &read,
+                    unchanged: Vec::new(),
+                    stored: BTreeMap::new(),
+                },
+            )
+            .map(|_| ());
+            TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = None);
+            out
+        };
+        let err = run(root.join("out/graph.db.codegraph/_")).unwrap_err();
+        assert!(err.contains("inside the indexed root"), "{err}");
+        assert!(!root.join("out/graph.db.codegraph/_/tree").exists());
+        run(root.join(".wicked-estate/graph.db.codegraph/_")).unwrap();
+        run(tmp.path().join("elsewhere/_")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_same_size_edit_with_its_mtime_restored_still_misses_the_bundle_cache() {
+        // Codex r1 (W20): the cache key was size + newest mtime, so `touch -r` hid an edit.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("lib/dist/x.js");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "aaaa").unwrap();
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let before = bundle_stamp(tmp.path()).unwrap().unwrap();
+        assert_eq!(bundle_stamp(tmp.path()).unwrap().unwrap(), before);
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&file, "bbbb").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), mtime);
+        assert_ne!(bundle_stamp(tmp.path()).unwrap().unwrap(), before);
+    }
+
+    #[test]
     fn name_tail_strips_members_and_routing_prefixes() {
         assert_eq!(name_tail("this.repo.save"), "save");
         assert_eq!(name_tail("helper().trim"), "trim");
@@ -1846,6 +2118,29 @@ mod tests {
         assert_eq!(estate_owner(&id).as_deref(), Some("R"));
         let top = SymbolId("ts-typescript . . . src/svc/top().".into());
         assert_eq!(estate_owner(&top), None);
+    }
+
+    #[test]
+    fn package_declarations_and_non_identifier_names_are_never_minted() {
+        let def = |kind: &str, name: &str, start: u32, end: u32| CgNode {
+            id: "x".into(),
+            kind: kind.into(),
+            name: name.into(),
+            qualified_name: name.into(),
+            file: "a.java".into(),
+            start_line: start,
+            end_line: end,
+            start_col: 0,
+            end_col: 0,
+            signature: None,
+        };
+        // Petclinic (real bundle run): 50 `package` namespaces and 3 anonymous classes.
+        assert!(!mintable(&def("namespace", "org.example", 1, 1)));
+        assert!(!mintable(&def("class", "<PetType$anon@84>", 84, 90)));
+        assert!(!mintable(&def("constant", "local.server.port", 3, 3)));
+        assert!(mintable(&def("namespace", "Outer", 1, 9)));
+        assert!(mintable(&def("class", "Point", 5, 5)));
+        assert!(mintable(&def("method", "Über_$1", 5, 5)));
     }
 
     #[test]
