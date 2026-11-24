@@ -45,6 +45,15 @@ pub mod cobol_ref {
     /// `Field` metadata key, `true` on an item whose outermost group in its file is not an 01/77
     /// level: a copybook fragment COPYd under a program's group, which can qualify it too.
     pub const OPEN: &str = "cobol_open";
+    /// `Field`/`Function` metadata key: the PROGRAM-ID of the program that holds the item or
+    /// paragraph (the innermost of nested programs).
+    pub const OWNER_PROGRAM: &str = "cobol_program";
+    /// Hints key of a data use or label in a program: the PROGRAM-IDs that hold it, innermost
+    /// first. A program sees its own items and those of the programs that contain it.
+    pub const PROGRAMS: &str = "cobol_programs";
+    /// `Field`/`Function` metadata key, and hints key of a data use or label: the copybook (its
+    /// UPPERCASE member name) the item, paragraph or ref is written in.
+    pub const COPYBOOK: &str = "cobol_copybook";
 }
 
 /// `raw_name` prefix of a JS/TS call whose callee is a LOCAL binding — a parameter, a destructured

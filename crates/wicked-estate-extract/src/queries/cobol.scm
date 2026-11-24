@@ -22,11 +22,13 @@
 (call_statement
   x: (_) @call.function) @call
 
-; PERFORM <paragraph> [THRU <paragraph>] → intra-program call, one per label (the whole
-; `A THRU B` is not a name). SORT/MERGE INPUT/OUTPUT PROCEDURE labels are not calls here.
+; PERFORM <paragraph> [THRU <paragraph>] → intra-program call, one per label, named by the
+; paragraph alone (not `A THRU B`, not `P IN SECTION`). SORT/MERGE INPUT/OUTPUT PROCEDURE labels are
+; not calls here.
 (perform_statement_call_proc
   procedure: (perform_procedure
-    (label) @call.function)) @call
+    (label
+      (qualified_word . (WORD) @call.function)))) @call
 
 ; Data items (WORKING-STORAGE / LINKAGE / copybook fields). Each becomes a node — this is how
 ; "Advanced Data Formats" (COMP/COMP-3/Zoned/Signed usages) and "Complex Copybook Structures"

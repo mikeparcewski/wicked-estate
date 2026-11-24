@@ -290,6 +290,7 @@ fn supplement_text(file: &SourceFile, ex: &mut Extraction) {
     let mut anchors = Anchors::of(file, ex, &code);
     if let Some((sym, node, contains)) = anchors.copybook.take() {
         ex.local_edges.extend(contains);
+        anchors.member = Some(node.name.clone());
         ex.nodes.push(node);
         anchors.fallback = sym;
     }
@@ -526,12 +527,30 @@ impl LogicalBuilder<'_> {
         self.out.extend_from_slice(s.as_bytes());
     }
 
+    /// End a line that holds a joined literal. One of 73-80 columns with column 72 blank would
+    /// read as a card with an identification area, and the text pass would cut the literal's
+    /// tail: pad it past column 80.
+    fn end_joined_line(&mut self) {
+        let start = self
+            .out
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |i| i + 1);
+        if has_identification_area(&self.out[start..]) {
+            let len = self.out.len() - start;
+            self.pad(81 - len);
+        }
+        self.add("\n");
+    }
+
     fn pad(&mut self, cols: usize) {
         self.out.extend(std::iter::repeat_n(b' ', cols));
     }
 
-    /// Lay every free-format line out as a fixed-format card (see [`LogicalSource`]).
-    fn free_format(&mut self) {
+    /// Lay every free-format line out as a fixed-format card (see [`LogicalSource`]). `mf`: Micro
+    /// Focus free format, where `*` or `/` in column 1 starts a comment line; in standard free
+    /// format only `*>` does, and a `*` or `/` there is an operator continuing an expression.
+    fn free_format(&mut self, mf: bool) {
         let src = self.src;
         let mut start = 0;
         while start < src.len() {
@@ -552,7 +571,8 @@ impl LogicalBuilder<'_> {
                 // A compiler directive is not code.
                 self.copy_blank(start, body_end);
                 self.copy(body_end, end);
-            } else if lead == 0
+            } else if mf
+                && lead == 0
                 && (body[0] == b'/' || (body[0] == b'*' && body.get(1) != Some(&b'>')))
             {
                 // A comment line: its marker lands in the indicator column.
@@ -639,7 +659,7 @@ impl LogicalBuilder<'_> {
                 match close {
                     Some(c) => {
                         self.copy(at + 1, c + 1);
-                        self.add("\n");
+                        self.end_joined_line();
                         col = c + 1 - lines[j].0;
                         self.pad(col);
                         i = j;
@@ -656,7 +676,7 @@ impl LogicalBuilder<'_> {
                                 at = n;
                             }
                             None => {
-                                self.add("\n");
+                                self.end_joined_line();
                                 i = j + 1;
                                 col = 0;
                                 break;
@@ -713,8 +733,9 @@ fn literal_close(src: &[u8], from: usize, stop: usize, q: u8) -> Option<usize> {
     None
 }
 
-/// The last blank in `src[s..=s + CARD_CODE_COLS]` outside literals and before a `*>` comment:
-/// where a free-format line longer than a card breaks onto the next card.
+/// The last blank in `src[s..=s + CARD_CODE_COLS]` outside literals and before a `*>` comment or
+/// an SQL `--` comment (a blank, then `--`): where a free-format line longer than a card breaks
+/// onto the next card. A comment runs to the end of its line, so nothing after it moves.
 fn card_split(src: &[u8], s: usize, body_end: usize) -> Option<usize> {
     let limit = (s + CARD_CODE_COLS).min(body_end);
     let mut quote: Option<u8> = None;
@@ -726,6 +747,12 @@ fn card_split(src: &[u8], s: usize, body_end: usize) -> Option<usize> {
             Some(_) => {}
             None if c == b'\'' || c == b'"' => quote = Some(c),
             None if c == b'*' && src.get(i + 1) == Some(&b'>') => return best,
+            None if c == b'-'
+                && src.get(i + 1) == Some(&b'-')
+                && (i == s || src[i - 1] == b' ') =>
+            {
+                return best;
+            }
             None if c == b' ' && i > s => best = Some(i),
             None => {}
         }
@@ -741,8 +768,8 @@ impl LogicalSource {
             src: text.as_bytes(),
             ..Default::default()
         };
-        if source_is_free_format(text) {
-            b.free_format();
+        if let Some(m) = RE_SOURCE_FREE.find(text) {
+            b.free_format(m.as_str().contains('$'));
         } else if !has_continuation_card(text) || !b.continued_literals() {
             return None;
         }
@@ -836,8 +863,9 @@ impl LogicalSource {
 // ── ref roles ──────────────────────────────────────────────────────────────────────────────────
 
 use wicked_estate_core::refs::cobol_ref::{
-    COPIES as COPIES_KEY, DATA as ROLE_DATA, LABEL as ROLE_LABEL, OPEN as OPEN_KEY,
-    PARENTS as PARENTS_KEY, PROGRAM as ROLE_PROGRAM, QUALIFIERS as QUALIFIERS_KEY,
+    COPIES as COPIES_KEY, COPYBOOK as COPYBOOK_KEY, DATA as ROLE_DATA, LABEL as ROLE_LABEL,
+    OPEN as OPEN_KEY, OWNER_PROGRAM as PROGRAM_KEY, PARENTS as PARENTS_KEY,
+    PROGRAM as ROLE_PROGRAM, PROGRAMS as PROGRAMS_KEY, QUALIFIERS as QUALIFIERS_KEY,
     ROLE as ROLE_KEY,
 };
 
@@ -982,7 +1010,14 @@ fn data_item_parents(root: tree_sitter::Node, src: &[u8]) -> HashMap<usize, (Vec
                         stack.pop();
                     }
                 }
-                let mut names: Vec<String> = stack
+                // A 66 RENAMES item belongs to its record (the 01), an 88 condition to the item
+                // right before it (a 77 too), every other item to its open groups.
+                let held = if level == 66 {
+                    &stack[..stack.len().min(1)]
+                } else {
+                    &stack[..]
+                };
+                let mut names: Vec<String> = held
                     .iter()
                     .rev()
                     .map(|(_, s)| s.clone())
@@ -993,7 +1028,7 @@ fn data_item_parents(root: tree_sitter::Node, src: &[u8]) -> HashMap<usize, (Vec
                     .map_or(!matches!(level, 1 | 77), |(l, _)| !matches!(l, 1 | 77));
                 names.extend(fd.clone());
                 out.insert(n.start_byte(), (names, open));
-                if !matches!(level, 66 | 77 | 88) {
+                if !matches!(level, 66 | 88) {
                     stack.push((level, name));
                 }
             }
@@ -1096,6 +1131,8 @@ struct Anchors {
     fallback: SymbolId,
     /// A copybook file's definition record + its `Contains` edges, taken by [`supplement`].
     copybook: Option<(SymbolId, Node, Vec<Edge>)>,
+    /// The member name when this file is a copybook.
+    member: Option<String>,
 }
 
 impl Anchors {
@@ -1149,6 +1186,7 @@ impl Anchors {
             modules,
             fallback: Symbol::file(&file.path).id(),
             copybook,
+            member: None,
         }
     }
 
@@ -1161,6 +1199,17 @@ impl Anchors {
             .filter(|(_, (_, _, s, e))| *s <= byte && byte < *e)
             .min_by_key(|(_, (_, _, s, e))| e - s)
             .map(|(i, _)| i)
+    }
+
+    /// The PROGRAM-IDs of the programs that hold `byte`, innermost first.
+    fn chain(&self, byte: usize) -> Vec<String> {
+        let mut held: Vec<_> = self
+            .modules
+            .iter()
+            .filter(|(_, _, s, e)| *s <= byte && byte < *e)
+            .collect();
+        held.sort_by_key(|(_, _, s, e)| e - s);
+        held.into_iter().map(|(_, name, ..)| name.clone()).collect()
     }
 
     /// The source node for a construct at `byte`, and its PROGRAM-ID when it is a program.
@@ -1924,14 +1973,46 @@ impl Pass<'_> {
             );
             !self.ddnames.contains(&key)
         });
-        // A data use or label resolves first to the copybooks its program (and every program
-        // that holds it) COPYs.
+        // Ownership: a data item or paragraph records its program (the innermost) or its
+        // copybook; a data use or label records its programs (innermost first) or its copybook,
+        // and the copybooks its program (and every program that holds it) COPYs.
+        let str_list = |v: Vec<String>| {
+            serde_json::Value::Array(v.into_iter().map(serde_json::Value::String).collect())
+        };
+        for n in ex
+            .nodes
+            .iter_mut()
+            .filter(|n| matches!(n.kind, NodeKind::Field | NodeKind::Function))
+        {
+            let owner = match &self.anchors.member {
+                Some(m) => Some((COPYBOOK_KEY, m.clone())),
+                None => self
+                    .anchors
+                    .chain(n.location.span.start_byte as usize)
+                    .into_iter()
+                    .next()
+                    .map(|p| (PROGRAM_KEY, p)),
+            };
+            if let Some((key, name)) = owner {
+                n.metadata
+                    .insert(key.to_string(), serde_json::Value::String(name));
+            }
+        }
         for r in &mut refs {
             let role = r.hints.get(ROLE_KEY).and_then(|v| v.as_str());
             if !matches!(role, Some(ROLE_DATA | ROLE_LABEL)) {
                 continue;
             }
             let at = r.location.span.start_byte as usize;
+            match &self.anchors.member {
+                Some(m) => hint(r, COPYBOOK_KEY, m.clone().into()),
+                None => {
+                    let chain = self.anchors.chain(at);
+                    if !chain.is_empty() {
+                        hint(r, PROGRAMS_KEY, str_list(chain));
+                    }
+                }
+            }
             let holders: Vec<&SymbolId> = match self
                 .anchors
                 .modules
@@ -3160,8 +3241,13 @@ mod tests {
         "cbl/CUSTPGM.cbl",
         "cbl/OTHREC.cpy",
         "cbl/OTHPGM.cbl",
+        "cbl/RECUR.cbl",
+        "cbl/RECUR2.cbl",
         "cbl/SHIPPGM.cbl",
+        "cbl/TWOPGM.cbl",
+        "cpy/CUSTFRAG.cpy",
         "cpy/CUSTREC.cpy",
+        "cpy/ORDFRAG.cpy",
         "cpy/ORDREC.cpy",
     ];
 
@@ -3201,7 +3287,11 @@ mod tests {
         );
         for r in ids {
             assert_eq!(hint_str(r, ROLE_KEY), Some(ROLE_DATA));
-            assert_eq!(hint_list(r, COPIES_KEY), ["CUSTREC", "ORDREC"]);
+            assert_eq!(
+                hint_list(r, COPIES_KEY),
+                ["CUSTFRAG", "CUSTREC", "ORDFRAG", "ORDREC"]
+            );
+            assert_eq!(hint_list(r, PROGRAMS_KEY), ["CUSTPGM"]);
         }
         // A copybook item records its groups; a fragment (no 01 level) is open to its includer.
         let cpy = run(
@@ -3276,6 +3366,47 @@ mod tests {
         );
     }
 
+    /// Level 66 belongs to its record, an 88 to the item before it (a 77 too).
+    #[test]
+    fn special_levels_record_their_owner() {
+        let ex = run(
+            "cpy/LEVELS.cpy",
+            "       01 R1.\n          05 R2.\n             10 A PIC X.\n       66 ALIAS RENAMES R2.\n       77 STATUS-A PIC X.\n          88 READY VALUE 'Y'.\n",
+        );
+        let meta = |name: &str| {
+            ex.nodes
+                .iter()
+                .find(|n| n.kind == NodeKind::Field && n.name == name)
+                .unwrap_or_else(|| panic!("{name}: {:?}", names(&ex)))
+                .metadata
+                .clone()
+        };
+        assert_eq!(meta("A")[PARENTS_KEY], serde_json::json!(["R2", "R1"]));
+        assert_eq!(meta("ALIAS")[PARENTS_KEY], serde_json::json!(["R1"]));
+        assert_eq!(meta("READY")[PARENTS_KEY], serde_json::json!(["STATUS-A"]));
+        assert!(!meta("READY").contains_key(OPEN_KEY));
+        assert_eq!(meta("A")[COPYBOOK_KEY], serde_json::json!("LEVELS"));
+    }
+
+    /// `PERFORM P IN SECT` names the paragraph P, and data items and paragraphs record their
+    /// program.
+    #[test]
+    fn section_qualified_perform_names_the_paragraph() {
+        let ex = run(
+            "cbl/P.cbl",
+            &program(
+                "       01 W PIC 9.\n",
+                "           PERFORM CHECK-PARA IN CHECK-SECT.\n           GOBACK.\n       CHECK-SECT SECTION.\n       CHECK-PARA.\n           EXIT.\n",
+            ),
+        );
+        let performs = refs_named(&ex, EdgeKind::Calls, "CHECK-PARA");
+        assert_eq!(performs.len(), 1, "{:?}", calls(&ex));
+        assert_eq!(hint_str(performs[0], ROLE_KEY), Some(ROLE_LABEL));
+        assert_eq!(hint_list(performs[0], PROGRAMS_KEY), ["P"]);
+        let para = ex.nodes.iter().find(|n| n.name == "CHECK-PARA").unwrap();
+        assert_eq!(para.metadata[PROGRAM_KEY], serde_json::json!("P"));
+    }
+
     // ── wicked-estate#544: logical source ──────────────────────────────────────────────────
 
     fn at<'a>(text: &'a str, span: &Span) -> &'a str {
@@ -3345,6 +3476,55 @@ mod tests {
         );
         let main = ex.nodes.iter().find(|n| n.name == "MAIN-PARA").unwrap();
         assert_eq!(main.location.span.start_line, 3);
+    }
+
+    /// A joined literal whose first part ends in blanks at column 72 keeps its tail in the text
+    /// pass (the joined line must not look like a card with an identification area).
+    #[test]
+    fn continued_literal_with_a_blank_column_72_keeps_its_tail() {
+        let first = format!("{:<72}\n", "           EXEC CICS LINK PROGRAM('SHIPPGM");
+        let text = format!(
+            "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. ORDPGM.\n       PROCEDURE DIVISION.\n{first}      -    'X') END-EXEC.\n           GOBACK.\n"
+        );
+        let ex = run("cbl/ORDPGM.cbl", &text);
+        let link: Vec<_> = calls(&ex)
+            .into_iter()
+            .filter(|c| c.starts_with("SHIPPGM"))
+            .collect();
+        assert_eq!(link.len(), 1, "{:?}", calls(&ex));
+        assert!(
+            link[0].ends_with('X'),
+            "the tail after the blanks is kept: {link:?}"
+        );
+    }
+
+    /// Standard free format: a `*` or `/` in column 1 is an operator continuing an expression,
+    /// and a long line is never split inside an SQL `--` comment.
+    #[test]
+    fn free_format_operators_and_sql_comments_stay_what_they_are() {
+        let sql = format!(
+            "    EXEC SQL SELECT A INTO :W FROM REALTAB -- {} FROM GHOST\n    END-EXEC.\n",
+            "x".repeat(60)
+        );
+        let text = format!(
+            ">>SOURCE FORMAT FREE\nIDENTIFICATION DIVISION.\nPROGRAM-ID. P.\nDATA DIVISION.\nWORKING-STORAGE SECTION.\n01 W PIC 9.\n01 BASE PIC 9.\n01 RATE PIC 9.\nPROCEDURE DIVISION.\nMAIN-PARA.\n    COMPUTE W = BASE\n* RATE.\n{sql}    GOBACK.\n"
+        );
+        let ex = run("cbl/P.cbl", &text);
+        assert!(
+            !refs_named(&ex, EdgeKind::References, "RATE").is_empty(),
+            "{:?}",
+            ex.refs
+        );
+        let ghost = Symbol::synthetic("db2", "GHOST").id();
+        assert!(ex.local_edges.iter().all(|e| e.target != ghost));
+        assert!(
+            edge_to(
+                &ex,
+                &edge_tags::other(edge_tags::READS),
+                &Symbol::synthetic("db2", "REALTAB").id()
+            )
+            .is_some()
+        );
     }
 
     #[test]

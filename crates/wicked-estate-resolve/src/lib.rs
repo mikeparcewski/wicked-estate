@@ -576,60 +576,56 @@ fn string_list(v: Option<&serde_json::Value>) -> Option<Vec<String>> {
     )
 }
 
-/// A copybook's member name: its file stem, uppercased (`cpy/ordrec.cpy` → `ORDREC`), as the
-/// COBOL extractor names it.
-fn copybook_member(path: &str) -> String {
-    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    base.rsplit_once('.')
-        .map_or(base, |(stem, _)| stem)
-        .to_ascii_uppercase()
+fn meta_str<'a>(n: &'a wicked_estate_core::Node, key: &str) -> Option<&'a str> {
+    n.metadata.get(key).and_then(|v| v.as_str())
 }
 
-/// Whether `file` is a copybook: the COBOL extractor gave it a `copybook` node.
-fn is_copybook_file(index: &dyn SymbolIndex, file: &str) -> bool {
-    index
-        .by_name(&copybook_member(file))
-        .iter()
-        .any(|n| n.location.file == file && n.kind == NodeKind::Other("copybook".to_string()))
-}
-
-/// Whether data item `n` satisfies a data use's `OF`/`IN` qualifiers (innermost first): each
-/// names one of its groups, in order. An item of a copybook fragment (`cobol_open`) can also be
-/// qualified by the groups of the program that COPYs it, so qualifiers past its own groups pass.
-/// An item indexed before groups were recorded carries none and is not ruled out.
-fn qualified_by(n: &wicked_estate_core::Node, qualifiers: &[String]) -> bool {
+/// How data item `n` meets a data use's `OF`/`IN` qualifiers (innermost first): `Some(true)` when
+/// each names one of its groups, in order; `Some(false)` when only an item of a copybook fragment
+/// (`cobol_open`) can meet them, through the groups of the program that COPYs it; `None` when it
+/// cannot. An item indexed before groups were recorded carries none and is not ruled out.
+fn qualifier_match(n: &wicked_estate_core::Node, qualifiers: &[String]) -> Option<bool> {
     use wicked_estate_core::refs::cobol_ref::{OPEN, PARENTS};
     let Some(parents) = string_list(n.metadata.get(PARENTS)) else {
-        return true;
+        return Some(true);
     };
-    let open = n.metadata.get(OPEN).and_then(|v| v.as_bool()) == Some(true);
     let mut groups = parents.iter();
-    qualifiers.iter().all(|q| groups.any(|g| g == q)) || open
+    if qualifiers.iter().all(|q| groups.any(|g| g == q)) {
+        return Some(true);
+    }
+    (n.metadata.get(OPEN).and_then(|v| v.as_bool()) == Some(true)).then_some(false)
 }
 
 /// The targets of a role-tagged COBOL ref, or `None` (it parks) when there is none or the best
 /// tier holds more than one definition.
 ///
-/// - **data** binds a COBOL data item (`Field`) that satisfies its `OF`/`IN` qualifiers: one in
-///   its own file, else in a copybook its program COPYs, else in any other copybook. Another
-///   program's storage is a candidate only for a ref written in a copybook, and a paragraph of the
-///   same spelling never is.
+/// - **data** binds a COBOL data item (`Field`) that meets its `OF`/`IN` qualifiers (items whose
+///   own groups meet them beat copybook fragments that might): first one of its own program (or
+///   of a program that contains it), else one in a copybook its program COPYs, else one in any
+///   other copybook. Another program's storage is a candidate only for a ref written in a
+///   copybook, and a paragraph of the same spelling never is.
 /// - **label** binds a COBOL paragraph or section, by the same tiers.
 /// - **program** binds the unique program `Module` (COBOL, HLASM, PL/I, C, C++), never a
-///   paragraph.
+///   paragraph. Uniqueness comes first: two programs of that name are ambiguous even when one of
+///   them is the caller.
+///
+/// Ownership comes from the extractor: items and paragraphs carry `cobol_program` or
+/// `cobol_copybook`, refs carry `cobol_programs` or `cobol_copybook` and `cobol_copies`.
 fn cobol_targets(
     r: &UnresolvedRef,
     role: &str,
     index: &dyn SymbolIndex,
 ) -> Option<(Vec<wicked_estate_core::Node>, CobolTier)> {
-    use wicked_estate_core::refs::cobol_ref::{COPIES, DATA, LABEL, PROGRAM, QUALIFIERS};
+    use wicked_estate_core::refs::cobol_ref::{
+        COPIES, COPYBOOK, DATA, LABEL, OWNER_PROGRAM, PROGRAM, PROGRAMS, QUALIFIERS,
+    };
     let cobol = |n: &wicked_estate_core::Node, kind: NodeKind| {
         n.kind == kind && n.language.as_str() == "cobol"
     };
     let mut candidates: Vec<_> = index
         .by_name(&r.raw_name)
         .into_iter()
-        .filter(|n| n.symbol != r.from && wicked_estate_core::is_structural_symbol(n))
+        .filter(wicked_estate_core::is_structural_symbol)
         .filter(|n| match role {
             DATA => cobol(n, NodeKind::Field),
             LABEL => cobol(n, NodeKind::Function),
@@ -641,12 +637,24 @@ fn cobol_targets(
         })
         .collect();
     if role == PROGRAM {
-        return one_overload_family(candidates.iter())
-            .then_some((candidates, CobolTier::Elsewhere));
+        let [only] = candidates.as_slice() else {
+            return None;
+        };
+        return (only.symbol != r.from).then_some((candidates, CobolTier::Elsewhere));
     }
+    candidates.retain(|n| n.symbol != r.from);
     if role == DATA {
         if let Some(qualifiers) = string_list(r.hints.get(QUALIFIERS)) {
-            candidates.retain(|n| qualified_by(n, &qualifiers));
+            let met: Vec<_> = candidates
+                .into_iter()
+                .filter_map(|n| qualifier_match(&n, &qualifiers).map(|own| (own, n)))
+                .collect();
+            let own = met.iter().any(|(own, _)| *own);
+            candidates = met
+                .into_iter()
+                .filter(|(o, _)| *o == own)
+                .map(|(_, n)| n)
+                .collect();
         }
     }
     let copies: std::collections::HashSet<String> = string_list(r.hints.get(COPIES))
@@ -655,14 +663,18 @@ fn cobol_targets(
         .collect();
     // Code in a copybook (a COPY in the PROCEDURE DIVISION) sees the storage and paragraphs of
     // whichever program COPYs it, so for its refs any unique definition stands.
-    let from_copybook = is_copybook_file(index, &r.location.file);
+    let in_copybook = r.hints.contains_key(COPYBOOK);
+    let programs = string_list(r.hints.get(PROGRAMS)).unwrap_or_default();
     let tier_of = |n: &wicked_estate_core::Node| {
-        let file = n.location.file.as_str();
-        if file == r.location.file {
+        let copybook = meta_str(n, COPYBOOK);
+        if n.location.file == r.location.file
+            && (in_copybook
+                || meta_str(n, OWNER_PROGRAM).is_none_or(|p| programs.iter().any(|q| q == p)))
+        {
             Some(CobolTier::SameFile)
-        } else if copies.contains(&copybook_member(file)) {
+        } else if copybook.is_some_and(|c| copies.contains(c)) {
             Some(CobolTier::Copied)
-        } else if from_copybook || is_copybook_file(index, file) {
+        } else if copybook.is_some() || in_copybook {
             Some(CobolTier::Elsewhere)
         } else {
             None
@@ -3875,9 +3887,11 @@ mod tests {
             targets_of(&before, EdgeKind::References, "ID"),
             ["cbl/OTHREC.cpy:ID"]
         );
-        assert_eq!(
-            targets_of(&before, EdgeKind::References, "CUST-NAME"),
-            ["cbl/OTHREC.cpy:CUST-NAME"]
+        // The same-directory homonyms (a copybook it does not COPY, another program's item) made
+        // the unqualified use miss the copybook it does COPY.
+        assert!(
+            !targets_of(&before, EdgeKind::References, "CUST-NAME")
+                .contains(&"cpy/CUSTREC.cpy:CUST-NAME".to_string())
         );
     }
 
@@ -3955,6 +3969,71 @@ mod tests {
                 .any(|(_, t, k, n)| t == "cbl/CUSTPGM.cbl:SHIPPGM"
                     && *k == EdgeKind::Calls
                     && *n == NodeKind::Function)
+        );
+    }
+
+    fn edges_from(
+        edges: &[(String, String, EdgeKind, NodeKind)],
+        source: &str,
+        kind: EdgeKind,
+        name: &str,
+    ) -> Vec<String> {
+        edges
+            .iter()
+            .filter(|(src, t, k, _)| {
+                src == source && *k == kind && t.rsplit(':').next() == Some(name)
+            })
+            .map(|(_, t, _, _)| t.clone())
+            .collect()
+    }
+
+    /// An item whose own groups meet the qualifiers beats a copybook fragment that only might
+    /// (through the program's group it is COPYd under).
+    #[test]
+    fn cobol_qualified_use_prefers_the_fragment_whose_own_groups_match() {
+        let edges = cobol_role_edges(false);
+        assert_eq!(
+            targets_of(&edges, EdgeKind::References, "FID"),
+            ["cpy/CUSTFRAG.cpy:FID"],
+            "{edges:#?}"
+        );
+    }
+
+    /// Two programs in one file: each use binds its own program's storage or its own COPY, never
+    /// the other program's item.
+    #[test]
+    fn cobol_programs_in_one_file_do_not_share_storage() {
+        let edges = cobol_role_edges(false);
+        assert_eq!(
+            edges_from(
+                &edges,
+                "cbl/TWOPGM.cbl:FIRSTPGM",
+                EdgeKind::References,
+                "CUST-NAME"
+            ),
+            ["cpy/CUSTREC.cpy:CUST-NAME"],
+            "{edges:#?}"
+        );
+        assert_eq!(
+            edges_from(
+                &edges,
+                "cbl/TWOPGM.cbl:SECONDPGM",
+                EdgeKind::References,
+                "CUST-NAME"
+            ),
+            ["cbl/TWOPGM.cbl:CUST-NAME"]
+        );
+    }
+
+    /// `CALL 'RECUR'` with two programs named RECUR is ambiguous, even though one is the caller.
+    #[test]
+    fn cobol_program_call_checks_uniqueness_before_self() {
+        let edges = cobol_role_edges(false);
+        assert!(
+            edges
+                .iter()
+                .all(|(_, t, k, _)| *k != EdgeKind::Calls || !t.ends_with(":RECUR")),
+            "{edges:#?}"
         );
     }
 }

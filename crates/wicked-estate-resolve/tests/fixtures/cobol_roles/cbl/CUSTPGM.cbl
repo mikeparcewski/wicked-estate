@@ -5,6 +5,9 @@
        COPY CUSTREC.
        COPY ORDREC.
        01 CALC PIC 9(4).
+       01 WS-FRAGS.
+       COPY CUSTFRAG.
+       COPY ORDFRAG.
        PROCEDURE DIVISION.
        MAIN-PARA.
            MOVE 1 TO ID OF CUSTOMER.
@@ -12,6 +15,7 @@
            MOVE 3 TO CALC.
            MOVE SPACES TO CUST-NAME.
            MOVE 1 TO WS-DONE.
+           MOVE 4 TO FID OF CUSTOMER.
            PERFORM CALC.
            PERFORM CHECK-PARA THRU CHECK-EXIT.
            CALL 'SHIPPGM'.
