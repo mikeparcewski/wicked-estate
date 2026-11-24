@@ -1,4 +1,5 @@
-//! Compiles the vendored in-house APEXlang grammar (`vendor/tree-sitter-apexlang`).
+//! Compiles the vendored in-house APEXlang grammar (`vendor/tree-sitter-apexlang`) and the patched
+//! COBOL external scanner (`vendor/arborium-cobol-scanner`).
 //!
 //! The other vendored grammars are their own `wicked-estate-tree-sitter-*` crates. This one is
 //! compiled here instead: a new crate name cannot be published through crates.io Trusted
@@ -16,4 +17,15 @@ fn main() {
     build.compile("tree-sitter-apexlang");
     println!("cargo:rerun-if-changed=vendor/tree-sitter-apexlang/src/parser.c");
     println!("cargo:rerun-if-changed=vendor/tree-sitter-apexlang/src/scanner.c");
+
+    // The patched COBOL external scanner, installed over arborium-cobol's own (`lang_cobol`).
+    let cobol = std::path::Path::new("vendor/arborium-cobol-scanner");
+    let mut build = cc::Build::new();
+    build.include(cobol);
+    build.flag_if_supported("-w");
+    build.file(cobol.join("cobol_language.c"));
+    build.compile("wicked-cobol-scanner");
+    println!("cargo:rerun-if-changed=vendor/arborium-cobol-scanner/cobol_language.c");
+    println!("cargo:rerun-if-changed=vendor/arborium-cobol-scanner/scanner.c");
+    println!("cargo:rerun-if-changed=vendor/arborium-cobol-scanner/tree_sitter/parser.h");
 }

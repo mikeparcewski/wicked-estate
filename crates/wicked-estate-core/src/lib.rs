@@ -13,6 +13,7 @@
 
 pub mod annotation;
 pub mod change;
+pub mod completeness;
 pub mod conformance;
 pub mod crossing;
 pub mod edge;

@@ -7,7 +7,7 @@
 //!
 //! | Source construct | Stored as |
 //! |---|---|
-//! | `EXEC CICS LINK/XCTL PROGRAM('P')` | `Calls` ref program → `P` (any language; parks if absent) |
+//! | `EXEC CICS LINK/XCTL PROGRAM('P')` | `Calls` ref paragraph → `P` (any language; parks if absent) |
 //! | `EXEC CICS SEND MAP('M') [MAPSET('S')]` | `other:writes` edge program → shared `cics-map:S.M` |
 //! | `EXEC CICS RECEIVE MAP('M') [MAPSET('S')]` | `other:reads` edge program → shared `cics-map:S.M` |
 //! | `EXEC SQL SELECT … FROM T` (and cursors, subselects, joins, MERGE `USING`) | `other:reads` edge program → shared `db2:T` |
@@ -18,7 +18,7 @@
 //! | `SELECT F ASSIGN TO DD` | `other:uses` edge program → shared `ddname:<PGM>.<DD>` (JCL defines it) |
 //! | `CALL VAR` / `PROGRAM(VAR)`, VAR holding one literal | `Calls` ref `cobol-dynamic-call:<LIT>` (Heuristic) |
 //! | the same, VAR with several values / a non-literal / none | `Calls` ref `cobol-dynamic-var:<VAR>` (parked; reason on VAR's field) |
-//! | `:HOSTVAR`, CICS `COMMAREA()/INTO()/FROM()` operands | `References` refs to the data item |
+//! | `:HOSTVAR`, CICS `COMMAREA()/INTO()/FROM()` operands | `References` refs paragraph → the data item |
 //!
 //! **Lexical view.** Every construct is matched on a same-length copy of the source in which
 //! comment lines (indicator `*` or `/`), floating `*>` comments, the fixed-format sequence and
@@ -26,10 +26,12 @@
 //! CONTENTS of every literal are blanked. So a `COPY` or an `EXEC SQL` inside a `DISPLAY` literal
 //! is not code. Literal values are read back from the comment-blanked copy at the same offsets.
 //!
-//! **Every source is a real node** of this extraction: the program Module whose span holds the
-//! construct (nested programs pick the innermost), else the first program, else the copybook node,
-//! else the File node. Literal inference (dynamic calls, map names), labels and DD names are scoped
-//! to that program. A shared target is minted by the referencing file as a BOUNDARY record
+//! **Every source is a real node** of this extraction. Calls and data uses (the `Calls` and
+//! `References` refs above) start from the innermost paragraph or section holding the construct,
+//! as the tree-sitter extractor's PERFORM and data-name refs do. Every other link starts from the
+//! program Module whose span holds the construct (nested programs pick the innermost), else the
+//! first program, else the copybook node, else the File node. Literal inference (dynamic calls,
+//! map names), labels and DD names are scoped to that program. A shared target is minted by the referencing file as a BOUNDARY record
 //! ([`Node::as_boundary`]) whose reason says what source would define it; the defining file's
 //! record wins in the store when it is indexed (see [`crate::contrib`]).
 //!
@@ -286,6 +288,69 @@ pub fn supplement(file: &SourceFile, ex: &mut Extraction) {
     p.finish(ex);
 }
 
+/// The end of a PROCEDURE DIVISION: the next program's IDENTIFICATION DIVISION or an END PROGRAM.
+static RE_PROCEDURE_END: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:IDENTIFICATION|ID)\s+DIVISION\b|\bEND\s+PROGRAM\b")
+        .expect("RE_PROCEDURE_END")
+});
+
+/// The text the COBOL grammar parses: `text` with every `COPY …` statement inside a PROCEDURE
+/// DIVISION turned into `EXIT` plus spaces, its terminating period kept (same length; line breaks
+/// kept), or `None` when there is none.
+///
+/// arborium-cobol cannot parse what follows such a COPY: `COPY CSSETATY REPLACING ==A== BY ==B==`
+/// is an error, and after `COPY 'CSSTRPFY' .` the next paragraph header is an error, so that
+/// paragraph gets no node. `EXIT .` parses and is followed by a header, and a statement still
+/// stands where the COPY was, so the paragraph and program spans keep covering it. A COPY yields
+/// no node or edge from the tree (this module reads COPY links from the source text), so nothing
+/// is lost; spans and names are still read from the original text at the same offsets, and the
+/// stub classifier re-reads that text, so a paragraph holding only a COPY is not an EXIT stub.
+pub(crate) fn grammar_view(text: &str) -> Option<String> {
+    let free = source_is_free_format(text);
+    let (_, code) = lexical_views(text, free);
+    let code = RE_PSEUDO_TEXT
+        .replace_all(&code, |c: &regex::Captures| blank(&c[0]))
+        .into_owned();
+    let mut ranges = Vec::new();
+    let mut at = 0;
+    while let Some(div) = RE_PROCEDURE_DIVISION.find_at(&code, at) {
+        let end = RE_PROCEDURE_END
+            .find_at(&code, div.end())
+            .map_or(code.len(), |m| m.start());
+        for c in RE_COPY.find_iter(&code[div.end()..end]) {
+            let from = div.end() + c.start();
+            // The match may start on the separator before COPY.
+            let from = from + code[from..].find(['C', 'c']).unwrap_or(0);
+            // The statement ends at the first period followed by a space, a line end or EOF. A
+            // COPY with no period (a compile error) hides only `COPY <member>`.
+            let bytes = code.as_bytes();
+            let named = div.end() + c.end();
+            let stop = (named..end)
+                .find(|&i| {
+                    bytes[i] == b'.' && bytes.get(i + 1).is_none_or(|b| b.is_ascii_whitespace())
+                })
+                .unwrap_or(named);
+            ranges.push((from, stop));
+        }
+        at = end.max(div.end());
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    let mut view = text.as_bytes().to_vec();
+    for (from, to) in ranges {
+        // `COPY` → `EXIT`; the rest up to (not including) the period → spaces.
+        view[from..from + 4].copy_from_slice(b"EXIT");
+        for b in &mut view[from + 4..to] {
+            if *b != b'\n' && *b != b'\r' {
+                *b = b' ';
+            }
+        }
+    }
+    // Only ASCII bytes were written over whole statements' bytes, so this is valid UTF-8.
+    String::from_utf8(view).ok()
+}
+
 // ── lexical views ──────────────────────────────────────────────────────────────────────────────
 
 /// Same-length copy of `s` with every byte replaced by a space, newlines kept.
@@ -482,6 +547,8 @@ type Prog = Option<usize>;
 struct Anchors {
     /// (symbol, PROGRAM-ID, start byte, end byte) of every program in the file.
     modules: Vec<(SymbolId, String, usize, usize)>,
+    /// (symbol, start byte, end byte) of every paragraph and section in the file.
+    units: Vec<(SymbolId, usize, usize)>,
     /// The source when no program holds the construct: the copybook node, else the File node.
     fallback: SymbolId,
     /// A copybook file's definition record + its `Contains` edges, taken by [`supplement`].
@@ -502,6 +569,15 @@ impl Anchors {
                     s.start_byte as usize,
                     s.end_byte as usize,
                 )
+            })
+            .collect();
+        let units = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Function)
+            .map(|n| {
+                let s = &n.location.span;
+                (n.symbol.clone(), s.start_byte as usize, s.end_byte as usize)
             })
             .collect();
         let copybook = if modules.is_empty() && !RE_PROGRAM_ID.is_match(code) {
@@ -537,6 +613,7 @@ impl Anchors {
         };
         Self {
             modules,
+            units,
             fallback: Symbol::file(&file.path).id(),
             copybook,
         }
@@ -551,6 +628,16 @@ impl Anchors {
             .filter(|(_, (_, _, s, e))| *s <= byte && byte < *e)
             .min_by_key(|(_, (_, _, s, e))| e - s)
             .map(|(i, _)| i)
+    }
+
+    /// The source of a call or data use at `byte`: the innermost paragraph or section holding it
+    /// (the tree-sitter extractor's rule for PERFORM, CALL and data names), else [`Self::at`]'s.
+    fn unit(&self, byte: usize) -> SymbolId {
+        self.units
+            .iter()
+            .filter(|(_, s, e)| *s <= byte && byte < *e)
+            .min_by_key(|(_, s, e)| e - s)
+            .map_or_else(|| self.at(byte).0, |(sym, _, _)| sym.clone())
     }
 
     /// The source node for a construct at `byte`, and its PROGRAM-ID when it is a program.
@@ -933,7 +1020,7 @@ impl Pass<'_> {
                         };
                         if !raw.is_empty() {
                             self.out.refs.push(UnresolvedRef::new(
-                                from.clone(),
+                                self.anchors.unit(whole.start()),
                                 raw,
                                 EdgeKind::Calls,
                                 loc.clone(),
@@ -946,7 +1033,8 @@ impl Pass<'_> {
             }
             for key in ["COMMAREA", "INTO", "FROM"] {
                 if let Some(op) = opts.get(key).filter(|o| !o.literal).cloned() {
-                    self.reference(from.clone(), &op.value, loc.clone());
+                    let unit = self.anchors.unit(whole.start());
+                    self.reference(unit, &op.value, loc.clone());
                 }
             }
         }
@@ -1041,7 +1129,8 @@ impl Pass<'_> {
             let w = |i: usize| words.get(i).map_or("", String::as_str);
 
             for h in RE_SQL_HOSTVAR.captures_iter(&body) {
-                self.reference(from.clone(), &h[1], loc.clone());
+                let unit = self.anchors.unit(whole.start());
+                self.reference(unit, &h[1], loc.clone());
             }
             match w(0) {
                 "INCLUDE" => {
@@ -1559,6 +1648,15 @@ mod tests {
         ex
     }
 
+    fn paragraph_sym(ex: &Extraction, name: &str) -> SymbolId {
+        ex.nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Function && n.name == name)
+            .unwrap_or_else(|| panic!("paragraph {name}: {:?}", names(ex)))
+            .symbol
+            .clone()
+    }
+
     fn module_sym(ex: &Extraction, name: &str) -> SymbolId {
         ex.nodes
             .iter()
@@ -1618,7 +1716,7 @@ mod tests {
 ";
 
     #[test]
-    fn every_source_is_the_program_module_not_a_file_anchor() {
+    fn every_source_is_a_real_node_not_a_file_anchor() {
         // Fails on main: refs/edges came from `synthetic("cobol-pgm", path)`, never a node.
         let ex = run("cbl/ORDPGM.cbl", ORDPGM);
         let pgm = module_sym(&ex, "ORDPGM");
@@ -1627,7 +1725,8 @@ mod tests {
             .iter()
             .find(|r| r.raw_name == "SHIPPGM")
             .expect("LINK ref");
-        assert_eq!(link.from, pgm);
+        // A call starts from the paragraph that makes it; a table read from the program.
+        assert_eq!(link.from, paragraph_sym(&ex, "MAIN-PARA"));
         assert_eq!(link.kind, EdgeKind::Calls);
         let reads = edge_to(
             &ex,
@@ -1698,7 +1797,7 @@ mod tests {
     #[test]
     fn field_uses_become_reference_refs_but_not_paragraph_labels() {
         let ex = run("cbl/ORDPGM.cbl", ORDPGM);
-        let pgm = module_sym(&ex, "ORDPGM");
+        let para = paragraph_sym(&ex, "MAIN-PARA");
         let refs: Vec<_> = ex
             .refs
             .iter()
@@ -1716,7 +1815,8 @@ mod tests {
             ex.refs
                 .iter()
                 .filter(|r| r.kind == EdgeKind::References && r.raw_name == "ORD-ID")
-                .all(|r| r.from == pgm)
+                .all(|r| r.from == para),
+            "a data use starts from the paragraph that makes it (the MOVE and the SQL host var)"
         );
     }
 
@@ -1969,8 +2069,18 @@ mod tests {
             .iter()
             .filter(|r| r.kind == EdgeKind::Calls)
             .map(|r| {
+                // Each call starts from its paragraph; the pair names the program holding it.
                 let from = ex.nodes.iter().find(|n| n.symbol == r.from).unwrap();
-                (from.name.clone(), r.raw_name.clone())
+                assert_eq!(from.kind, NodeKind::Function, "{}", from.name);
+                let at = r.location.span.start_byte;
+                let prog = ex
+                    .nodes
+                    .iter()
+                    .filter(|n| n.kind == NodeKind::Module)
+                    .filter(|n| n.location.span.start_byte <= at && at < n.location.span.end_byte)
+                    .min_by_key(|n| n.location.span.end_byte - n.location.span.start_byte)
+                    .unwrap();
+                (prog.name.clone(), r.raw_name.clone())
             })
             .collect();
         assert!(

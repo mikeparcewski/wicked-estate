@@ -158,10 +158,11 @@ fn brief_fixture_links_resolve_through_the_user_queries() {
     assert!(dependent_names(&db, "ORD-ID").contains("ORDPGM"));
 
     // JCL STEP1 → ORDPGM → SHIPPGM → TAXPGM, as two legs + TAXPGM's blast radius (the shortest
-    // STEP1 → TAXPGM path is the direct `CALL 'TAXPGM'`, which is correct).
+    // STEP1 → TAXPGM path is the direct `CALL 'TAXPGM'`, which is correct). The LINK is made by
+    // paragraph MAIN-PARA, which the program contains.
     assert_eq!(
         path_names(&db, "STEP1", "SHIPPGM"),
-        ["STEP1", "ORDPGM", "SHIPPGM"]
+        ["STEP1", "ORDPGM", "MAIN-PARA", "SHIPPGM"]
     );
     assert_eq!(path_names(&db, "SHIPPGM", "TAXPGM"), ["SHIPPGM", "TAXPGM"]);
     let tax = dependent_names(&db, "TAXPGM");
@@ -230,7 +231,8 @@ fn dynamic_call_binds_at_heuristic_and_backfills_when_the_program_appears() {
     );
     let edge = to_price[0].clone();
     assert_eq!(edge.kind, EdgeKind::Calls);
-    assert_eq!(nodes[&edge.source].name, "ORDPGM");
+    // The paragraph that makes the CALL.
+    assert_eq!(nodes[&edge.source].name, "CALC-PARA");
     assert_eq!(edge.resolved_by, "cobol-dynamic-call");
     assert!((edge.confidence.get() - 0.5).abs() < 1e-6, "Heuristic tier");
     assert!(
@@ -270,10 +272,12 @@ fn documented_edges() -> Vec<(&'static str, NodeKind, EdgeKind)> {
         ("ims/ORDPSB", k("ims_psb"), o("sensitive_to")),
         // mq.rs
         ("mq/", k("mq_queue"), o("resolves_to")),
-        // cobol_links.rs (+ the tree-sitter COBOL extractor)
-        ("cbl/", NodeKind::Module, EdgeKind::Calls),
+        // cobol_links.rs (+ the tree-sitter COBOL extractor): calls and data uses start from the
+        // paragraph, which the program contains; every other link starts from the program.
+        ("cbl/", NodeKind::Function, EdgeKind::Calls),
+        ("cbl/", NodeKind::Module, EdgeKind::Contains),
         ("cbl/", NodeKind::Module, EdgeKind::Imports),
-        ("cbl/", NodeKind::Module, EdgeKind::References),
+        ("cbl/", NodeKind::Function, EdgeKind::References),
         ("cbl/", NodeKind::Module, o("reads")),
         ("cbl/", NodeKind::Module, o("writes")),
         ("cbl/", NodeKind::Module, o("uses")),
@@ -356,8 +360,9 @@ fn grammarless_extractors_drop_no_edges_and_store_every_documented_kind() {
     // Db2 read AND write of the same table; CICS LINK to the HLASM program; dynamic CALL.
     assert!(has("PAYCALC", &o("reads"), "PAYHIST"));
     assert!(has("PAYCALC", &o("writes"), "PAYHIST"));
-    assert!(has("PAYCALC", &EdgeKind::Calls, "STUB"));
-    assert!(has("PAYCALC", &EdgeKind::Calls, "RATEPGM"));
+    assert!(has("MAIN-PARA", &EdgeKind::Calls, "STUB"));
+    assert!(has("MAIN-PARA", &EdgeKind::Calls, "RATEPGM"));
+    assert!(has("PAYCALC", &EdgeKind::Contains, "MAIN-PARA"));
     // DD binding: JCL defines PAYCALC.PAYIN, COBOL's ASSIGN TO PAYIN uses it, so the dataset's
     // blast radius reaches the program.
     assert!(has("PAYCALC", &o("uses"), "PAYCALC.PAYIN"));
@@ -369,7 +374,8 @@ fn grammarless_extractors_drop_no_edges_and_store_every_documented_kind() {
     );
     assert!(dependent_names(&db, "PROD.PAY.INPUT").contains("PAYCALC"));
     // Copybook field use → the copybook's field; copybook → program.
-    assert!(has("PAYCALC", &EdgeKind::References, "PAY-ID"));
+    assert!(has("MAIN-PARA", &EdgeKind::References, "PAY-ID"));
+    assert!(dependent_names(&db, "PAY-ID").contains("PAYCALC"));
     assert!(dependent_names(&db, "PAYREC").contains("PAYCALC"));
 }
 

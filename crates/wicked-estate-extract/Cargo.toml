@@ -71,7 +71,9 @@ regex = "1"
 # Registrable-domain (eTLD+1) lookup for the secret-redaction URL rule (DES-S7 §5 C2).
 psl = "2"
 # arborium grammar family (ABI-15, tree-sitter 0.25, uniform `language()` API) — W2.1 toward 73.
-arborium-cobol = "2.18.0"
+# Exact pin: `vendor/arborium-cobol-scanner` replaces this crate's external scanner and relies on
+# its external-token order. Re-check that scanner against the new grammar before a bump.
+arborium-cobol = "=2.18.0"
 arborium-ada = "2.18"
 arborium-awk = "2.18"
 arborium-clojure = "2.18"

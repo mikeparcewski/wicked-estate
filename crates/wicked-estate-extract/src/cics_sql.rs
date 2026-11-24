@@ -72,10 +72,19 @@ mod tests {
             .expect("program module")
             .symbol
             .clone();
+        // The LINK is a call, so it starts from the paragraph issuing it; the table read is a
+        // program-level link.
+        let para = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Function && n.name == "MAIN-PARA")
+            .expect("paragraph")
+            .symbol
+            .clone();
         assert!(
             ex.refs
                 .iter()
-                .any(|r| r.raw_name == "PAYPGM" && r.kind == EdgeKind::Calls && r.from == pgm)
+                .any(|r| r.raw_name == "PAYPGM" && r.kind == EdgeKind::Calls && r.from == para)
         );
         let customer = Symbol::synthetic("db2", "CUSTOMER").id();
         assert!(ex.local_edges.iter().any(|e| e.source == pgm

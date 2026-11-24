@@ -315,7 +315,7 @@ const COBOL_EXIT_WORDS: &[&str] = &[
 /// the enclosing division (EOF if absent), never before the division's last physical line ends.
 /// END DECLARATIVES ends the scan. Anything uncertain stays real.
 fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
-    let Some(end) = crate::treesitter::cobol_paragraph_end(header) else {
+    let Some(end) = crate::treesitter::cobol_body_end(header) else {
         return Behaviour::Real;
     };
     if header.start_position().column >= COBOL_AREA_B_COLUMN || cobol_header_is_verb(header, src) {
@@ -326,7 +326,7 @@ fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
     let mut next = header.next_sibling();
     while let Some(n) = next {
         next = n.next_sibling();
-        if crate::treesitter::COBOL_HEADERS.contains(&n.kind()) {
+        if crate::treesitter::is_cobol_header(n) {
             // A header the grammar built from a verb (`COMMIT.`, `ROLLBACK.`) is a statement it
             // misread, in any column. Any other header ends the span, whatever column it starts in.
             if cobol_header_is_verb(n, src) {

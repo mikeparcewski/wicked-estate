@@ -22,9 +22,11 @@
 (call_statement
   x: (_) @call.function) @call
 
-; PERFORM <paragraph> → intra-program call
+; PERFORM <paragraph> [THRU <paragraph>] → intra-program call to the first paragraph. The paragraphs
+; after it, through the THRU one, are added in order by the extractor (`cobol_flow_calls`), as are
+; GO TO targets (a query match keeps one capture per statement; `GO TO A B DEPENDING ON X` has two).
 (perform_statement_call_proc
-  procedure: (_) @call.function) @call
+  procedure: (perform_procedure . (label) @call.function)) @call
 
 ; Data items (WORKING-STORAGE / LINKAGE / copybook fields). Each becomes a node — this is how
 ; "Advanced Data Formats" (COMP/COMP-3/Zoned/Signed usages) and "Complex Copybook Structures"
