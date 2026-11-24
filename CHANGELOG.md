@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.35.11] — 2026-11-24
+
+Patch release on the train-13 cut da841662, carrying 12 PRs since 0.35.10: #549, #566, #567, #569, #568, #561, #572, #586, #588, #571, #573, #579.
+
+### Changed
+
+- State the edge set rank, hotspots and communities count (Calls + Imports only) (#566)
+- Semantics carry-over without node scans or a second lookup; SQLite restore uses a cached statement (#567)
+- Provenance rows and NOTICE attribution for all 12 vendored grammars (#569)
+- Pin the x86_64 macOS floor and check it on the shipped binaries (#568)
+
+### Fixed
+
+- **Documents are converted in a supervised child, and skipped documents stay visible (#442, #457, #443).** `wicked-estate` and `wicked-estate-mcp` now convert each PDF/Office/ODF/RTF/EPUB document in a child process of the same binary, with a 1 GiB memory budget and a 120 s deadline. A crafted PDF (for example an absurd predictor `/Columns` that made lopdf allocate ~8 GiB at load) is skipped with a reason instead of killing the indexer or the MCP server, and a converter crash ends only the child. Skipped documents are recorded per repo: `index` prints every recorded `DOC-SKIPPED` line on each run, `stats --json` gains `skipped_documents {count, files}`, and freshness diagnostics name them, including on unchanged runs. Behaviour change: `DOC-SKIPPED` lines repeat on every index run until the document converts or is removed. (#549)
+- The release workflow's version bump rewrites only `[workspace.package]` and the internal wicked-estate-* path pins, leaving third-party pins such as `zip` untouched (estate#479) (#561)
+- Scope-bound replace_source; bounded link diagnostics and live-member relink (#558, #559) (#572)
+- Refs carry their role; free-format and continued literals parse (#545, #544) (#586)
+- Name-prefix lookups search only the prefix's range (#588)
+- No trigger on the FTS shadow table; defensive SQLite clients read the store (#571)
+- An edge two files assert survives the removal of either (edge contributions, #543) (#573)
+- Parse to EOF, PERFORM THRU and GO TO calls, paragraph-scoped edges (#579)
+
 ## [0.35.10] — 2026-11-22
 
 Patch release on estate main d8c342e7 (0.35.9 plus #564), carrying 1 PR since 0.35.9: #564. There is no GitHub Release for 0.35.9: its publish run could not draft one (the crates.io wait failed on the vendored grammar crates, #563). The 0.35.9 crates are on crates.io; the prebuilt binaries ship in the 0.35.10 GitHub Release.
