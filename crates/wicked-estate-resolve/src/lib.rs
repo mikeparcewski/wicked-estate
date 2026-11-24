@@ -3858,9 +3858,10 @@ mod tests {
                 _ => label(id).0,
             }
         };
-        let local = all.iter().flat_map(|e| e.local_edges.iter()).filter(|e| {
-            e.kind == EdgeKind::Calls && node(&e.source).kind == NodeKind::Function
-        });
+        let local = all
+            .iter()
+            .flat_map(|e| e.local_edges.iter())
+            .filter(|e| e.kind == EdgeKind::Calls && node(&e.source).kind == NodeKind::Function);
         let mut out: Vec<_> = edges
             .iter()
             .chain(local)
