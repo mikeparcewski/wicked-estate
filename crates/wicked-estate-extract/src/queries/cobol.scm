@@ -2,7 +2,7 @@
 ; Node types + fields verified against arborium-cobol-2.18.0 node-types.json:
 ;   paragraph_header.name = WORD|integer ; section_header.name = WORD|integer ;
 ;   program_definition (node) ; call_statement.x (the called program) ;
-;   perform_statement_call_proc.procedure (the PERFORMed paragraph).
+;   perform_statement_call_proc.procedure (the PERFORMed paragraph: read by the extractor).
 
 ; PROGRAM-ID NAME ... → a program is a module named by its PROGRAM-ID. Naming it lets cross-program
 ; refs resolve to it: a JCL `EXEC PGM=NAME`, an HLASM `CALL NAME`, or another COBOL `CALL 'NAME'`.
@@ -22,11 +22,10 @@
 (call_statement
   x: (_) @call.function) @call
 
-; PERFORM <paragraph> [THRU <paragraph>] → intra-program call to the first paragraph. The paragraphs
-; after it, through the THRU one, are added in order by the extractor (`cobol_flow_calls`), as are
-; GO TO targets (a query match keeps one capture per statement; `GO TO A B DEPENDING ON X` has two).
-(perform_statement_call_proc
-  procedure: (perform_procedure . (label) @call.function)) @call
+; PERFORM <paragraph> [THRU <paragraph>], SORT/MERGE INPUT|OUTPUT PROCEDURE and GO TO calls are read
+; by the extractor (`cobol_flow_calls`), not here: a range calls every paragraph through its end, an
+; endpoint may be qualified (`A OF SEC`, a call to A in SEC), and `GO TO A B DEPENDING ON X` calls two
+; (a query match keeps one capture per statement).
 
 ; Data items (WORKING-STORAGE / LINKAGE / copybook fields). Each becomes a node — this is how
 ; "Advanced Data Formats" (COMP/COMP-3/Zoned/Signed usages) and "Complex Copybook Structures"

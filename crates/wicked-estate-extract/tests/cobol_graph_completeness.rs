@@ -480,7 +480,8 @@ fn cics_and_sql_calls_and_data_uses_start_from_the_paragraph() {
     let ex = extract("LINKPGM", &text);
     assert_eq!(calls_from(&ex, "1000-LINK"), ["SUBPGM"]);
     assert_eq!(refs_from(&ex, "1000-LINK"), ["WS-A", "WS-B"]);
-    assert!(calls_from(&ex, "LINKPGM").is_empty());
+    // A call to another program is the program's too (see the lineage projection below).
+    assert_eq!(calls_from(&ex, "LINKPGM"), ["SUBPGM"]);
     assert!(refs_from(&ex, "LINKPGM").is_empty());
 }
 
@@ -510,4 +511,207 @@ fn recovery_built_headers_are_not_paragraphs_but_a_header_without_a_period_is() 
         &text,
         &["MAIN-PARA", "2000-SEND-MAP", "2000-SEND-MAP-EXIT"],
     );
+}
+
+// ── round-1 review folds ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_copy_without_its_own_period_hides_only_copy_and_member() {
+    // A COPY with no period of its own (a compile error) must not run on to the next period: that
+    // one ends the next paragraph's header, and blanking up to it lost the paragraph and gave its
+    // CALL to the paragraph before.
+    let text = program(
+        "COPYNOP",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    MOVE WS-A TO WS-B",
+            "    COPY CSUTLDPY",
+            "AFTER-PARA.",
+            "    CALL 'SUBPGM'.",
+        ],
+    );
+    let ex = extract("COPYNOP", &text);
+    assert_eq!(function_names(&ex), ["MAIN-PARA", "AFTER-PARA"]);
+    assert_eq!(calls_from(&ex, "AFTER-PARA"), ["SUBPGM"]);
+    assert!(calls_from(&ex, "MAIN-PARA").is_empty());
+}
+
+#[test]
+fn a_copy_statement_ends_at_its_own_period_through_of_suppress_and_replacing() {
+    let text = program(
+        "COPYOPS",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    COPY CSUTLDPY OF SYSLIB SUPPRESS",
+            "         REPLACING ==:TAG:== BY ==WS==",
+            "                   LEADING ==X== BY ==Y==",
+            "                   OLD-NAME BY NEW-NAME.",
+            "NEXT-PARA.",
+            "    CALL 'SUBPGM'.",
+        ],
+    );
+    let ex = extract("COPYOPS", &text);
+    assert_eq!(function_names(&ex), ["MAIN-PARA", "NEXT-PARA"]);
+    assert_eq!(calls_from(&ex, "NEXT-PARA"), ["SUBPGM"]);
+}
+
+/// Two sections that both have paragraphs `A-PARA` and `Z-PARA` (legal: a paragraph name is
+/// unique within its section), with a different paragraph between them in each.
+fn two_sections(perform: &str) -> String {
+    program(
+        "QUALPGM",
+        DATA,
+        &[
+            "FIRST-SECTION SECTION.",
+            "MAIN-PARA.",
+            perform,
+            "    GOBACK.",
+            "A-PARA.",
+            "    EXIT.",
+            "M1-PARA.",
+            "    EXIT.",
+            "Z-PARA.",
+            "    EXIT.",
+            "SECOND-SECTION SECTION.",
+            "A-PARA.",
+            "    EXIT.",
+            "M2-PARA.",
+            "    EXIT.",
+            "Z-PARA.",
+            "    EXIT.",
+        ],
+    )
+}
+
+#[test]
+fn a_qualified_perform_thru_runs_the_range_in_the_named_section() {
+    let ex = extract(
+        "QUALPGM",
+        &two_sections("    PERFORM A-PARA OF SECOND-SECTION THRU Z-PARA IN SECOND-SECTION."),
+    );
+    assert_eq!(
+        calls_from(&ex, "MAIN-PARA"),
+        ["A-PARA", "M2-PARA", "Z-PARA"]
+    );
+}
+
+#[test]
+fn an_unqualified_perform_thru_runs_the_range_in_its_own_section() {
+    // COBOL: an unqualified paragraph name means the one in the referring paragraph's section.
+    let ex = extract("QUALPGM", &two_sections("    PERFORM A-PARA THRU Z-PARA."));
+    assert_eq!(
+        calls_from(&ex, "MAIN-PARA"),
+        ["A-PARA", "M1-PARA", "Z-PARA"]
+    );
+}
+
+#[test]
+fn a_perform_thru_with_an_ambiguous_endpoint_runs_no_guessed_range() {
+    // From SECOND-SECTION's own paragraph the endpoints are its own; from a paragraph outside
+    // every section, `A-PARA` names two paragraphs, so no range is guessed: only the named ones.
+    let text = program(
+        "AMBIGPGM",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    PERFORM A-PARA THRU Z-PARA.",
+            "    GOBACK.",
+            "ONE SECTION.",
+            "A-PARA.",
+            "    EXIT.",
+            "M1-PARA.",
+            "    EXIT.",
+            "Z-PARA.",
+            "    EXIT.",
+            "TWO SECTION.",
+            "A-PARA.",
+            "    EXIT.",
+            "M2-PARA.",
+            "    EXIT.",
+            "Z-PARA.",
+            "    EXIT.",
+        ],
+    );
+    let ex = extract("AMBIGPGM", &text);
+    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["A-PARA", "Z-PARA"]);
+}
+
+#[test]
+fn a_jump_to_its_own_paragraph_is_no_call() {
+    // Estate stores no self-edges (the resolvers drop self-candidates), so a GO TO or PERFORM of
+    // the paragraph it sits in would park, or bind to a same-named paragraph in another program.
+    let text = program(
+        "LOOPPGM",
+        DATA,
+        &[
+            "LOOP-PARA.",
+            "    MOVE WS-A TO WS-B",
+            "    IF WS-FLAG = 'Y'",
+            "        GO TO LOOP-PARA",
+            "    END-IF",
+            "    PERFORM DONE-PARA.",
+            "DONE-PARA.",
+            "    EXIT.",
+        ],
+    );
+    let ex = extract("LOOPPGM", &text);
+    assert_eq!(calls_from(&ex, "LOOP-PARA"), ["DONE-PARA"]);
+    assert!(
+        !ex.refs
+            .iter()
+            .any(|r| r.kind == EdgeKind::Calls && r.raw_name == "LOOP-PARA"),
+        "a self-targeting call must not be a ref"
+    );
+}
+
+#[test]
+fn sort_input_and_output_procedures_call_every_paragraph_of_their_range() {
+    let text = program(
+        "SORTPGM",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    SORT SORT-FILE ON ASCENDING KEY WS-A",
+            "        INPUT PROCEDURE IS 1000-IN THRU 1000-IN-EXIT",
+            "        OUTPUT PROCEDURE 2000-OUT",
+            "    GOBACK.",
+            "1000-IN.",
+            "    MOVE WS-A TO WS-B.",
+            "1000-MID.",
+            "    MOVE WS-B TO WS-A.",
+            "1000-IN-EXIT.",
+            "    EXIT.",
+            "2000-OUT.",
+            "    EXIT.",
+        ],
+    );
+    let ex = extract("SORTPGM", &text);
+    assert_eq!(
+        calls_from(&ex, "MAIN-PARA"),
+        ["1000-IN", "1000-IN-EXIT", "1000-MID", "2000-OUT"]
+    );
+}
+
+#[test]
+fn a_call_to_another_program_is_also_the_programs_call() {
+    // Lineage walks Calls only: the program must still list the programs its paragraphs call, as
+    // a program → program edge next to the paragraph's. PERFORM and GO TO stay paragraph-only.
+    let text = program(
+        "CALLPGM",
+        DATA,
+        &[
+            "MAIN-PARA.",
+            "    PERFORM 1000-CALL.",
+            "    GOBACK.",
+            "1000-CALL.",
+            "    CALL 'SUBPGM' USING WS-A",
+            "    EXEC CICS XCTL PROGRAM('NEXTPGM') END-EXEC.",
+        ],
+    );
+    let ex = extract("CALLPGM", &text);
+    assert_eq!(calls_from(&ex, "1000-CALL"), ["NEXTPGM", "SUBPGM"]);
+    assert_eq!(calls_from(&ex, "CALLPGM"), ["NEXTPGM", "SUBPGM"]);
+    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["1000-CALL"]);
 }

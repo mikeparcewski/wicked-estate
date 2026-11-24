@@ -7,7 +7,7 @@
 //!
 //! | Source construct | Stored as |
 //! |---|---|
-//! | `EXEC CICS LINK/XCTL PROGRAM('P')` | `Calls` ref paragraph → `P` (any language; parks if absent) |
+//! | `EXEC CICS LINK/XCTL PROGRAM('P')` | `Calls` refs paragraph → `P` and program → `P` (any language; parks if absent) |
 //! | `EXEC CICS SEND MAP('M') [MAPSET('S')]` | `other:writes` edge program → shared `cics-map:S.M` |
 //! | `EXEC CICS RECEIVE MAP('M') [MAPSET('S')]` | `other:reads` edge program → shared `cics-map:S.M` |
 //! | `EXEC SQL SELECT … FROM T` (and cursors, subselects, joins, MERGE `USING`) | `other:reads` edge program → shared `db2:T` |
@@ -28,7 +28,9 @@
 //!
 //! **Every source is a real node** of this extraction. Calls and data uses (the `Calls` and
 //! `References` refs above) start from the innermost paragraph or section holding the construct,
-//! as the tree-sitter extractor's PERFORM and data-name refs do. Every other link starts from the
+//! as the tree-sitter extractor's PERFORM and data-name refs do; a call to another program (LINK,
+//! XCTL, and the extractor's `CALL`) is also the program's, so lineage, which walks `Calls`
+//! only, lists a program's callee programs. Every other link starts from the
 //! program Module whose span holds the construct (nested programs pick the innermost), else the
 //! first program, else the copybook node, else the File node. Literal inference (dynamic calls,
 //! map names), labels and DD names are scoped to that program. A shared target is minted by the referencing file as a BOUNDARY record
@@ -296,7 +298,7 @@ static RE_PROCEDURE_END: LazyLock<Regex> = LazyLock::new(|| {
 
 /// The text the COBOL grammar parses: `text` with every `COPY …` statement inside a PROCEDURE
 /// DIVISION turned into `EXIT` plus spaces, its terminating period kept (same length; line breaks
-/// kept), or `None` when there is none.
+/// kept), or `None` when there is none. See [`copy_statement_end`] for where a COPY ends.
 ///
 /// arborium-cobol cannot parse what follows such a COPY: `COPY CSSETATY REPLACING ==A== BY ==B==`
 /// is an error, and after `COPY 'CSSTRPFY' .` the next paragraph header is an error, so that
@@ -311,7 +313,8 @@ pub(crate) fn grammar_view(text: &str) -> Option<String> {
     let code = RE_PSEUDO_TEXT
         .replace_all(&code, |c: &regex::Captures| blank(&c[0]))
         .into_owned();
-    let mut ranges = Vec::new();
+    // (COPY's first byte, the end of what is hidden, whether that end is its own period)
+    let mut ranges: Vec<(usize, usize, bool)> = Vec::new();
     let mut at = 0;
     while let Some(div) = RE_PROCEDURE_DIVISION.find_at(&code, at) {
         let end = RE_PROCEDURE_END
@@ -321,16 +324,16 @@ pub(crate) fn grammar_view(text: &str) -> Option<String> {
             let from = div.end() + c.start();
             // The match may start on the separator before COPY.
             let from = from + code[from..].find(['C', 'c']).unwrap_or(0);
-            // The statement ends at the first period followed by a space, a line end or EOF. A
-            // COPY with no period (a compile error) hides only `COPY <member>`.
-            let bytes = code.as_bytes();
+            // Ranges are disjoint: a COPY inside the last one's REPLACING operands is not another.
+            if ranges.last().is_some_and(|&(_, stop, _)| from < stop) {
+                continue;
+            }
             let named = div.end() + c.end();
-            let stop = (named..end)
-                .find(|&i| {
-                    bytes[i] == b'.' && bytes.get(i + 1).is_none_or(|b| b.is_ascii_whitespace())
-                })
-                .unwrap_or(named);
-            ranges.push((from, stop));
+            let (stop, period) = match copy_statement_end(&code, named, end) {
+                Some(p) => (p, true),
+                None => (named, false),
+            };
+            ranges.push((from, stop, period));
         }
         at = end.max(div.end());
     }
@@ -338,10 +341,13 @@ pub(crate) fn grammar_view(text: &str) -> Option<String> {
         return None;
     }
     let mut view = text.as_bytes().to_vec();
-    for (from, to) in ranges {
-        // `COPY` → `EXIT`; the rest up to (not including) the period → spaces.
-        view[from..from + 4].copy_from_slice(b"EXIT");
-        for b in &mut view[from + 4..to] {
+    for (from, to, period) in ranges {
+        // `COPY` → `EXIT`; the rest up to (not including) the period → spaces. A COPY with no
+        // period of its own (a compile error) hides only `COPY <member>` (6 bytes or more) and
+        // becomes `EXIT.`, so a paragraph header after it still parses.
+        let stmt: &[u8] = if period { b"EXIT" } else { b"EXIT." };
+        view[from..from + stmt.len()].copy_from_slice(stmt);
+        for b in &mut view[from + stmt.len()..to] {
             if *b != b'\n' && *b != b'\r' {
                 *b = b' ';
             }
@@ -349,6 +355,69 @@ pub(crate) fn grammar_view(text: &str) -> Option<String> {
     }
     // Only ASCII bytes were written over whole statements' bytes, so this is valid UTF-8.
     String::from_utf8(view).ok()
+}
+
+/// The byte of the period that ends the COPY statement whose member name ends at `named`, or
+/// `None` when it has none (a compile error).
+///
+/// The period must follow the statement's own words: `OF|IN <library>`, `SUPPRESS`, and after
+/// `REPLACING` the operand pairs, `[LEADING|TRAILING] <operand> BY <operand>`. Pseudo-text and
+/// literal operands are already blank in `code`; a word operand stands next to its `BY`. Any other
+/// word (the next statement, or the next paragraph's header) means no period of its own, so the
+/// scan stops within the statement and the whole pass stays linear.
+fn copy_statement_end(code: &str, named: usize, end: usize) -> Option<usize> {
+    let mut words = Vec::new();
+    let mut i = named;
+    let bytes = code.as_bytes();
+    while i < end {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() || b == b',' || b == b';' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < end && !(bytes[i].is_ascii_whitespace() || bytes[i] == b',' || bytes[i] == b';') {
+            i += 1;
+        }
+        let word = &code[start..i];
+        // A period ends the statement when a separator or the end follows it.
+        let (word, period) = match word.strip_suffix('.') {
+            Some(w) => (w, Some(i - 1)),
+            None => (word, None),
+        };
+        if !word.is_empty() {
+            words.push(word.to_ascii_uppercase());
+            // Words are judged once their neighbours are known: the word before the last.
+            if words.len() >= 2 && !copy_word_fits(&words, words.len() - 2) {
+                return None;
+            }
+        }
+        if let Some(p) = period {
+            let fits = words.last().is_none() || copy_word_fits(&words, words.len() - 1);
+            return fits.then_some(p);
+        }
+    }
+    None
+}
+
+/// Whether `words[i]` (the words after a COPY's member name) can be part of that COPY statement.
+fn copy_word_fits(words: &[String], i: usize) -> bool {
+    let w = words[i].as_str();
+    let before = i.checked_sub(1).map(|j| words[j].as_str());
+    let after = words.get(i + 1).map(String::as_str);
+    let replacing = words[..i].iter().any(|w| w == "REPLACING");
+    match w {
+        "REPLACING" => !replacing,
+        "OF" | "IN" | "SUPPRESS" => !replacing,
+        "BY" | "LEADING" | "TRAILING" => replacing,
+        _ if !replacing => matches!(before, Some("OF" | "IN")),
+        _ => {
+            before == Some("BY")
+                || matches!(after, Some("BY"))
+                || before == Some("LEADING")
+                || before == Some("TRAILING")
+        }
+    }
 }
 
 // ── lexical views ──────────────────────────────────────────────────────────────────────────────
@@ -1019,8 +1088,19 @@ impl Pass<'_> {
                             self.dynamic_ref_name(prog, &op.value)
                         };
                         if !raw.is_empty() {
+                            // From the paragraph, and from the program too (a call to another
+                            // program is the program's: lineage walks Calls only).
+                            let unit = self.anchors.unit(whole.start());
+                            if unit != from {
+                                self.out.refs.push(UnresolvedRef::new(
+                                    from.clone(),
+                                    raw.clone(),
+                                    EdgeKind::Calls,
+                                    loc.clone(),
+                                ));
+                            }
                             self.out.refs.push(UnresolvedRef::new(
-                                self.anchors.unit(whole.start()),
+                                unit,
                                 raw,
                                 EdgeKind::Calls,
                                 loc.clone(),
@@ -1720,14 +1800,15 @@ mod tests {
         // Fails on main: refs/edges came from `synthetic("cobol-pgm", path)`, never a node.
         let ex = run("cbl/ORDPGM.cbl", ORDPGM);
         let pgm = module_sym(&ex, "ORDPGM");
-        let link = ex
-            .refs
-            .iter()
-            .find(|r| r.raw_name == "SHIPPGM")
-            .expect("LINK ref");
-        // A call starts from the paragraph that makes it; a table read from the program.
-        assert_eq!(link.from, paragraph_sym(&ex, "MAIN-PARA"));
-        assert_eq!(link.kind, EdgeKind::Calls);
+        let link: Vec<_> = ex.refs.iter().filter(|r| r.raw_name == "SHIPPGM").collect();
+        // A call starts from the paragraph that makes it, and a call to another program from the
+        // program too; a table read from the program.
+        let sources: BTreeSet<_> = link.iter().map(|r| r.from.clone()).collect();
+        assert_eq!(
+            sources,
+            BTreeSet::from([paragraph_sym(&ex, "MAIN-PARA"), pgm.clone()])
+        );
+        assert!(link.iter().all(|r| r.kind == EdgeKind::Calls));
         let reads = edge_to(
             &ex,
             &edge_tags::other(edge_tags::READS),
@@ -1919,7 +2000,11 @@ mod tests {
             })
             .map(|r| r.raw_name.as_str())
             .collect();
-        assert_eq!(flag_names, vec!["cobol-dynamic-var:WS-FLAG"]);
+        // From MAIN-PARA and from the program.
+        assert_eq!(
+            flag_names,
+            vec!["cobol-dynamic-var:WS-FLAG", "cobol-dynamic-var:WS-FLAG"]
+        );
     }
 
     #[test]
@@ -2001,9 +2086,10 @@ mod tests {
             c.iter()
                 .filter(|r| *r == "cobol-dynamic-var:WS-PGM")
                 .count(),
-            2,
-            "{c:?}"
+            4,
+            "the CALL and the XCTL, each from MAIN-PARA and from the program: {c:?}"
         );
+        assert_eq!(c.len(), 4, "{c:?}");
         let f = ex.nodes.iter().find(|n| n.name == "WS-PGM").unwrap();
         assert_eq!(f.metadata["dynamic_call"]["status"], "unresolved");
         assert!(
@@ -2069,9 +2155,14 @@ mod tests {
             .iter()
             .filter(|r| r.kind == EdgeKind::Calls)
             .map(|r| {
-                // Each call starts from its paragraph; the pair names the program holding it.
+                // Each call starts from its paragraph, and from its program (a call to another
+                // program); the pair names the program holding it.
                 let from = ex.nodes.iter().find(|n| n.symbol == r.from).unwrap();
-                assert_eq!(from.kind, NodeKind::Function, "{}", from.name);
+                assert!(
+                    matches!(from.kind, NodeKind::Function | NodeKind::Module),
+                    "{}",
+                    from.name
+                );
                 let at = r.location.span.start_byte;
                 let prog = ex
                     .nodes
@@ -2572,6 +2663,41 @@ mod tests {
             assert_eq!(&clean[72..], &src[72..]);
             assert_eq!(&code[72..], &src[72..]);
         }
+    }
+
+    #[test]
+    fn grammar_view_hides_a_copy_up_to_its_own_period_only() {
+        let line = |l: &str| format!("       {l}\n");
+        let head = "       PROCEDURE DIVISION.\n".to_string();
+        // Terminated, through OF / SUPPRESS / REPLACING: up to its period.
+        let text = head.clone()
+            + &line("COPY CSUTLDPY OF SYSLIB SUPPRESS REPLACING ==A== BY ==B== X BY Y.")
+            + &line("NEXT-PARA.");
+        let view = grammar_view(&text).unwrap();
+        assert_eq!(view.len(), text.len());
+        assert!(view.contains("EXIT"));
+        assert!(!view.contains("CSUTLDPY") && !view.contains("REPLACING"));
+        assert!(view.contains("NEXT-PARA."));
+        // No period of its own: only `COPY <member>`; the next header and statement keep theirs.
+        let text = head.clone()
+            + &line("COPY CSUTLDPY")
+            + &line("AFTER-PARA.")
+            + &line("    MOVE A TO B.");
+        let view = grammar_view(&text).unwrap();
+        assert!(
+            view.contains("AFTER-PARA.") && view.contains("MOVE A TO B."),
+            "{view}"
+        );
+        // Many unterminated COPYs: each hides only itself (linear, ranges disjoint).
+        let mut text = head;
+        for _ in 0..50 {
+            text += &line("COPY BOOK");
+            text += &line("    MOVE A TO B");
+        }
+        text += &line(".");
+        let view = grammar_view(&text).unwrap();
+        assert_eq!(view.matches("EXIT").count(), 50);
+        assert_eq!(view.matches("MOVE A TO B").count(), 50);
     }
 
     #[test]

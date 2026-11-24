@@ -33,7 +33,8 @@ pub struct SiblingGap {
 pub struct Completeness {
     /// Lines in the source (a final line without a newline counts).
     pub total_lines: u32,
-    /// 0-based line the last-ending checked node ends on; `None` when no node was checked.
+    /// 0-based last line a checked node covers (an exclusive end at column 0 covers the line
+    /// before it); `None` when no node was checked.
     pub last_end_line: Option<u32>,
     /// 0-based numbers of the non-trivia lines after `last_end_line` (every non-trivia line when
     /// no node was checked).
@@ -67,12 +68,18 @@ pub fn check<'a>(
         .filter(|n| n.kind != NodeKind::File)
         .map(|n| {
             let s = n.location.span;
+            // The end is exclusive: an end at column 0 of a later line does not cover that line.
+            let end_line = if s.end_col == 0 && s.end_line > s.start_line {
+                s.end_line - 1
+            } else {
+                s.end_line
+            };
             (
                 n.name.as_str(),
                 s.start_byte,
                 s.end_byte,
                 s.start_line,
-                s.end_line,
+                end_line,
             )
         })
         .collect();
@@ -122,13 +129,15 @@ mod tests {
         let starts: Vec<u32> = std::iter::once(0)
             .chain(src.match_indices('\n').map(|(i, _)| i as u32 + 1))
             .collect();
+        // Ends before the newline of line `last`, as a tree-sitter span of a whole line does.
+        let end_byte = starts[last as usize + 1] - 1;
         let span = Span {
             start_byte: starts[first as usize],
-            end_byte: starts[last as usize + 1] - 1,
+            end_byte,
             start_line: first,
             start_col: 0,
             end_line: last,
-            end_col: 0,
+            end_col: end_byte - starts[last as usize],
         };
         Node::new(
             SymbolId::from(format!("t {name}")),
@@ -184,5 +193,30 @@ mod tests {
         file.kind = NodeKind::File;
         let c2 = check(SRC, nodes.iter().chain([&file]), |_| false);
         assert_eq!(c2.sibling_gaps, c.sibling_gaps);
+    }
+
+    /// A span whose exclusive end is the start of a line (`end_col` 0) does not cover that line.
+    fn through_newline(name: &str, src: &str, first: u32, last: u32) -> Node {
+        let mut n = node(name, src, first, last);
+        n.location.span.end_byte += 1;
+        n.location.span.end_line += 1;
+        n.location.span.end_col = 0;
+        n
+    }
+
+    #[test]
+    fn an_exclusive_end_at_column_zero_does_not_cover_its_line() {
+        let src = "a\nlost\n";
+        let c = check(src, &[through_newline("A", src, 0, 0)], |_| false);
+        assert_eq!(
+            (c.last_end_line, c.uncovered_tail.clone()),
+            (Some(0), vec![1])
+        );
+        // The same for the line after a sibling: A covers `a\n` only, so `b` is a gap.
+        let src = "a\nb\nc\n";
+        let nodes = [through_newline("A", src, 0, 0), node("C", src, 2, 2)];
+        let c = check(src, &nodes, |_| false);
+        assert_eq!(c.sibling_gaps.len(), 1, "{c:?}");
+        assert_eq!(c.sibling_gaps[0].lines, vec![1]);
     }
 }

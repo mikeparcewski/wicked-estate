@@ -113,6 +113,29 @@ fn path_names(db: &Path, from: &str, to: &str) -> Vec<String> {
     names
 }
 
+fn lineage_names(db: &Path, name: &str) -> BTreeSet<String> {
+    query(db, &["lineage", name])["dependencies"]
+        .as_array()
+        .expect("dependencies")
+        .iter()
+        .map(|d| d["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// A fixed-format COBOL program with `body` as its PROCEDURE DIVISION, written from column 8.
+fn cobol(id: &str, body: &[&str]) -> String {
+    let mut out = vec![
+        "       IDENTIFICATION DIVISION.".to_string(),
+        format!("       PROGRAM-ID. {id}."),
+        "       DATA DIVISION.".to_string(),
+        "       WORKING-STORAGE SECTION.".to_string(),
+        "       01  WS-A PIC X.".to_string(),
+        "       PROCEDURE DIVISION.".to_string(),
+    ];
+    out.extend(body.iter().map(|l| format!("       {l}")));
+    out.join("\n") + "\n"
+}
+
 fn assert_nothing_pruned(stderr: &str) {
     assert!(
         !stderr.contains("pruned"),
@@ -159,11 +182,19 @@ fn brief_fixture_links_resolve_through_the_user_queries() {
 
     // JCL STEP1 → ORDPGM → SHIPPGM → TAXPGM, as two legs + TAXPGM's blast radius (the shortest
     // STEP1 → TAXPGM path is the direct `CALL 'TAXPGM'`, which is correct). The LINK is made by
-    // paragraph MAIN-PARA, which the program contains.
+    // paragraph MAIN-PARA, and a call to another program is the program's call too.
     assert_eq!(
         path_names(&db, "STEP1", "SHIPPGM"),
-        ["STEP1", "ORDPGM", "MAIN-PARA", "SHIPPGM"]
+        ["STEP1", "ORDPGM", "SHIPPGM"]
     );
+    assert!(dependent_names(&db, "SHIPPGM").contains("MAIN-PARA"));
+    let lineage = lineage_names(&db, "ORDPGM");
+    for callee in ["SHIPPGM", "TAXPGM"] {
+        assert!(
+            lineage.contains(callee),
+            "{callee} not in ORDPGM's lineage: {lineage:?}"
+        );
+    }
     assert_eq!(path_names(&db, "SHIPPGM", "TAXPGM"), ["SHIPPGM", "TAXPGM"]);
     let tax = dependent_names(&db, "TAXPGM");
     for who in ["SHIPPGM", "ORDPGM", "STEP1"] {
@@ -174,14 +205,14 @@ fn brief_fixture_links_resolve_through_the_user_queries() {
     }
 
     // The dynamic CALL WS-PGM ('PRICEPGM'): no PRICEPGM in this repo, so it parks under the
-    // prefixed name, and WS-PGM says why it resolved to that name.
+    // prefixed name (from CALC-PARA and from ORDPGM), and WS-PGM says why it resolved to that name.
     let store = SqliteStore::open(&db).unwrap();
     assert_eq!(
         store
             .unresolved_refs_for_name("cobol-dynamic-call:PRICEPGM")
             .unwrap()
             .len(),
-        1
+        2
     );
     let nodes = store.all_nodes().unwrap();
     assert!(
@@ -224,17 +255,24 @@ fn dynamic_call_binds_at_heuristic_and_backfills_when_the_program_appears() {
         .filter(|e| e.kind != EdgeKind::Contains)
         .filter(|e| nodes.get(&e.target).is_some_and(|n| n.name == "PRICEPGM"))
         .collect();
+    // The paragraph that makes the CALL, and its program (a call to another program is both's).
+    let sources: BTreeSet<&str> = to_price
+        .iter()
+        .map(|e| nodes[&e.source].name.as_str())
+        .collect();
     assert_eq!(
-        to_price.len(),
-        1,
-        "only the dynamic-call resolver binds PRICEPGM: {to_price:?}"
+        sources,
+        BTreeSet::from(["CALC-PARA", "ORDPGM"]),
+        "{to_price:?}"
     );
-    let edge = to_price[0].clone();
-    assert_eq!(edge.kind, EdgeKind::Calls);
-    // The paragraph that makes the CALL.
-    assert_eq!(nodes[&edge.source].name, "CALC-PARA");
-    assert_eq!(edge.resolved_by, "cobol-dynamic-call");
-    assert!((edge.confidence.get() - 0.5).abs() < 1e-6, "Heuristic tier");
+    for edge in &to_price {
+        assert_eq!(edge.kind, EdgeKind::Calls);
+        assert_eq!(
+            edge.resolved_by, "cobol-dynamic-call",
+            "only the dynamic-call resolver binds PRICEPGM: {to_price:?}"
+        );
+        assert!((edge.confidence.get() - 0.5).abs() < 1e-6, "Heuristic tier");
+    }
     assert!(
         store
             .unresolved_refs_for_name("cobol-dynamic-call:PRICEPGM")
@@ -457,5 +495,86 @@ fn shared_ids_fall_back_to_the_boundary_when_the_definition_is_removed() {
         edges
             .iter()
             .any(|(a, _, b)| a == "PAYCALC.PAYIN" && b == "PROD.PAY.INPUT")
+    );
+}
+
+/// Programs whose calls sit in paragraphs: PGMA's MAIN-PARA calls PGMB, whose 1000-WORK calls
+/// PGMC. PGMA's LOOP-PARA jumps to itself; PGMC has a paragraph of the same name.
+fn paragraph_call_chain(root: &Path) {
+    fs::create_dir_all(root).unwrap();
+    let a = cobol(
+        "PGMA",
+        &[
+            "MAIN-PARA.",
+            "    CALL 'PGMB' USING WS-A",
+            "    PERFORM LOOP-PARA",
+            "    GOBACK.",
+            "LOOP-PARA.",
+            "    IF WS-A = 'Y'",
+            "        GO TO LOOP-PARA",
+            "    END-IF.",
+        ],
+    );
+    let b = cobol(
+        "PGMB",
+        &[
+            "MAIN-PARA.",
+            "    PERFORM 1000-WORK",
+            "    GOBACK.",
+            "1000-WORK.",
+            "    CALL 'PGMC'.",
+        ],
+    );
+    let c = cobol("PGMC", &["LOOP-PARA.", "    GOBACK."]);
+    fs::write(root.join("PGMA.cbl"), a).unwrap();
+    fs::write(root.join("PGMB.cbl"), b).unwrap();
+    fs::write(root.join("PGMC.cbl"), c).unwrap();
+}
+
+#[test]
+fn lineage_of_a_program_follows_the_calls_its_paragraphs_make() {
+    let tmp = scratch("lineage");
+    let root = tmp.0.join("repo");
+    paragraph_call_chain(&root);
+    let db = tmp.0.join("graph.db");
+    assert_nothing_pruned(&index(&root, &db));
+    let lineage = lineage_names(&db, "PGMA");
+    for callee in ["PGMB", "PGMC"] {
+        assert!(
+            lineage.contains(callee),
+            "{callee} not in PGMA's lineage: {lineage:?}"
+        );
+    }
+}
+
+#[test]
+fn a_paragraph_jumping_to_itself_binds_to_no_same_named_paragraph_elsewhere() {
+    let tmp = scratch("selfjump");
+    let root = tmp.0.join("repo");
+    paragraph_call_chain(&root);
+    let db = tmp.0.join("graph.db");
+    assert_nothing_pruned(&index(&root, &db));
+    let store = SqliteStore::open(&db).unwrap();
+    let nodes: HashMap<_, Node> = store
+        .all_nodes()
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.symbol.clone(), n))
+        .collect();
+    let file = |s: &wicked_estate_core::SymbolId| nodes[s].location.file.clone();
+    let cross: Vec<_> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == EdgeKind::Calls)
+        .filter(|e| nodes.get(&e.target).is_some_and(|n| n.name == "LOOP-PARA"))
+        .filter(|e| file(&e.source) != file(&e.target))
+        .collect();
+    assert!(cross.is_empty(), "a call bound across programs: {cross:?}");
+    assert!(
+        store
+            .unresolved_refs_for_name("LOOP-PARA")
+            .unwrap()
+            .is_empty()
     );
 }
