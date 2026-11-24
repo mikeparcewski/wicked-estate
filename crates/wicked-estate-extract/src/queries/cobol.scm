@@ -37,6 +37,6 @@
 ; Data references by name: every qualified data name (`MOVE 1 TO ORD-ID`, `CALL X USING ORD-REC`,
 ; `REDEFINES A`, `OCCURS … DEPENDING ON CNT`, `ORD-ID OF ORD-REC` → its first WORD) becomes a
 ; `References` ref, which binds to the Field it names, in this file or in a copybook. PERFORM / GO TO
-; labels are also qualified words; the COBOL text supplement (`cobol_links`) drops refs that name a
-; paragraph or section, and dedupes per (source, name).
+; labels are also qualified words: `cobol_links::tag_roles` drops them by their place in the tree,
+; and tags every kept ref with its role (data, label, program) and its OF/IN qualifiers.
 (qualified_word . (WORD) @reference.name)

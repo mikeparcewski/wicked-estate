@@ -18,6 +18,44 @@ use serde::{Deserialize, Serialize};
 /// prefix survives in the parked `unresolved_refs` row, so a back-fill re-binds it the same way.
 pub const COBOL_DYNAMIC_CALL_PREFIX: &str = "cobol-dynamic-call:";
 
+/// The role a COBOL ref plays at its site, carried in [`UnresolvedRef::hints`] (wicked-estate#545).
+///
+/// The COBOL extractor tags every data use, procedure label and program call by its place in the
+/// parse tree, and the scoped resolver binds a tagged ref only to a target of that role. Hints are
+/// not persisted: a parked row re-resolved by back-fill is bound by name alone, like every
+/// hint-driven ref (#141); re-indexing its file restores the role.
+pub mod cobol_ref {
+    /// Hints key: [`DATA`], [`LABEL`] or [`PROGRAM`].
+    pub const ROLE: &str = "cobol_role";
+    /// A data use (`MOVE 1 TO ID OF CUSTOMER`, `:HOSTVAR`, `COMMAREA(REC)`): binds a COBOL data
+    /// item (a `Field`).
+    pub const DATA: &str = "data";
+    /// A procedure label (`PERFORM P`, `PERFORM A THRU B`): binds a COBOL paragraph or section.
+    pub const LABEL: &str = "label";
+    /// A program call (`CALL 'X'`, `EXEC CICS LINK/XCTL PROGRAM('X')`): binds a program `Module`.
+    pub const PROGRAM: &str = "program";
+    /// Hints key of a data use: its `OF`/`IN` qualifiers, innermost first (`ID OF CUST OF F` →
+    /// `["CUST", "F"]`).
+    pub const QUALIFIERS: &str = "cobol_of";
+    /// Hints key of a data use or label: the copybooks (UPPERCASE member names) its program COPYs.
+    pub const COPIES: &str = "cobol_copies";
+    /// `Field` metadata key: the groups (and FD) holding a data item, innermost first; what an
+    /// `OF`/`IN` qualifier is checked against.
+    pub const PARENTS: &str = "cobol_parents";
+    /// `Field` metadata key, `true` on an item whose outermost group in its file is not an 01/77
+    /// level: a copybook fragment COPYd under a program's group, which can qualify it too.
+    pub const OPEN: &str = "cobol_open";
+    /// `Field`/`Function` metadata key: the PROGRAM-ID of the program that holds the item or
+    /// paragraph (the innermost of nested programs).
+    pub const OWNER_PROGRAM: &str = "cobol_program";
+    /// Hints key of a data use or label in a program: the PROGRAM-IDs that hold it, innermost
+    /// first. A program sees its own items and those of the programs that contain it.
+    pub const PROGRAMS: &str = "cobol_programs";
+    /// `Field`/`Function` metadata key, and hints key of a data use or label: the copybook (its
+    /// UPPERCASE member name) the item, paragraph or ref is written in.
+    pub const COPYBOOK: &str = "cobol_copybook";
+}
+
 /// `raw_name` prefix of a JS/TS call whose callee is a LOCAL binding — a parameter, a destructured
 /// prop, a local declaration (wicked-estate#486): `local-binding:<name>`, or
 /// `local-binding:<name>:<symbol>` when the binding is a definition in the same file (a nested

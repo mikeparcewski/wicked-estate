@@ -89,23 +89,17 @@ fn stamp_fresh_redaction_epoch(conn: &Connection) -> Result<()> {
 }
 
 /// Meta key recording that every `nodes_fts` row is keyed by `rowid = nodes.symbol` (#420).
+/// Written by every rebuild for older readers; this build checks the rows themselves
+/// ([`fts_rowid_migrated`]), not the marker.
 pub const FTS_ROWID_KEY: &str = "fts_rowid";
 /// The only value of [`FTS_ROWID_KEY`]: FTS rowid = the node's interned sid.
 const FTS_ROWID_SID: &str = "sid";
-/// Name of the guard trigger [`rebuild_fts_all`] installs on the FTS content shadow table.
-const FTS_ROWID_GUARD: &str = "nodes_fts_rowid_guard";
-/// The guard: an FTS row inserted with a rowid that is NOT its symbol's sid clears the marker, so
-/// the next writer open rebuilds. Only a writer that predates #420 inserts such a row (an older
-/// binary on the same store: it inserts with an automatic rowid). Its own reads and writes stay
-/// correct (it deletes by symbol text), but this build's rowid-keyed deletes would miss the row,
-/// leaving a duplicate or, after an erasure, an orphan holding the erased text. The trigger lives
-/// in the database, so it fires for every SQLite writer, old binaries and already-open
-/// connections included; it is dropped with the table, and [`rebuild_fts_all`] re-creates it.
-/// `nodes_fts_content(id, c0, …)` is FTS5's content table: `id` = rowid, `c0` = `symbol`.
-const FTS_ROWID_GUARD_DDL: &str = "CREATE TRIGGER IF NOT EXISTS nodes_fts_rowid_guard \
-     AFTER INSERT ON nodes_fts_content \
-     WHEN NEW.id IS NOT (SELECT sid FROM symbols WHERE sym = NEW.c0) \
-     BEGIN DELETE FROM meta WHERE k = 'fts_rowid'; END";
+/// The guard trigger 0.35.x builds installed on FTS5's content shadow table `nodes_fts_content`
+/// (#420). SQLite refuses a trigger on a shadow table under `SQLITE_DBCONFIG_DEFENSIVE`, and the
+/// check runs when it parses the schema, so a defensive client (`node:sqlite`, `better-sqlite3`)
+/// could not read a store that held it (#570). Every writer open drops it
+/// ([`drop_legacy_fts_guard`]); [`fts_rowid_migrated`] checks the rows instead.
+const LEGACY_FTS_ROWID_GUARD: &str = "nodes_fts_rowid_guard";
 
 /// Rebuild `nodes_fts` from `nodes`, one row per node with `rowid = nodes.symbol` (#420).
 ///
@@ -114,8 +108,7 @@ const FTS_ROWID_GUARD_DDL: &str = "CREATE TRIGGER IF NOT EXISTS nodes_fts_rowid_
 /// row by the sid (the `nodes` primary key, never reused: `symbols.sid` is AUTOINCREMENT) makes
 /// every maintenance delete a rowid lookup. The table is dropped and re-created from its own stored
 /// definition, so no old segment (and no old term) survives, and the new segments are written in
-/// one pass. The guard trigger ([`FTS_ROWID_GUARD_DDL`]) is installed after the bulk insert (every
-/// row of which is sid-keyed by construction). Callers run this inside their own transaction.
+/// one pass. Callers run this inside their own transaction.
 fn rebuild_fts_all(conn: &Connection) -> Result<()> {
     let ddl: String = conn
         .query_row(
@@ -134,7 +127,6 @@ fn rebuild_fts_all(conn: &Connection) -> Result<()> {
            FROM nodes n JOIN symbols s ON s.sid = n.symbol",
     )
     .map_err(st)?;
-    conn.execute_batch(FTS_ROWID_GUARD_DDL).map_err(st)?;
     conn.execute(
         "INSERT OR REPLACE INTO meta(k, v) VALUES(?1, ?2)",
         params![FTS_ROWID_KEY, FTS_ROWID_SID],
@@ -143,24 +135,53 @@ fn rebuild_fts_all(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Migrated = the marker is set AND the guard trigger exists (either missing means rebuild).
+/// Migrated = `nodes_fts` holds exactly one row per node, keyed by the node's sid and carrying
+/// its symbol (#420, #570): every FTS row's rowid is a node's sid with that sid's symbol, and
+/// there are as many FTS rows as nodes (rowids are unique, so that is one row per node).
+///
+/// The rows themselves are the evidence, so no marker or trigger has to be trusted: a store
+/// written before #420 (automatic rowids), one an OLDER binary wrote to since (it deletes by
+/// symbol text and inserts with an automatic rowid), and a populated store with a missing or
+/// partial FTS table all fail it, and the next writer open rebuilds. One pass over the FTS rows
+/// with primary-key lookups; it runs on opens, not per query.
 fn fts_rowid_migrated(conn: &Connection) -> Result<bool> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE k=?1 AND v=?2) \
-            AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?3)",
-        params![FTS_ROWID_KEY, FTS_ROWID_SID, FTS_ROWID_GUARD],
+        "SELECT (SELECT COUNT(*) FROM nodes) = (SELECT COUNT(*) FROM nodes_fts) \
+            AND NOT EXISTS(SELECT 1 FROM nodes_fts f WHERE NOT EXISTS( \
+                SELECT 1 FROM nodes n JOIN symbols s ON s.sid = n.symbol \
+                WHERE n.symbol = f.rowid AND s.sym = f.symbol))",
+        [],
         |r| r.get::<_, i64>(0),
     )
     .map(|v| v != 0)
     .map_err(st)
 }
 
+/// Drop the 0.35.x shadow-table guard trigger when a store still has it (#570). Writer opens only:
+/// it is a schema write, and a read-only reader using this build is not defensive, so it can
+/// read the store either way.
+fn drop_legacy_fts_guard(conn: &Connection) -> Result<()> {
+    let present: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1)",
+            params![LEGACY_FTS_ROWID_GUARD],
+            |r| r.get(0),
+        )
+        .map_err(st)?;
+    if present {
+        conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {LEGACY_FTS_ROWID_GUARD}"))
+            .map_err(st)?;
+    }
+    Ok(())
+}
+
 /// One-time migration of a store written before #420, whose FTS rows carry arbitrary rowids
-/// (or one an older binary wrote to since, which the guard trigger flags by clearing the marker):
-/// rebuild them keyed by sid, in ONE `BEGIN IMMEDIATE` transaction. A crash rolls back to the old
-/// rows with no marker, so the next writer open re-runs it. Re-checked inside the transaction, so
-/// two first opens never both rebuild. Writer opens only ([`SqliteStore::open`] / `in_memory`):
-/// reads join on `symbol` text, so a read-only opener of an unmigrated store still answers right.
+/// (or one an older binary wrote to since): rebuild them keyed by sid, in ONE `BEGIN IMMEDIATE`
+/// transaction. A crash rolls back to the old rows, so the next writer open re-runs it.
+/// Re-checked inside the transaction, so two first opens never both rebuild. Writer opens
+/// ([`SqliteStore::open`] / `in_memory`) and the read-only currency check, which refuses a graph
+/// that would need the rebuild: reads join on `symbol` text, so a plain read-only opener of an
+/// unmigrated store still answers right.
 fn migrate_fts_rowids(conn: &Connection) -> Result<()> {
     if fts_rowid_migrated(conn)? {
         return Ok(());
@@ -1280,6 +1301,7 @@ impl SqliteStore {
         migrate_schema(&conn)?;
         stamp_fresh_redaction_epoch(&conn)?;
         migrate_fts_rowids(&conn)?;
+        drop_legacy_fts_guard(&conn)?;
         // Read history_enabled flag from meta (absent → OFF, the new default).
         // Old databases that never set this key default to OFF (no history) rather than ON.
         // Callers that want history must pass `--history` (or call set_history_enabled(true)).
@@ -1469,6 +1491,7 @@ impl SqliteStore {
         migrate_schema(&conn)?;
         stamp_fresh_redaction_epoch(&conn)?;
         migrate_fts_rowids(&conn)?;
+        drop_legacy_fts_guard(&conn)?;
         Ok(Self {
             conn,
             in_batch: false,
@@ -1993,7 +2016,7 @@ impl SqliteStore {
                 .map_err(st)?;
             // TS-S2A: erasure is total — support facts and base contributions naming the symbol
             // go too (support is otherwise never deleted outside `replace_edge_supports`).
-            for table in ["edge_supports", "edge_base"] {
+            for table in ["edge_supports", "edge_base", "edge_files"] {
                 self.conn
                     .execute(
                         &format!(
@@ -2453,6 +2476,7 @@ impl SqliteStore {
             ("node_files", "data"),
             ("edges", "data"),
             ("edge_base", "data"),
+            ("edge_files", "data"),
             ("edge_supports", "data"),
             ("edge_supports", "fact_id"),
             ("edge_history", "edge_json"),
@@ -2673,6 +2697,7 @@ impl SqliteStore {
                             "DELETE FROM edges WHERE source=?1 OR target=?1",
                             "DELETE FROM edge_base WHERE source=?1 OR target=?1",
                             "DELETE FROM edge_supports WHERE source=?1 OR target=?1",
+                            "DELETE FROM edge_files WHERE source=?1 OR target=?1",
                             "DELETE FROM unresolved_refs WHERE from_sym=?1",
                             "DELETE FROM annotations WHERE node_sym=?1",
                             "DELETE FROM symbols WHERE sid=?1",
@@ -3121,10 +3146,27 @@ impl SqliteStore {
     }
 }
 
+/// The name-prefix lookup statement (#358, #577). `bounded` = the prefix has a successor (`?2` is
+/// the exclusive upper bound, `?3` the limit); otherwise the range is open above (`?2` the limit),
+/// which only the empty prefix and a prefix of U+10FFFF characters produce. Two statements, not
+/// one with `?2 IS NULL OR …`: SQLite cannot use a bound inside an OR as an index constraint, so
+/// that form searched from the lower bound to the end of the index.
+fn name_prefix_sql(bounded: bool) -> &'static str {
+    if bounded {
+        "SELECT n.data FROM nodes n JOIN symbols s ON s.sid = n.symbol \
+         WHERE lower(n.name) >= ?1 AND lower(n.name) < ?2 \
+         ORDER BY lower(n.name), n.name, s.sym LIMIT ?3"
+    } else {
+        "SELECT n.data FROM nodes n JOIN symbols s ON s.sid = n.symbol \
+         WHERE lower(n.name) >= ?1 \
+         ORDER BY lower(n.name), n.name, s.sym LIMIT ?2"
+    }
+}
+
 /// The smallest string greater than every string that starts with `p` — `p` with its last
 /// incrementable code point incremented (surrogates skipped) — or `None` when no such string
 /// exists. The exclusive upper bound of an indexed prefix range (#358).
-fn prefix_successor(p: &str) -> Option<String> {
+pub(crate) fn prefix_successor(p: &str) -> Option<String> {
     let mut chars: Vec<char> = p.chars().collect();
     while let Some(c) = chars.pop() {
         let mut next = c as u32 + 1;
@@ -3660,10 +3702,48 @@ impl GraphWrite for SqliteStore {
                     OR excluded.evidence_count > edges.evidence_count",
             )
             .map_err(st)?;
+        // #543 edge contributions: when a second file asserts a key, record the row's contribution
+        // (its file and data) and this one; a key already recorded records this file's latest.
+        // The current contribution is the kept-aside base one for a supported key (TS-S2A), else
+        // the public row (a supported key's public row is a projection, never a file's own).
+        let mut record_owner = self
+            .conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO edge_files(source,target,kind,file,data) \
+                 SELECT source,target,kind,file,data FROM edge_base \
+                 WHERE source=?1 AND target=?2 AND kind=?3 AND file NOT IN ('', ?4) \
+                 UNION ALL \
+                 SELECT source,target,kind,file,data FROM edges \
+                 WHERE source=?1 AND target=?2 AND kind=?3 AND file NOT IN ('', ?4) \
+                   AND NOT EXISTS(SELECT 1 FROM edge_supports \
+                                  WHERE source=?1 AND target=?2 AND kind=?3)",
+            )
+            .map_err(st)?;
+        let mut record_mine = self
+            .conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO edge_files(source,target,kind,file,data) \
+                 SELECT ?1,?2,?3,?4,?5 WHERE EXISTS( \
+                   SELECT 1 FROM edge_files WHERE source=?1 AND target=?2 AND kind=?3)",
+            )
+            .map_err(st)?;
         // TS-S2A: while no support exists anywhere this is the original single-statement path.
         let supported = self.any_support()?;
         for (e, (src_sid, tgt_sid)) in edges.iter().zip(sids.iter()) {
             let kind = serde_json::to_string(&e.kind)?;
+            let data = serde_json::to_string(e)?;
+            // Use the location file when present; empty string when None (e.g. synthetic edges).
+            // After Fix A (wicked-estate-extract), Contains edges always carry a location, so this is always
+            // populated for tree-sitter-produced edges.
+            let file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
+            if !file.is_empty() {
+                record_owner
+                    .execute(params![src_sid, tgt_sid, kind, file])
+                    .map_err(st)?;
+                record_mine
+                    .execute(params![src_sid, tgt_sid, kind, file, data])
+                    .map_err(st)?;
+            }
             if supported {
                 let key: SidKey = (*src_sid, *tgt_sid, kind.clone());
                 if self.key_supported(&key)? {
@@ -3679,11 +3759,6 @@ impl GraphWrite for SqliteStore {
                     continue;
                 }
             }
-            let data = serde_json::to_string(e)?;
-            // Use the location file when present; empty string when None (e.g. synthetic edges).
-            // After Fix A (wicked-estate-extract), Contains edges always carry a location, so this is always
-            // populated for tree-sitter-produced edges.
-            let file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
             stmt.execute(params![
                 src_sid,
                 tgt_sid,
@@ -3885,6 +3960,8 @@ impl GraphWrite for SqliteStore {
         let kept: Vec<KeptImport> = {
             let mut candidates: Vec<(i64, String, Option<String>)> = Vec::new();
             {
+                // #543: an edge another file still asserts (a live key's contribution, which the
+                // removal below re-asserts) is a survivor too.
                 let mut stmt = self
                     .conn
                     .prepare(
@@ -3893,17 +3970,27 @@ impl GraphWrite for SqliteStore {
                                   WHERE e.target = n.symbol \
                                     AND e.file NOT IN ('', ?1) \
                                     AND e.source NOT IN \
-                                        (SELECT symbol FROM nodes WHERE file = ?1)) \
+                                        (SELECT symbol FROM nodes WHERE file = ?1)), \
+                                (SELECT MIN(ef.file) FROM edge_files ef \
+                                  WHERE ef.target = n.symbol \
+                                    AND ef.file NOT IN ('', ?1) \
+                                    AND ef.source NOT IN \
+                                        (SELECT symbol FROM nodes WHERE file = ?1) \
+                                    AND EXISTS(SELECT 1 FROM edges e2 \
+                                        WHERE e2.source = ef.source AND e2.target = ef.target \
+                                          AND e2.kind = ef.kind)) \
                          FROM nodes n \
                          WHERE n.file = ?1 AND n.kind = ?2",
                     )
                     .map_err(st)?;
                 let rows = stmt
                     .query_map(params![file, import_kind], |r| {
+                        let edge_home = r.get::<_, Option<String>>(2)?;
+                        let contrib_home = r.get::<_, Option<String>>(3)?;
                         Ok((
                             r.get::<_, i64>(0)?,
                             r.get::<_, String>(1)?,
-                            r.get::<_, Option<String>>(2)?,
+                            edge_home.into_iter().chain(contrib_home).min(),
                         ))
                     })
                     .map_err(st)?;
@@ -3916,18 +4003,26 @@ impl GraphWrite for SqliteStore {
                 let Some(new_file) = new_home else { continue };
                 // The survivor edge at MIN(file) supplies the new location (file + span); if its
                 // data JSON carries no location (schema-legal), fall back to a zero span.
-                let edge_json: Option<String> = self
-                    .conn
-                    .query_row(
-                        "SELECT e.data FROM edges e \
-                         WHERE e.target = ?1 AND e.file = ?2 \
-                           AND e.source NOT IN (SELECT symbol FROM nodes WHERE file = ?3) \
-                         ORDER BY e.kind, e.source LIMIT 1",
-                        params![sid, new_file, file],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(st)?;
+                let mut edge_json: Option<String> = None;
+                for table in ["edges", "edge_files"] {
+                    if edge_json.is_none() {
+                        edge_json = self
+                            .conn
+                            .query_row(
+                                &format!(
+                                    "SELECT e.data FROM {table} e \
+                                     WHERE e.target = ?1 AND e.file = ?2 \
+                                       AND e.source NOT IN \
+                                           (SELECT symbol FROM nodes WHERE file = ?3) \
+                                     ORDER BY e.kind, e.source LIMIT 1"
+                                ),
+                                params![sid, new_file, file],
+                                |r| r.get(0),
+                            )
+                            .optional()
+                            .map_err(st)?;
+                    }
+                }
                 let new_loc = edge_json
                     .and_then(|j| serde_json::from_str::<Edge>(&j).ok())
                     .and_then(|e| e.location)
@@ -4043,6 +4138,44 @@ impl GraphWrite for SqliteStore {
         // Delete edges using the same matching logic as Step 2 (location file OR source node
         // in this file) so that edges without an explicit location are also removed.
         // IMPORTANT: delete edges BEFORE nodes so the subquery on nodes is still valid.
+        // #543: the other files' contributions to every key this file asserted together with
+        // them, re-asserted after the deletes below so the edge stays, owned by one of them. The
+        // file's key groups are dropped (the re-assertion records them again when two or more
+        // files remain), and so is every group whose source lives in this file (the edge goes
+        // with its source). Only a key that still has an edges row is re-asserted, so a pruned or
+        // erased edge never returns. Same point and predicate as the edges DELETE below.
+        let survivors: Vec<Edge> = {
+            let mut q = self
+                .conn
+                .prepare(
+                    "SELECT ef.data FROM edge_files ef \
+                     WHERE ef.file != ?1 \
+                       AND (ef.source, ef.target, ef.kind) IN \
+                           (SELECT source, target, kind FROM edge_files WHERE file = ?1) \
+                       AND ef.source NOT IN (SELECT symbol FROM nodes WHERE file = ?1) \
+                       AND EXISTS(SELECT 1 FROM edges e WHERE e.source = ef.source \
+                                  AND e.target = ef.target AND e.kind = ef.kind) \
+                     ORDER BY ef.source, ef.target, ef.kind, ef.file",
+                )
+                .map_err(st)?;
+            let rows = q
+                .query_map(params![file], |r| r.get::<_, String>(0))
+                .map_err(st)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(serde_json::from_str::<Edge>(&row.map_err(st)?)?);
+            }
+            out
+        };
+        self.conn
+            .execute(
+                "DELETE FROM edge_files \
+                 WHERE (source, target, kind) IN \
+                       (SELECT source, target, kind FROM edge_files WHERE file = ?1) \
+                    OR source IN (SELECT symbol FROM nodes WHERE file = ?1)",
+                params![file],
+            )
+            .map_err(st)?;
         // TS-S2A: retire supported keys' base contributions by exactly the edge predicate, and
         // capture the supported rows this DELETE removes (healed below).
         let support = self.support_pre_delete(
@@ -4083,6 +4216,8 @@ impl GraphWrite for SqliteStore {
             .map_err(st)?;
         // Support is producer-owned: re-project every supported edge the deletes removed.
         self.support_post_delete(support)?;
+        // #543: the other asserting files still assert their edges.
+        self.upsert_edges(&survivors)?;
         Ok(())
     }
 
@@ -4152,6 +4287,16 @@ impl GraphWrite for SqliteStore {
                 "DELETE FROM edges \
                  WHERE source NOT IN (SELECT symbol FROM nodes) \
                     OR target NOT IN (SELECT symbol FROM nodes)",
+                [],
+            )
+            .map_err(st)?;
+        // #543: a pruned edge's contributions go with it (before the support heal re-projects a
+        // supported key's public row, which would otherwise keep them).
+        self.conn
+            .execute(
+                "DELETE FROM edge_files WHERE NOT EXISTS(SELECT 1 FROM edges e \
+                   WHERE e.source = edge_files.source AND e.target = edge_files.target \
+                     AND e.kind = edge_files.kind)",
                 [],
             )
             .map_err(st)?;
@@ -4472,22 +4617,22 @@ impl GraphRead for SqliteStore {
     /// (#358) An INDEXED range over `lower(name)` (`idx_nodes_name_folded`). SQLite's built-in
     /// `lower()` folds ASCII only — exactly `query::name_has_prefix`. The exclusive upper bound is
     /// the prefix's lexicographic successor (UTF-8 byte order = code-point order); appending
-    /// U+10FFFF instead would drop `a\u{10FFFF}b` for prefix `a`.
+    /// U+10FFFF instead would drop `a\u{10FFFF}b` for prefix `a`. Each bound shape has its own
+    /// statement ([`name_prefix_sql`]), so the index search stops at the upper bound (#577).
     fn find_symbols_by_name_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<Node>> {
         let lo = prefix.to_ascii_lowercase();
         let hi = prefix_successor(&lo);
         let sql_limit: i64 = limit.map_or(-1, |l| l as i64);
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT n.data FROM nodes n JOIN symbols s ON s.sid = n.symbol \
-                 WHERE lower(n.name) >= ?1 AND (?2 IS NULL OR lower(n.name) < ?2) \
-                 ORDER BY lower(n.name), n.name, s.sym LIMIT ?3",
-            )
+            .prepare_cached(name_prefix_sql(hi.is_some()))
             .map_err(st)?;
-        let rows = stmt
-            .query_map(params![lo, hi, sql_limit], |r| r.get::<_, String>(0))
-            .map_err(st)?;
+        let data = |r: &rusqlite::Row<'_>| r.get::<_, String>(0);
+        let rows = match &hi {
+            Some(hi) => stmt.query_map(params![lo, hi, sql_limit], data),
+            None => stmt.query_map(params![lo, sql_limit], data),
+        }
+        .map_err(st)?;
         let mut out = Vec::new();
         for row in rows {
             let n = self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?);
@@ -6508,6 +6653,75 @@ mod tests {
         )
     }
 
+    /// #577: a name-prefix lookup reads the prefix's rows, not the rest of the name index. Its
+    /// upper bound sat inside `?2 IS NULL OR …`, which SQLite cannot use as an index constraint,
+    /// so a prefix near the start of the index walked every name after it. The cost of finding
+    /// the one `alpha` must not grow with 10x the names that sort after it.
+    #[test]
+    fn a_name_prefix_lookup_does_not_walk_the_names_after_the_prefix_577() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use wicked_estate_core::GraphRead;
+        fn ops_for(after: usize) -> u64 {
+            let mut store = open();
+            let mut nodes: Vec<Node> = (0..after)
+                .map(|i| make_node(&format!("zeta{i}"), &format!("z/{}.rs", i / 100)))
+                .collect();
+            nodes.push(make_node("Alpha", "a.rs"));
+            store.upsert_nodes_no_fts(&nodes).unwrap();
+            let ops = Arc::new(AtomicU64::new(0));
+            let counter = Arc::clone(&ops);
+            store.conn.progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            let hits = store.find_symbols_by_name_prefix("alp", None).unwrap();
+            store.conn.progress_handler(0, None::<fn() -> bool>);
+            assert_eq!(hits.len(), 1, "{hits:?}");
+            ops.load(Ordering::Relaxed)
+        }
+        let small = ops_for(1_000);
+        let large = ops_for(10_000);
+        assert!(
+            large < small * 2,
+            "a prefix lookup cost {large} op-ticks with 10k names after it vs {small} with 1k: \
+             it walks the name index past the prefix (#577)"
+        );
+    }
+
+    /// #577: both statements search `idx_nodes_name_folded`; the bounded one with both bounds as
+    /// index constraints, the open one (no successor exists) with the lower bound only.
+    #[test]
+    fn the_name_prefix_statements_search_the_folded_index_by_their_bounds_577() {
+        let store = open();
+        let plan = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> String {
+            let mut stmt = store
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            stmt.query_map(args, |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let bounded = plan(name_prefix_sql(true), &[&"alp", &"alq", &10]);
+        assert!(
+            bounded.contains("USING INDEX idx_nodes_name_folded (<expr>>? AND <expr><?)"),
+            "{bounded}"
+        );
+        let open_above = plan(name_prefix_sql(false), &[&"", &10]);
+        assert!(
+            open_above.contains("USING INDEX idx_nodes_name_folded (<expr>>?)"),
+            "{open_above}"
+        );
+        assert_eq!(prefix_successor("alp").as_deref(), Some("alq"));
+        assert_eq!(prefix_successor(""), None);
+    }
+
     #[test]
     fn sqlite_remove_file_clears_content_row() {
         use wicked_estate_core::GraphWrite;
@@ -8132,14 +8346,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// wicked-estate#508: an older graph whose ONLY difference is the unset FTS rowid migration
-    /// marker (no object or column missing) and whose commit is still in its `-wal` with no
-    /// `-shm` is refused on the private copy, and the refusal leaves the directory unchanged.
-    /// Fails on #507's head: the copy's check had no evidence to name, so the ordinary open ran
-    /// and created the `-shm` before refusing.
+    /// wicked-estate#508: an older graph whose ONLY difference is an FTS row not keyed by its sid
+    /// (no object or column missing; it awaits the #420 rebuild) and whose commit is still in its
+    /// `-wal` with no `-shm` is refused on the private copy, and the refusal leaves the directory
+    /// unchanged. Fails on #507's head: the copy's check had no evidence to name, so the ordinary
+    /// open ran and created the `-shm` before refusing.
     #[cfg(unix)]
     #[test]
-    fn a_graph_lacking_only_the_fts_marker_is_refused_leaving_the_directory_unchanged() {
+    fn a_graph_awaiting_only_the_fts_rebuild_is_refused_leaving_the_directory_unchanged() {
         let dir = unique_test_dir("ro-framed-wal-fts-marker");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -8148,7 +8362,9 @@ mod tests {
         let holder = Connection::open(&src).unwrap();
         holder
             .execute_batch(&format!(
-                "PRAGMA wal_autocheckpoint=0; DELETE FROM meta WHERE k='{FTS_ROWID_KEY}';"
+                "PRAGMA wal_autocheckpoint=0; DELETE FROM meta WHERE k='{FTS_ROWID_KEY}'; \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) \
+                   VALUES('legacy', 'legacy', '', '');"
             ))
             .unwrap();
         let old = dir.join("old");
@@ -9163,7 +9379,12 @@ mod tests {
         assert_eq!(fts_hits(&store, "docb2"), vec!["b2".to_string()]);
         assert!(
             fts_rowid_migrated(&store.conn).unwrap(),
-            "marker set and guard trigger installed after the redaction rebuild"
+            "every row keyed by its sid after the redaction rebuild"
+        );
+        assert_eq!(
+            store.meta_value(FTS_ROWID_KEY).as_deref(),
+            Some(FTS_ROWID_SID),
+            "the rebuild still writes the marker older readers check"
         );
     }
 
@@ -9190,7 +9411,7 @@ mod tests {
                 .unwrap();
             assert_eq!(sid_l2, 3, "fixture: the live sids are 1 and 3");
             conn.execute_batch(
-                "DROP TRIGGER nodes_fts_rowid_guard; \
+                "DROP TRIGGER IF EXISTS nodes_fts_rowid_guard; \
                  DELETE FROM meta WHERE k = 'fts_rowid'; \
                  DROP TABLE nodes_fts; \
                  CREATE VIRTUAL TABLE nodes_fts USING fts5(symbol UNINDEXED, name, signature, doc); \
@@ -9249,8 +9470,8 @@ mod tests {
     }
 
     /// An OLDER binary writing a migrated store (delete by symbol text, insert with an automatic
-    /// rowid) breaks the sid key for that row. The guard trigger notices (it clears the marker),
-    /// the next writer open rebuilds, and an erasure afterwards leaves no row holding the text.
+    /// rowid) breaks the sid key for that row. The next writer open sees the row (#570: no trigger
+    /// is needed) and rebuilds, and an erasure afterwards leaves no row holding the text.
     #[test]
     fn older_writer_after_migration_is_healed_on_next_open_420() {
         let dir = tempfile::tempdir().unwrap();
@@ -9271,19 +9492,14 @@ mod tests {
                    VALUES('a', 'a', '', 'oldbinarytoken');",
             )
             .unwrap();
-            let marker: i64 = conn
-                .query_row("SELECT COUNT(*) FROM meta WHERE k = 'fts_rowid'", [], |r| {
-                    r.get(0)
-                })
-                .unwrap();
-            assert_eq!(marker, 0, "the guard cleared the marker");
+            assert!(
+                !fts_rowid_migrated(&conn).unwrap(),
+                "the old writer's row is not keyed by its sid"
+            );
         }
         let mut store = SqliteStore::open(&path).unwrap();
         assert_fts_keyed_by_sid(&store);
-        assert!(
-            fts_rowid_migrated(&store.conn).unwrap(),
-            "rebuilt, guarded again"
-        );
+        assert!(fts_rowid_migrated(&store.conn).unwrap(), "rebuilt");
         store.upsert_nodes(&[fts_node("a", "a.rs")]).unwrap();
         assert_fts_keyed_by_sid(&store);
         store.remove_nodes(&[sym("a")]).unwrap();
@@ -9297,6 +9513,149 @@ mod tests {
             .unwrap();
         assert_eq!(left, 0, "no FTS row of the erased node survives");
         assert_eq!(fts_hits(&store, "oldbinarytoken"), Vec::<String>::new());
+    }
+
+    /// Open `path` the way `node:sqlite` and `better-sqlite3` do by default: with
+    /// `SQLITE_DBCONFIG_DEFENSIVE` on (#570), and count its nodes.
+    fn defensive_node_count(path: &std::path::Path) -> rusqlite::Result<i64> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+        conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+    }
+
+    /// The FTS hits a defensive client gets for `token` (`node:sqlite`'s default open, #570).
+    fn defensive_fts_hits(path: &std::path::Path, token: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+        let mut stmt =
+            conn.prepare("SELECT symbol FROM nodes_fts WHERE nodes_fts MATCH ?1 ORDER BY 1")?;
+        stmt.query_map([token], |r| r.get(0))?.collect()
+    }
+
+    /// #570: a store this build writes reads in a defensive SQLite client (`nodes` and an FTS
+    /// MATCH) at every stage, each checked BEFORE another writer open could repair it: right
+    /// after fresh writes, after the #420 rebuild of a planted legacy row, after the redaction
+    /// rebuild, and after a reopen. On 0.35.x every rebuild installed a trigger on the shadow
+    /// table `nodes_fts_content`, and a defensive client failed its first statement with
+    /// "malformed database schema".
+    #[test]
+    fn a_defensive_client_reads_a_store_this_build_wrote_570() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("defensive.db");
+        let mut store = SqliteStore::open(&path).unwrap();
+        store
+            .upsert_nodes(&[fts_node("d1", "d.rs"), fts_node("d2", "d.rs")])
+            .unwrap();
+        assert_eq!(defensive_node_count(&path).unwrap(), 2, "fresh writes");
+        assert_eq!(defensive_fts_hits(&path, "docd2").unwrap(), vec!["d2"]);
+        // A legacy row (an older writer's automatic rowid), healed by the next writer open's
+        // #420 rebuild; the defensive read comes straight after that open.
+        drop(store);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DELETE FROM nodes_fts WHERE symbol = 'd1'; \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) \
+                   VALUES('d1', 'd1', '', 'docd1');",
+            )
+            .unwrap();
+            assert!(!fts_rowid_migrated(&conn).unwrap(), "fixture: a legacy row");
+        }
+        let mut store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(
+            defensive_node_count(&path).unwrap(),
+            2,
+            "after the #420 rebuild"
+        );
+        assert_eq!(defensive_fts_hits(&path, "docd1").unwrap(), vec!["d1"]);
+        store.migrate_redaction(&|_, t| t.to_string(), "t").unwrap();
+        assert_eq!(
+            defensive_node_count(&path).unwrap(),
+            2,
+            "after the redaction rebuild"
+        );
+        assert_eq!(defensive_fts_hits(&path, "docd2").unwrap(), vec!["d2"]);
+        drop(store);
+        drop(SqliteStore::open(&path).unwrap());
+        assert_eq!(defensive_node_count(&path).unwrap(), 2, "after a reopen");
+    }
+
+    /// #570 review: the row check also covers completeness. A populated store whose FTS table is
+    /// missing (a store written before FTS existed: the writer's SCHEMA re-creates it empty) or
+    /// partial is refused by the read-only currency check and rebuilt by the next writer open; the
+    /// old marker gate did the same.
+    #[test]
+    fn a_populated_store_with_a_missing_or_partial_fts_table_is_rebuilt_570() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-fts.db");
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            store
+                .upsert_nodes(&[fts_node("e1", "e.rs"), fts_node("e2", "e.rs")])
+                .unwrap();
+        }
+        for plant in [
+            "DROP TABLE nodes_fts",
+            "DELETE FROM nodes_fts WHERE symbol = 'e2'",
+        ] {
+            {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch(plant).unwrap();
+            }
+            if plant.starts_with("DELETE") {
+                let err = SqliteStore::open_readonly_current(&path)
+                    .err()
+                    .expect("a partial FTS table awaits a writer's rebuild");
+                assert!(err.to_string().contains("predates this build"), "{err}");
+            }
+            let store = SqliteStore::open(&path).unwrap();
+            assert_fts_keyed_by_sid(&store);
+            assert_eq!(fts_hits(&store, "doce2"), vec!["e2".to_string()], "{plant}");
+            drop(store);
+            assert!(SqliteStore::open_readonly_current(&path).is_ok(), "{plant}");
+        }
+    }
+
+    /// #570: a store a 0.35.x build wrote carries the shadow-table guard trigger, which a defensive
+    /// client refuses. The first writer open of this build drops it, keeps the rows keyed by sid,
+    /// and the store reads in defensive mode from then on.
+    #[test]
+    fn a_writer_open_drops_the_legacy_shadow_table_trigger_570() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-guard.db");
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            store.upsert_nodes(&[fts_node("g1", "g.rs")]).unwrap();
+            // The exact trigger 0.35.10 installed (sqlite.rs FTS_ROWID_GUARD_DDL at 950919c).
+            store
+                .conn
+                .execute_batch(
+                    "CREATE TRIGGER IF NOT EXISTS nodes_fts_rowid_guard \
+                     AFTER INSERT ON nodes_fts_content \
+                     WHEN NEW.id IS NOT (SELECT sid FROM symbols WHERE sym = NEW.c0) \
+                     BEGIN DELETE FROM meta WHERE k = 'fts_rowid'; END",
+                )
+                .unwrap();
+        }
+        let err = defensive_node_count(&path).expect_err("0.35.x store fails defensive open");
+        assert!(err.to_string().contains("shadow"), "{err}");
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            assert_fts_keyed_by_sid(&store);
+            assert!(
+                !store
+                    .conn
+                    .prepare(
+                        "SELECT 1 FROM sqlite_master WHERE type='trigger' \
+                     AND name='nodes_fts_rowid_guard'"
+                    )
+                    .unwrap()
+                    .exists([])
+                    .unwrap()
+            );
+        }
+        assert_eq!(defensive_node_count(&path).unwrap(), 1);
     }
 
     /// The regression gate for #420: the VM cost of re-extracting one file (remove_file +

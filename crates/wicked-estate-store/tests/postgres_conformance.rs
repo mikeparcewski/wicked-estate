@@ -71,7 +71,7 @@ fn drop_all_tables(url: &str) {
             "DROP TABLE IF EXISTS \
              annotations, edge_history, changes, meta, cache, content, \
              unresolved_refs, edges, nodes, node_files, files, symbol_gen, \
-             support_owners, edge_supports, edge_base CASCADE",
+             support_owners, edge_supports, edge_base, edge_files CASCADE",
         )
         .execute(&pool)
         .await
@@ -122,6 +122,28 @@ fn postgres_store_satisfies_multi_file_contribution_contract() {
 
     let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
     wicked_estate_core::conformance::multi_file_contribution_suite(&mut store);
+}
+
+/// Edge contributions (wicked-estate#543) on a live Postgres: the SAME shared suite the
+/// Mem/Sqlite/Surreal tests run, so the PG `edge_files` table cannot drift silently.
+#[test]
+fn postgres_store_satisfies_edge_contribution_contract() {
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+            return;
+        }
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+
+    drop_all_tables(&url);
+
+    let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
+    wicked_estate_core::conformance::edge_contribution_suite(&mut store);
 }
 
 /// TS-S2A authoritative, replaceable edge support on a live Postgres — the SAME shared suite the

@@ -4688,6 +4688,26 @@ impl Extractor for TreeSitterExtractor {
             return structured(&self.language, &self.query, file);
         }
 
+        // COBOL: the grammar reads fixed-format cards, so a free-format source or a continued
+        // literal is parsed as its logical source and every span maps back to the file.
+        if self.lang_name == "cobol" {
+            if let Some(logical) = crate::cobol_links::LogicalSource::of(&file.text) {
+                let as_parsed = SourceFile {
+                    text: logical.text.clone(),
+                    ..file.clone()
+                };
+                let mut ex = self.extract_parsed(&as_parsed)?;
+                logical.to_file(&mut ex, &file.text);
+                return Ok(ex);
+            }
+        }
+        self.extract_parsed(file)
+    }
+}
+
+impl TreeSitterExtractor {
+    /// The query-driven extraction of `file` as the grammar reads it.
+    fn extract_parsed(&self, file: &SourceFile) -> Result<Extraction> {
         // Parser is not Sync, so we create one per call (cheap — no grammar compilation).
         let mut parser = Parser::new();
         parser
@@ -6211,6 +6231,10 @@ impl Extractor for TreeSitterExtractor {
         // collapse last-writer-wins, losing a classification and its site with no record that it
         // was ever asserted (TS-S1; see `wicked_estate_core::flow`).
         let local_edges = merge_flow_edges(local_edges);
+
+        if self.lang_name == "cobol" {
+            crate::cobol_links::tag_roles(&tree, src, &mut nodes, &mut refs);
+        }
 
         Ok(Extraction {
             nodes,

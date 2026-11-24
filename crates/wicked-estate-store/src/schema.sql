@@ -84,8 +84,10 @@ CREATE INDEX IF NOT EXISTS idx_node_files_file ON node_files(file);
 -- virtual tables cannot expose an integer rowid as a regular column for joins.
 -- Every row's ROWID is the node's sid (nodes.symbol, #420): FTS5 can look a row up only by
 -- rowid, and `symbol` is UNINDEXED, so maintenance deletes go by `rowid = sid` (a delete by
--- symbol text is a scan of the whole table). Stores written before #420 are rebuilt once on the
--- first writer open (meta `fts_rowid` = `sid`, sqlite.rs `migrate_fts_rowids`).
+-- symbol text is a scan of the whole table). A store whose rows are not all keyed so (written
+-- before #420, or by an older binary since) is rebuilt on the next writer open (sqlite.rs
+-- `migrate_fts_rowids`). No trigger guards it: SQLite refuses a trigger on the FTS shadow
+-- tables under SQLITE_DBCONFIG_DEFENSIVE, which node:sqlite and better-sqlite3 turn on (#570).
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
   symbol UNINDEXED,   -- string SymbolId used for join-back via symbols table; not tokenised
   name,               -- simple name
@@ -113,6 +115,24 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
 CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file);
+
+-- Edge contributions (wicked-estate#543), the edge analogue of node_files: for an edges key
+-- asserted by MORE THAN ONE file, one row per asserting file with the Edge JSON that file's
+-- extraction produced. Sparse: a key asserted by one file has no rows (its edges row is the whole
+-- truth), so the table stays small. upsert_edges records both contributions when a second file
+-- asserts a key; remove_file drops the removed file's key groups and re-asserts the survivors, so
+-- the edge stays, owned by another asserting file. Stores written before it start empty and
+-- never recorded the losing file's assertion: a key is recorded the next time a file OTHER than
+-- the row's owner re-asserts it (re-indexing the owner alone writes it back as a one-file key).
+CREATE TABLE IF NOT EXISTS edge_files (
+  source INTEGER NOT NULL,  -- sid FK → symbols.sid
+  target INTEGER NOT NULL,  -- sid FK → symbols.sid
+  kind   TEXT    NOT NULL,  -- serialized EdgeKind
+  file   TEXT    NOT NULL,  -- repo-relative asserting file (never '')
+  data   TEXT    NOT NULL,  -- full Edge JSON as this file asserted it
+  PRIMARY KEY (source, target, kind, file)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_files_file ON edge_files(file);
 
 -- TS-S2A support plane (wicked_estate_core::support; docs/ENGINE-CONTRACT.md §3.4). Additive:
 -- `CREATE TABLE IF NOT EXISTS` adds all three to any older DB on open, and while they are empty
