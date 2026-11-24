@@ -142,8 +142,8 @@ fn rebuild_fts_all(conn: &Connection) -> Result<()> {
 /// The rows themselves are the evidence, so no marker or trigger has to be trusted: a store
 /// written before #420 (automatic rowids), one an OLDER binary wrote to since (it deletes by
 /// symbol text and inserts with an automatic rowid), and a populated store with a missing or
-/// partial FTS table all fail it, and the next writer open rebuilds. It reads every FTS row, so
-/// opens run it only when the store moved since the last time it passed ([`fts_rows_verified`]).
+/// partial FTS table all fail it, and the next writer open rebuilds. One pass over the FTS rows
+/// with primary-key lookups; it runs on opens, not per query.
 fn fts_rowid_migrated(conn: &Connection) -> Result<bool> {
     conn.query_row(
         "SELECT (SELECT COUNT(*) FROM nodes) = (SELECT COUNT(*) FROM nodes_fts) \
@@ -155,67 +155,6 @@ fn fts_rowid_migrated(conn: &Connection) -> Result<bool> {
     )
     .map(|v| v != 0)
     .map_err(st)
-}
-
-/// Meta key holding [`FTS_FINGERPRINT_SQL`]'s value for the last state [`fts_rowid_migrated`]
-/// passed (or a rebuild produced).
-const FTS_VERIFIED_KEY: &str = "fts_rowid_verified";
-
-/// A fingerprint of the FTS state an older writer cannot change without moving it, read with
-/// primary-key and rowid lookups only: the highest node sid, and the rowid and symbol of the
-/// highest FTS row. An older binary inserts every FTS row with an automatic rowid (one above the
-/// current highest), so each of its writes replaces the highest FTS row. This build's own
-/// writes move it too (a new node gets a new, higher sid), which only costs one full check on the
-/// next open. Deleting a lower row without touching `nodes` keeps it, but no writer does that.
-const FTS_FINGERPRINT_SQL: &str = "COALESCE((SELECT MAX(symbol) FROM nodes), '') || '|' || \
-     COALESCE((SELECT rowid || '|' || symbol FROM nodes_fts ORDER BY rowid DESC LIMIT 1), '')";
-
-/// The FTS rows are as [`fts_rowid_migrated`] last found them: the stamped fingerprint is the
-/// current one. O(log n), so an open of an unchanged store does not read every FTS row (#571
-/// review: the full check took 9-11 s cold on a 2.7 GB graph, on every CLI start).
-fn fts_rows_verified(conn: &Connection) -> Result<bool> {
-    conn.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM meta WHERE k = ?1 AND v = ({FTS_FINGERPRINT_SQL}))"),
-        params![FTS_VERIFIED_KEY],
-        |r| r.get(0),
-    )
-    .map_err(st)
-}
-
-/// Run the full row check and read the fingerprint it vouches for in ONE read snapshot, so a
-/// write landing between the two cannot be stamped as verified.
-fn fts_rows_checked(conn: &Connection) -> Result<(bool, String)> {
-    let own_txn = conn.is_autocommit();
-    if own_txn {
-        conn.execute_batch("BEGIN").map_err(st)?;
-    }
-    let res = fts_rowid_migrated(conn).and_then(|keyed| {
-        conn.query_row(&format!("SELECT {FTS_FINGERPRINT_SQL}"), [], |r| r.get(0))
-            .map(|fp: String| (keyed, fp))
-            .map_err(st)
-    });
-    if own_txn {
-        let _ = conn.execute_batch("COMMIT");
-    }
-    res
-}
-
-/// Stamp `fp` as verified, but only while it is still the current fingerprint, and without
-/// waiting: a writer open must not stall behind another writer's batch for a cache entry. A busy
-/// or failed stamp is dropped; the next open checks again.
-fn stamp_fts_verified(conn: &Connection, fp: &str) -> Result<()> {
-    let prev: i64 = conn
-        .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
-        .map_err(st)?;
-    conn.execute_batch("PRAGMA busy_timeout=0;").map_err(st)?;
-    let _ = conn.execute(
-        &format!(
-            "INSERT OR REPLACE INTO meta(k, v) SELECT ?1, ?2 WHERE ({FTS_FINGERPRINT_SQL}) = ?2"
-        ),
-        params![FTS_VERIFIED_KEY, fp],
-    );
-    conn.execute_batch(&format!("PRAGMA busy_timeout={prev};"))
-        .map_err(st)
 }
 
 /// Drop the 0.35.x shadow-table guard trigger when a store still has it (#570). Writer opens only:
@@ -240,35 +179,19 @@ fn drop_legacy_fts_guard(conn: &Connection) -> Result<()> {
 /// (or one an older binary wrote to since): rebuild them keyed by sid, in ONE `BEGIN IMMEDIATE`
 /// transaction. A crash rolls back to the old rows, so the next writer open re-runs it.
 /// Re-checked inside the transaction, so two first opens never both rebuild. Writer opens
-/// ([`SqliteStore::open`] / `in_memory`, `writer = true`) and the read-only currency check
-/// (`writer = false`), which refuses a graph that would need the rebuild: reads join on `symbol`
-/// text, so a plain read-only opener of an unmigrated store still answers right.
-///
-/// An unchanged store passes on its stamped fingerprint ([`fts_rows_verified`]). Otherwise the
-/// full row check runs, and a writer stamps what it verified; a read-only open never writes.
-fn migrate_fts_rowids(conn: &Connection, writer: bool) -> Result<()> {
-    if fts_rows_verified(conn)? {
+/// ([`SqliteStore::open`] / `in_memory`) and the read-only currency check, which refuses a graph
+/// that would need the rebuild: reads join on `symbol` text, so a plain read-only opener of an
+/// unmigrated store still answers right.
+fn migrate_fts_rowids(conn: &Connection) -> Result<()> {
+    if fts_rowid_migrated(conn)? {
         return Ok(());
-    }
-    let (keyed, fp) = fts_rows_checked(conn)?;
-    if keyed {
-        return if writer {
-            stamp_fts_verified(conn, &fp)
-        } else {
-            Ok(())
-        };
     }
     conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
     let res = (|| -> Result<()> {
-        if !fts_rowid_migrated(conn)? {
-            rebuild_fts_all(conn)?;
+        if fts_rowid_migrated(conn)? {
+            return Ok(());
         }
-        conn.execute(
-            &format!("INSERT OR REPLACE INTO meta(k, v) SELECT ?1, {FTS_FINGERPRINT_SQL}"),
-            params![FTS_VERIFIED_KEY],
-        )
-        .map_err(st)?;
-        Ok(())
+        rebuild_fts_all(conn)
     })();
     match res {
         Ok(()) => conn.execute_batch("COMMIT").map_err(st),
@@ -324,7 +247,7 @@ fn schema_objects_present(conn: &Connection) -> Result<()> {
 fn check_current(conn: &Connection) -> Result<()> {
     schema_objects_present(conn)
         .and_then(|()| migrate_schema(conn))
-        .and_then(|()| migrate_fts_rowids(conn, false))
+        .and_then(|()| migrate_fts_rowids(conn))
         .map_err(|e| {
             let missing = missing_columns(conn);
             if missing.is_empty() {
@@ -1377,7 +1300,7 @@ impl SqliteStore {
         // annotations.type column when missing). No-op on fresh DBs.
         migrate_schema(&conn)?;
         stamp_fresh_redaction_epoch(&conn)?;
-        migrate_fts_rowids(&conn, true)?;
+        migrate_fts_rowids(&conn)?;
         drop_legacy_fts_guard(&conn)?;
         // Read history_enabled flag from meta (absent → OFF, the new default).
         // Old databases that never set this key default to OFF (no history) rather than ON.
@@ -1567,7 +1490,7 @@ impl SqliteStore {
         conn.execute_batch(SCHEMA).map_err(st)?;
         migrate_schema(&conn)?;
         stamp_fresh_redaction_epoch(&conn)?;
-        migrate_fts_rowids(&conn, true)?;
+        migrate_fts_rowids(&conn)?;
         drop_legacy_fts_guard(&conn)?;
         Ok(Self {
             conn,
@@ -9597,131 +9520,6 @@ mod tests {
             large < small * 2,
             "re-extracting one file cost {large} op-ticks next to 10k co-located FTS rows vs \
              {small} next to 1k: FTS maintenance scales with other repos' rows (#420)"
-        );
-    }
-
-    /// A store of `n` FTS-indexed nodes at `path`, closed, then reopened once by a writer (which
-    /// verifies the rows and stamps the fingerprint).
-    fn verified_fts_store(path: &std::path::Path, n: usize) -> SqliteStore {
-        {
-            let mut store = SqliteStore::open(path).unwrap();
-            let nodes: Vec<Node> = (0..n)
-                .map(|i| fts_node(&format!("v{i}"), &format!("v/{}.rs", i / 100)))
-                .collect();
-            let files: Vec<String> = (0..n.div_ceil(100)).map(|f| format!("v/{f}.rs")).collect();
-            store.begin_batch().unwrap();
-            store.upsert_nodes_no_fts(&nodes).unwrap();
-            store
-                .rebuild_fts_for_files(&files.iter().map(String::as_str).collect::<Vec<_>>())
-                .unwrap();
-            store.commit_batch().unwrap();
-        }
-        SqliteStore::open(path).unwrap()
-    }
-
-    /// #571 review (W8): the open-time FTS check read every FTS row on every open, so every CLI
-    /// command paid a full scan (9-11 s cold on a 2.7 GB graph). On a store a writer already
-    /// verified, the check must cost the same at 10x the rows, on the writer path and on the
-    /// read-only currency path alike.
-    #[test]
-    fn the_open_time_fts_check_does_not_grow_with_the_store_once_verified_570() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        fn ops_for(n: usize) -> (u64, u64) {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("verified.db");
-            let store = verified_fts_store(&path, n);
-            let ro = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-            let mut out = [0u64; 2];
-            for (i, (conn, writer)) in [(&store.conn, true), (&ro, false)].into_iter().enumerate() {
-                let ops = Arc::new(AtomicU64::new(0));
-                let counter = Arc::clone(&ops);
-                conn.progress_handler(
-                    1,
-                    Some(move || {
-                        counter.fetch_add(1, Ordering::Relaxed);
-                        false
-                    }),
-                );
-                migrate_fts_rowids(conn, writer).unwrap();
-                conn.progress_handler(0, None::<fn() -> bool>);
-                out[i] = ops.load(Ordering::Relaxed);
-            }
-            (out[0], out[1])
-        }
-        let (w_small, r_small) = ops_for(1_000);
-        let (w_large, r_large) = ops_for(10_000);
-        assert!(
-            w_large < w_small * 2 && r_large < r_small * 2,
-            "the open-time FTS check cost {w_large}/{r_large} op-ticks (writer/read-only) on 10k \
-             verified rows vs {w_small}/{r_small} on 1k: it scans the rows on every open"
-        );
-    }
-
-    /// The stamp only skips the scan while nothing moved. After a verified open, an OLDER binary
-    /// re-upserting a node that is not the highest (delete by symbol text, automatic rowid) is
-    /// still caught: the read-only currency check refuses the store and the next writer open
-    /// rebuilds it keyed by sid. A write by this build moves the fingerprint too, and the next
-    /// writer open verifies once and stamps the new one.
-    #[test]
-    fn a_verified_store_still_catches_an_older_writer_and_restamps_after_own_writes_570() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("stamped.db");
-        let store = verified_fts_store(&path, 300);
-        assert!(
-            fts_rows_verified(&store.conn).unwrap(),
-            "the writer open stamped"
-        );
-        // Burn sids above the highest node, as interned edge targets do: the old writer's
-        // automatic rowid then lands on a sid no node holds.
-        store
-            .conn
-            .execute_batch("INSERT INTO symbols(sym) VALUES('burn1'),('burn2');")
-            .unwrap();
-        drop(store);
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "DELETE FROM nodes_fts WHERE symbol = 'v7'; \
-                 INSERT INTO nodes_fts(symbol, name, signature, doc) \
-                   VALUES('v7', 'v7', '', 'oldbinarytoken');",
-            )
-            .unwrap();
-            assert!(
-                !fts_rowid_migrated(&conn).unwrap(),
-                "fixture: an unkeyed row"
-            );
-            assert!(
-                !fts_rows_verified(&conn).unwrap(),
-                "the old write moved the fingerprint"
-            );
-        }
-        let err = SqliteStore::open_readonly_current(&path)
-            .err()
-            .expect("an older writer's row awaits a writer's rebuild");
-        assert!(err.to_string().contains("predates this build"), "{err}");
-        let mut store = SqliteStore::open(&path).unwrap();
-        assert_fts_keyed_by_sid(&store);
-        assert!(
-            fts_rows_verified(&store.conn).unwrap(),
-            "the rebuild stamped"
-        );
-        store.remove_nodes(&[sym("v7")]).unwrap();
-        assert_eq!(fts_hits(&store, "oldbinarytoken"), Vec::<String>::new());
-
-        store
-            .upsert_nodes(&[fts_node("fresh", "fresh.rs")])
-            .unwrap();
-        assert!(
-            !fts_rows_verified(&store.conn).unwrap(),
-            "a new node moves the fingerprint"
-        );
-        drop(store);
-        assert!(SqliteStore::open_readonly_current(&path).is_ok());
-        let store = SqliteStore::open(&path).unwrap();
-        assert!(
-            fts_rows_verified(&store.conn).unwrap(),
-            "re-verified and stamped"
         );
     }
 }
