@@ -138,6 +138,38 @@ fn split_ddl(sql: &str) -> Vec<String> {
         .collect()
 }
 
+/// The ASCII-only fold of `name` that `idx_nodes_name_folded` indexes, in byte order (#577).
+macro_rules! folded_name {
+    () => {
+        "translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') COLLATE \"C\""
+    };
+}
+
+/// The name-prefix lookup statement (#358, #577): `$1` the folded prefix, then (when `bounded`)
+/// `$2` its successor as the exclusive upper bound, then the limit. Both bounds are plain range
+/// conditions on the indexed expression, so the planner searches `idx_nodes_name_folded`.
+fn name_prefix_sql(bounded: bool) -> &'static str {
+    if bounded {
+        concat!(
+            "SELECT data FROM nodes WHERE ",
+            folded_name!(),
+            " >= $1 AND ",
+            folded_name!(),
+            " < $2 ORDER BY ",
+            folded_name!(),
+            ", name COLLATE \"C\", symbol COLLATE \"C\" LIMIT $3"
+        )
+    } else {
+        concat!(
+            "SELECT data FROM nodes WHERE ",
+            folded_name!(),
+            " >= $1 ORDER BY ",
+            folded_name!(),
+            ", name COLLATE \"C\", symbol COLLATE \"C\" LIMIT $2"
+        )
+    }
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
   path    TEXT PRIMARY KEY,
@@ -169,6 +201,10 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT '';
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS requirement_validated_by TEXT;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS requirement_validated_at BIGINT;
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
+-- (#358, #577) Name-prefix lookups (`find_symbols_by_name_prefix`): a range over the ASCII-folded
+-- name in byte order. The expression and collation must match the query's exactly for the planner
+-- to use it; a database created before this gets it on its next open.
+CREATE INDEX IF NOT EXISTS idx_nodes_name_folded ON nodes ((translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')) COLLATE "C");
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file);
 CREATE INDEX IF NOT EXISTS idx_nodes_scope ON nodes(scope);
@@ -2222,30 +2258,21 @@ impl GraphRead for PostgresStore {
 
     /// (#358) `translate` folds A-Z only — the exact ASCII fold `query::name_has_prefix` defines
     /// (Postgres `lower()`/`ILIKE` fold Unicode too, which would admit rows the other stores do
-    /// not). The prefix is LIKE-escaped, so `_` and `%` are literal.
+    /// not). (#577) A byte-order range on `idx_nodes_name_folded`, bounded above by the prefix's
+    /// successor when it has one ([`name_prefix_sql`]); a `LIKE` on the folded name had no index
+    /// to use, so every lookup scanned `nodes`.
     fn find_symbols_by_name_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<Node>> {
         let mut h = self.conn()?;
-        let escaped = prefix
-            .to_ascii_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let pattern = format!("{escaped}%");
+        let lo = prefix.to_ascii_lowercase();
+        let hi = crate::sqlite::prefix_successor(&lo);
         let sql_limit: Option<i64> = limit.map(|l| l as i64);
         let mut nodes = rt_block(async {
-            let rows = sqlx::query(
-                "SELECT data FROM nodes \
-                 WHERE translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
-                                 'abcdefghijklmnopqrstuvwxyz') LIKE $1 ESCAPE '\\' \
-                 ORDER BY translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
-                                    'abcdefghijklmnopqrstuvwxyz') COLLATE \"C\", \
-                          name COLLATE \"C\", symbol COLLATE \"C\" \
-                 LIMIT $2",
-            )
-            .bind(&pattern)
-            .bind(sql_limit)
-            .fetch_all(h.as_conn())
-            .await?;
+            let q = sqlx::query(name_prefix_sql(hi.is_some())).bind(&lo);
+            let q = match &hi {
+                Some(hi) => q.bind(hi),
+                None => q,
+            };
+            let rows = q.bind(sql_limit).fetch_all(h.as_conn()).await?;
             let mut v = Vec::new();
             for row in rows {
                 let json: String = row.try_get("data")?;
@@ -3010,5 +3037,86 @@ mod ddl_tests {
                 "unbalanced quotes (would error in PG): {stmt}"
             );
         }
+    }
+}
+
+/// #577 on a live Postgres (skips without `TEST_POSTGRES_URL`, like tests/postgres_conformance.rs,
+/// and takes the same advisory lock so it never overlaps that suite's table drops).
+#[cfg(test)]
+mod name_prefix_plan_tests {
+    use super::{PostgresStore, name_prefix_sql};
+    use sqlx::Row;
+
+    /// Both name-prefix statements search `idx_nodes_name_folded`, which a writer open creates
+    /// on an existing database. Before #577 the lookup was a `LIKE` on the folded name with no
+    /// index to match it, so every lookup scanned `nodes`. `enable_seqscan = off` makes the
+    /// planner take the index whenever it can, so a `Seq Scan` here means it cannot.
+    #[test]
+    fn the_name_prefix_statements_search_the_folded_name_index_577() {
+        let url = match std::env::var("TEST_POSTGRES_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("name_prefix_plan_tests: TEST_POSTGRES_URL not set — skipping");
+                return;
+            }
+        };
+        const LEASE_KEY: i64 = 0x5749_434B; // "WICK", the key tests/postgres_conformance.rs holds
+        let rt = tokio::runtime::Runtime::new().expect("tokio");
+        let pool = rt
+            .block_on(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url),
+            )
+            .expect("connect");
+        rt.block_on(
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(LEASE_KEY)
+                .execute(&pool),
+        )
+        .expect("lease");
+        drop(PostgresStore::open(&url).expect("open postgres store"));
+        let plan = |bounded: bool| -> String {
+            let sql = format!("EXPLAIN {}", name_prefix_sql(bounded));
+            rt.block_on(async {
+                let mut conn = pool.acquire().await.expect("conn");
+                sqlx::query("SET enable_seqscan = off")
+                    .execute(&mut *conn)
+                    .await
+                    .expect("set");
+                let q = sqlx::query(&sql).bind("alp");
+                let q = if bounded { q.bind("alq") } else { q };
+                let rows = q
+                    .bind(Some(10_i64))
+                    .fetch_all(&mut *conn)
+                    .await
+                    .expect("explain");
+                sqlx::query("RESET enable_seqscan")
+                    .execute(&mut *conn)
+                    .await
+                    .expect("reset");
+                rows.iter()
+                    .map(|r| r.get::<String, _>(0))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        };
+        let bounded = plan(true);
+        let open_above = plan(false);
+        let _ = rt.block_on(
+            sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(LEASE_KEY)
+                .execute(&pool),
+        );
+        for (shape, p) in [("bounded", &bounded), ("open above", &open_above)] {
+            assert!(
+                p.contains("idx_nodes_name_folded") && !p.contains("Seq Scan"),
+                "{shape}: {p}"
+            );
+        }
+        assert!(
+            bounded.contains(">=") && bounded.contains(" < "),
+            "both bounds are index conditions: {bounded}"
+        );
     }
 }
