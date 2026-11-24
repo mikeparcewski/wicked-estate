@@ -1850,38 +1850,141 @@ mod tests {
         assert!(calls.iter().any(|(_, _, by)| by.starts_with("codegraph:")));
     }
 
+    fn try_index(
+        store: &mut SqliteStore,
+        root: &Path,
+        cfg: Option<&CodegraphConfig>,
+        sql: Option<&str>,
+    ) -> wicked_estate_core::Result<()> {
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = sql.map(str::to_string));
+        let out = crate::index_path_with(store, root, None, cfg).map(|_| ());
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = None);
+        out
+    }
+
     #[test]
-    fn a_failed_run_and_switching_off_both_return_every_file_to_estates_resolvers() {
+    fn a_failed_run_keeps_the_last_good_graph_and_only_switching_off_hands_files_back() {
+        // Coord r2 F3 (W12): one failed run must not move the whole repo to the other producer
+        // (that deletes every minted node and leaves knowledge links dangling).
         let tmp = tempfile::tempdir().unwrap();
         let cfg = config(tmp.path());
         let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
         index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
-        assert!(
-            store
-                .meta_get_key(FINGERPRINTS_META)
-                .is_some_and(|v| !v.is_empty())
-        );
-        // Codegraph fails: the files it answered re-extract and resolve with estate's resolvers.
-        index(&mut store, &fixture_root(), Some(&cfg), Some("FAIL"));
+        let fingerprints = store.meta_get_key(FINGERPRINTS_META);
+        assert!(fingerprints.as_deref().is_some_and(|v| !v.is_empty()));
+        let point = "ts-java . . . src/p/Shapes/Shapes#Point#";
+        let graph = |store: &SqliteStore| {
+            let mut nodes: Vec<String> = store
+                .all_nodes()
+                .unwrap()
+                .into_iter()
+                .map(|n| n.symbol.0)
+                .collect();
+            nodes.sort();
+            (nodes, edges(store, EdgeKind::Calls))
+        };
+        let before = graph(&store);
+        assert!(before.0.iter().any(|n| n == point));
+        // Codegraph fails with codegraph state in the store: the index stops, loudly, and the
+        // graph is the last good one.
+        let err = try_index(&mut store, &fixture_root(), Some(&cfg), Some("FAIL")).unwrap_err();
+        assert!(err.to_string().contains("CODEGRAPH-FAILED"), "{err}");
+        assert_eq!(graph(&store), before);
+        assert_eq!(store.meta_get_key(FINGERPRINTS_META), fingerprints);
+        // An explicit switch-off hands every file back to estate's resolvers, once.
+        index(&mut store, &fixture_root(), None, None);
         let calls = edges(&store, EdgeKind::Calls);
         assert!(!calls.is_empty());
         assert!(
             calls.iter().all(|(_, _, by)| !by.starts_with("codegraph:")),
             "{calls:?}"
         );
+        assert!(!graph(&store).0.iter().any(|n| n == point));
         assert_eq!(store.meta_get_key(FINGERPRINTS_META).as_deref(), Some(""));
-        // On again, then off: the same.
-        index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
-        assert!(
-            edges(&store, EdgeKind::Calls)
-                .iter()
-                .any(|(_, _, by)| by.starts_with("codegraph:"))
-        );
-        index(&mut store, &fixture_root(), None, None);
+        // With no codegraph state stored, a failed run falls back to estate's pipeline.
+        index(&mut store, &fixture_root(), Some(&cfg), Some("FAIL"));
         assert!(
             edges(&store, EdgeKind::Calls)
                 .iter()
                 .all(|(_, _, by)| !by.starts_with("codegraph:"))
+        );
+    }
+
+    #[test]
+    fn callers_of_a_file_that_fell_back_keep_their_edges_into_it() {
+        // Coord r2 F1 (W16): src/lib/util.ts grew past the cap (size_exceeded, no nodes). Its
+        // caller src/svc.ts is still codegraph's; the call to helper must bind into the fallen
+        // back file through estate's resolvers, and never to the decoy codegraph answers for.
+        let sql = format!(
+            "{FIXTURE_SQL}\nUPDATE files SET errors = '[{{\"message\":\"too big\",\"severity\":\"error\",\"code\":\"size_exceeded\"}}]', node_count = 0 WHERE path = 'src/lib/util.ts';\n\
+             DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = 'src/lib/util.ts') OR target IN (SELECT id FROM nodes WHERE file_path = 'src/lib/util.ts');\n\
+             DELETE FROM unresolved_refs WHERE file_path = 'src/lib/util.ts';\n\
+             DELETE FROM nodes WHERE file_path = 'src/lib/util.ts';"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(&sql));
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get = calls_from(&calls, GET);
+        assert!(
+            from_get
+                .iter()
+                .any(|(_, t, by)| t == LIB_HELPER && !by.starts_with("codegraph:")),
+            "get() keeps its call into the fallen-back file: {from_get:?}"
+        );
+        assert!(
+            !from_get.iter().any(|(_, t, _)| t == DECOY_HELPER),
+            "{from_get:?}"
+        );
+        assert!(
+            store
+                .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}helper"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_import_of_a_file_codegraph_never_sees_keeps_its_edge() {
+        // Coord r2 F2 (W12): `import './styles.css'` has no codegraph site (the mirror holds only
+        // switched sources), so it goes to estate's resolvers instead of parking.
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for e in std::fs::read_dir(from).unwrap() {
+                let e = e.unwrap();
+                if e.file_type().unwrap().is_dir() {
+                    copy(&e.path(), &to.join(e.file_name()));
+                } else {
+                    std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        copy(&fixture_root(), &root);
+        let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+        std::fs::write(
+            root.join("src/svc.ts"),
+            format!("{svc}import './styles.css';\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join("src/styles.css"), ".user { color: red; }\n").unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
+        let imports = edges(&store, EdgeKind::Imports);
+        assert!(
+            imports
+                .iter()
+                .any(|(_, t, by)| t.contains("src/styles.css") && !by.starts_with("codegraph:")),
+            "{imports:?}"
+        );
+        assert!(
+            store
+                .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}'./styles.css'"))
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -2096,6 +2199,12 @@ mod tests {
             assert!(!root.join(inside).join("tree").exists());
         }
         run(root.join(".wicked-estate/graph.db.codegraph/_")).unwrap();
+        // Coord r2 L4: the state dir ignores itself.
+        assert_eq!(
+            std::fs::read_to_string(root.join(".wicked-estate/graph.db.codegraph/_/.gitignore"))
+                .unwrap(),
+            "*\n"
+        );
         run(tmp.path().join("elsewhere/_")).unwrap();
     }
 
@@ -2130,6 +2239,9 @@ mod tests {
         assert_eq!(name_tail("import-alias:h:helper"), "h");
         assert_eq!(name_tail("Foo::bar"), "bar");
         assert_eq!(name_tail("./util"), "util");
+        assert_eq!(name_tail("'./util'"), "util");
+        assert_eq!(name_tail("\"@lib/util\""), "util");
+        assert_eq!(name_tail("<stdio.h>"), name_tail("stdio.h"));
     }
 
     #[test]
