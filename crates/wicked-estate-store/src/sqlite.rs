@@ -159,23 +159,33 @@ fn fts_rowid_migrated(conn: &Connection) -> Result<bool> {
 
 /// Meta key (#589): the FTS state ([`fts_fingerprint`]) at which every `nodes_fts` row was last
 /// verified keyed by its node's sid. An open whose FTS state is still that one skips the row check.
-/// Any write to the other rows the check reads (`nodes`, `symbols`) deletes it in the writing
-/// statement's own transaction ([`FTS_STAMP_TRIGGERS`]). While a writer open checks, it holds a
+/// Any write that changes what the check reads besides `nodes_fts` (a node inserted or deleted, a
+/// node's sid or a symbol's text changed) deletes it in the writing statement's own transaction
+/// ([`FTS_STAMP_TRIGGERS`]). While a writer open checks, it holds a
 /// pending nonce ([`mark_fts_pending`]) that such a write deletes the same way.
 const FTS_VERIFIED_KEY: &str = "fts_verified";
 
-/// (#589) The triggers that delete the stamp ([`FTS_VERIFIED_KEY`]) on every write to `nodes` and
-/// every change of a symbol's text: SQLite runs a schema's triggers for every binary that writes
-/// the store, older ones too, inside the write's own transaction, so a node written (or a crash
-/// between a node and its FTS row) never leaves a stamp behind. Ordinary tables only: a trigger on
+/// (#589) The triggers that delete the stamp ([`FTS_VERIFIED_KEY`]) on every write that changes
+/// what [`fts_rowid_migrated`] reads besides `nodes_fts`: a node inserted or deleted (the counts),
+/// a node's sid or a symbol's text changed (the keys). SQLite runs a schema's triggers for every
+/// binary that writes the store, older ones too, inside the write's own transaction, so a node
+/// written without its FTS row (or a crash between the two) never leaves a stamp behind. Other
+/// columns are not watched: a re-index rewrites them on every node, and they are not what the
+/// check reads. Ordinary tables only: a trigger on
 /// an FTS5 shadow table makes the schema unreadable to a defensive client (#570). A `nodes_fts`
 /// write itself changes [`fts_fingerprint`].
 const FTS_STAMP_TRIGGERS: &[(&str, &str)] = &[
     ("fts_verified_on_node_insert", "AFTER INSERT ON nodes"),
     ("fts_verified_on_node_delete", "AFTER DELETE ON nodes"),
-    ("fts_verified_on_node_update", "AFTER UPDATE ON nodes"),
+    (
+        "fts_verified_on_node_update",
+        "AFTER UPDATE OF symbol ON nodes",
+    ),
     ("fts_verified_on_symbol_delete", "AFTER DELETE ON symbols"),
-    ("fts_verified_on_symbol_update", "AFTER UPDATE ON symbols"),
+    (
+        "fts_verified_on_symbol_update",
+        "AFTER UPDATE OF sym ON symbols",
+    ),
 ];
 
 /// Create the [`FTS_STAMP_TRIGGERS`] a store lacks (#589). Writer opens only: a schema write.
