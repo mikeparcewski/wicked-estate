@@ -2222,11 +2222,10 @@ fn index_path_inner(
         let read = |raw: &str| -> Option<String> {
             let text = confined_root.as_ref()?.read_rel_to_string(Path::new(raw))?;
             let redacted = wicked_estate_extract::redact::redact_source(raw, &text);
-            Some(if is_minified_or_huge(&redacted) {
-                String::new()
-            } else {
-                redacted
-            })
+            // Resolver configs are mirrored whole: a one-line tsconfig is not minified source.
+            let blank =
+                !codegraph::is_resolver_config(Path::new(raw)) && is_minified_or_huge(&redacted);
+            Some(if blank { String::new() } else { redacted })
         };
         let input = codegraph::PrepareInput {
             root,

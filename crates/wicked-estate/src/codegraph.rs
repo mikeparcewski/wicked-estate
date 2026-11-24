@@ -759,9 +759,9 @@ pub struct Prepared {
 
 /// Inputs from the caller for [`prepare`].
 pub struct PrepareInput<'a> {
-    /// The indexed root. The state dir may sit under it only below a dot directory, which the
-    /// walker skips (the default `.wicked-estate/graph.db.codegraph`); elsewhere the mirror's
-    /// copies would be indexed as sources.
+    /// The indexed root. The state dir may sit under it only below a directory both walks always
+    /// skip (the default `.wicked-estate/graph.db.codegraph`); elsewhere the mirror's copies
+    /// would be indexed as sources.
     pub root: &'a Path,
     pub prefix: &'a str,
     /// Every switched file in this run's work set.
@@ -776,7 +776,9 @@ pub struct PrepareInput<'a> {
     pub stored: BTreeMap<String, String>,
 }
 
-/// Refuse a state dir the walker would index: under `root` with no dot directory on the way.
+/// Refuse a state dir the walker would index: under `root` with no [`crate::SKIPPED_ENTRY_NAMES`]
+/// directory on the way. Those names are dropped by `filter_entry` in both walks, whatever the
+/// ignore files say; a plain dot directory is not enough (an `.ignore` whitelist re-opens it).
 fn state_dir_outside_sources(state_dir: &Path, root: &Path) -> std::result::Result<(), String> {
     let (Ok(state), Ok(root)) = (dunce::canonicalize(state_dir), dunce::canonicalize(root)) else {
         return Ok(());
@@ -784,14 +786,14 @@ fn state_dir_outside_sources(state_dir: &Path, root: &Path) -> std::result::Resu
     let Ok(rel) = state.strip_prefix(&root) else {
         return Ok(());
     };
-    let hidden = rel
+    let skipped = rel
         .components()
-        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
-    if hidden {
+        .any(|c| crate::SKIPPED_ENTRY_NAMES.contains(&c.as_os_str().to_string_lossy().as_ref()));
+    if skipped {
         Ok(())
     } else {
         Err(format!(
-            "the codegraph state dir {} is inside the indexed root, where its mirror would be indexed; keep the graph file outside the repo or under a dot directory",
+            "the codegraph state dir {} is inside the indexed root, where its mirror would be indexed; keep the graph file outside the repo or under .wicked-estate/",
             rel.display()
         ))
     }
@@ -2001,6 +2003,17 @@ mod tests {
         let minified = format!("var a=1;{}\n", "a=a+1;".repeat(10_000));
         std::fs::create_dir_all(root.join("src/vendor")).unwrap();
         std::fs::write(root.join("src/vendor/lib.min.js"), &minified).unwrap();
+        // Codex delta (W20): a resolver config on one long line is not minified source; blanking
+        // it drops the aliases codegraph resolves imports with.
+        let padding: Vec<String> = (0..120)
+            .map(|i| format!("\"@pad{i}/*\": [\"src/pad{i}/*\"]"))
+            .collect();
+        let tsconfig = format!(
+            "{{\"compilerOptions\":{{\"baseUrl\":\".\",\"paths\":{{\"@lib/*\":[\"src/lib/*\"],{}}}}}}}",
+            padding.join(",")
+        );
+        assert!(crate::is_minified_or_huge(&tsconfig));
+        std::fs::write(root.join("tsconfig.json"), &tsconfig).unwrap();
         let cfg = config(tmp.path());
         let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
         index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
@@ -2013,6 +2026,10 @@ mod tests {
             !std::fs::read_to_string(tree.join("src/svc.ts"))
                 .unwrap()
                 .is_empty()
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("tsconfig.json")).unwrap(),
+            tsconfig
         );
     }
 
@@ -2043,9 +2060,10 @@ mod tests {
     }
 
     #[test]
-    fn a_state_dir_the_walker_would_index_is_refused_and_a_dot_directory_is_not() {
-        // Codex r1 (W12): the mirror under a non-hidden state dir inside the root would be
-        // indexed as a second copy of every switched source.
+    fn a_state_dir_the_walker_would_index_is_refused_and_wicked_estate_is_not() {
+        // Codex r1 (W12) and its delta (W20): the mirror under a state dir the walker reaches
+        // (a plain dir, or a dot dir an `.ignore` whitelist re-opens) would be indexed as a
+        // second copy of every switched source.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
@@ -2072,9 +2090,11 @@ mod tests {
             TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = None);
             out
         };
-        let err = run(root.join("out/graph.db.codegraph/_")).unwrap_err();
-        assert!(err.contains("inside the indexed root"), "{err}");
-        assert!(!root.join("out/graph.db.codegraph/_/tree").exists());
+        for inside in ["out/graph.db.codegraph/_", ".cache/graph.db.codegraph/_"] {
+            let err = run(root.join(inside)).unwrap_err();
+            assert!(err.contains("inside the indexed root"), "{err}");
+            assert!(!root.join(inside).join("tree").exists());
+        }
         run(root.join(".wicked-estate/graph.db.codegraph/_")).unwrap();
         run(tmp.path().join("elsewhere/_")).unwrap();
     }
