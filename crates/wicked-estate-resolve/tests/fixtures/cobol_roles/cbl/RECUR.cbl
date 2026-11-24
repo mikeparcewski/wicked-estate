@@ -1,0 +1,6 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. RECUR.
+       PROCEDURE DIVISION.
+       MAIN-PARA.
+           CALL 'RECUR'.
+           GOBACK.
