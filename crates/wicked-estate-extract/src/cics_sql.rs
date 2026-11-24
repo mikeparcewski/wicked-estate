@@ -3,8 +3,8 @@
 //!
 //! The index pipeline does not use this type: it runs the tree-sitter COBOL extractor and then
 //! [`crate::cobol_links::supplement`] over the same extraction, so every link starts from a real
-//! node: calls and data uses from the paragraph or section that makes them (a call to another
-//! program from its program as well), every other link from the program Module. This extractor is for callers that want the EXEC CICS / EXEC SQL / COPY
+//! node: calls and data uses from the paragraph or section that makes them (from the program
+//! before its first paragraph), every other link from the program Module. This extractor is for callers that want the EXEC CICS / EXEC SQL / COPY
 //! links of one file without the grammar: it parses the file with the COBOL grammar itself and
 //! returns the full supplemented extraction (File node, program, paragraphs, fields, links).
 //!

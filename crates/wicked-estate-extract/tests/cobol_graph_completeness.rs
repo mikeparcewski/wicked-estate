@@ -79,7 +79,16 @@ fn assert_covered_to_eof(name: &str, text: &str, paragraphs: &[&str]) -> Extract
     ex
 }
 
-/// The distinct targets of `kind` refs from a node, sorted (edges are a set per source).
+/// The name of the node with symbol `sym`.
+fn name_of<'a>(ex: &'a Extraction, sym: &wicked_estate_core::SymbolId) -> &'a str {
+    ex.nodes
+        .iter()
+        .find(|n| &n.symbol == sym)
+        .map_or("?", |n| n.name.as_str())
+}
+
+/// The distinct targets of `kind` refs and local edges from a node, sorted (edges are a set per
+/// source). A ref names its target; a local edge (a program running its paragraph) binds it.
 fn targets(ex: &Extraction, from: &str, kind: EdgeKind) -> Vec<String> {
     let sym = &node(ex, from).symbol;
     let mut out: Vec<String> = ex
@@ -87,6 +96,12 @@ fn targets(ex: &Extraction, from: &str, kind: EdgeKind) -> Vec<String> {
         .iter()
         .filter(|r| &r.from == sym && r.kind == kind)
         .map(|r| r.raw_name.clone())
+        .chain(
+            ex.local_edges
+                .iter()
+                .filter(|e| &e.source == sym && e.kind == kind)
+                .map(|e| name_of(ex, &e.target).to_string()),
+        )
         .collect();
     out.sort();
     out.dedup();
@@ -688,14 +703,19 @@ fn sort_input_and_output_procedures_call_every_paragraph_of_their_range() {
     );
 }
 
-/// Every `Calls` ref source to `target`, by node name, sorted: one per call site's container.
+/// Every `Calls` source to `target` (refs by name, local edges by target node name), sorted.
 fn callers_of(ex: &Extraction, target: &str) -> Vec<String> {
     let mut out: Vec<String> = ex
         .refs
         .iter()
         .filter(|r| r.kind == EdgeKind::Calls && r.raw_name == target)
-        .filter_map(|r| ex.nodes.iter().find(|n| n.symbol == r.from))
-        .map(|n| n.name.clone())
+        .map(|r| name_of(ex, &r.from).to_string())
+        .chain(
+            ex.local_edges
+                .iter()
+                .filter(|e| e.kind == EdgeKind::Calls && name_of(ex, &e.target) == target)
+                .map(|e| name_of(ex, &e.source).to_string()),
+        )
         .collect();
     out.sort();
     out.dedup();
@@ -728,12 +748,12 @@ fn one_call_site_is_one_caller_the_paragraph_that_makes_it() {
     assert_eq!(calls_from(&ex, "CALLPGM"), ["MAIN-PARA"]);
 }
 
-// ── the program's entry ──────────────────────────────────────────────────────────────────────
+// ── the paragraphs a program runs itself ──────────────────────────────────────────────────────
 
 #[test]
-fn a_program_runs_its_first_paragraph() {
-    // A program whose statements all sit in paragraphs calls its first one: lineage from the
-    // program reaches what its paragraphs call, and the program has a behaviour edge of its own.
+fn a_program_runs_its_first_paragraph_and_only_paragraphs_nothing_else_calls() {
+    // The program calls what no flow statement of it names; a PERFORMed paragraph keeps exactly
+    // its performer as caller (no call site counts twice).
     let ex = extract(
         "CALLPGM",
         &program(
@@ -754,7 +774,28 @@ fn a_program_runs_its_first_paragraph() {
 }
 
 #[test]
-fn the_entry_skips_using_comments_and_declaratives_and_runs_a_first_section_whole() {
+fn a_paragraph_control_falls_into_is_run_by_the_program() {
+    // No statement names NEXT-PARA: control falls into it from MAIN-PARA. Its CALL must stay in
+    // the program's lineage.
+    let ex = extract(
+        "FALLPGM",
+        &program(
+            "FALLPGM",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    DISPLAY 'START'.",
+                "NEXT-PARA.",
+                "    CALL 'SUBPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(calls_from(&ex, "FALLPGM"), ["MAIN-PARA", "NEXT-PARA"]);
+    assert_eq!(callers_of(&ex, "SUBPGM"), ["NEXT-PARA"]);
+}
+
+#[test]
+fn using_comments_declaratives_and_sections_are_run_by_the_program() {
     let using = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. USINGPGM.\n       \
                  DATA DIVISION.\n       LINKAGE SECTION.\n       01  LK-A PIC X.\n       \
                  PROCEDURE DIVISION USING LK-A.\n      * the entry\n       MAIN-PARA.\n           \
@@ -763,6 +804,7 @@ fn the_entry_skips_using_comments_and_declaratives_and_runs_a_first_section_whol
         calls_from(&extract("USINGPGM", using), "USINGPGM"),
         ["MAIN-PARA"]
     );
+    // A DECLARATIVES handler runs on an I/O condition, which no statement names.
     let decl = program(
         "DECLPGM",
         DATA,
@@ -771,65 +813,95 @@ fn the_entry_skips_using_comments_and_declaratives_and_runs_a_first_section_whol
             "ERR-SECTION SECTION.",
             "    USE AFTER STANDARD ERROR PROCEDURE ON INFILE.",
             "ERR-PARA.",
-            "    EXIT.",
+            "    CALL 'LOGGER'.",
             "END DECLARATIVES.",
             "MAIN-PARA.",
             "    GOBACK.",
         ],
     );
+    let ex = extract("DECLPGM", &decl);
     assert_eq!(
-        calls_from(&extract("DECLPGM", &decl), "DECLPGM"),
-        ["MAIN-PARA"]
+        calls_from(&ex, "DECLPGM"),
+        ["ERR-PARA", "ERR-SECTION", "MAIN-PARA"]
     );
+    assert_eq!(callers_of(&ex, "LOGGER"), ["ERR-PARA"]);
     let section = program(
         "SECTPGM",
         DATA,
         &[
             "MAIN-SECTION SECTION.",
             "MAIN-PARA.",
+            "    PERFORM WORK-SECTION",
             "    GOBACK.",
-            "MAIN-EXIT.",
-            "    EXIT.",
             "WORK-SECTION SECTION.",
             "WORK-PARA.",
             "    EXIT.",
         ],
     );
+    // WORK-SECTION and its paragraph are performed; the rest is the program's.
     assert_eq!(
         calls_from(&extract("SECTPGM", &section), "SECTPGM"),
-        ["MAIN-EXIT", "MAIN-PARA", "MAIN-SECTION"]
+        ["MAIN-PARA", "MAIN-SECTION"]
     );
 }
 
 #[test]
-fn statements_before_the_first_paragraph_fall_through_to_it_unless_they_end_the_run() {
-    // CBSTM03A.CBL:262-296: the division opens with statements and then falls into 0000-START,
-    // so the program's callee programs are reached through it.
-    let calls = |body: &[&str]| {
-        let mut lines = body.to_vec();
-        lines.extend(["0000-START.", "    PERFORM 2000-B.", "2000-B.", "    EXIT."]);
-        calls_from(
-            &extract("TOPPGM", &program("TOPPGM", DATA, &lines)),
+fn statements_before_the_first_paragraph_keep_their_own_calls() {
+    let ex = extract(
+        "TOPPGM",
+        &program(
             "TOPPGM",
-        )
-    };
-    assert_eq!(
-        calls(&["    DISPLAY 'START'", "    OPEN OUTPUT WS-A."]),
-        ["0000-START"]
+            DATA,
+            &[
+                "    PERFORM 2000-B",
+                "    GOBACK.",
+                "1000-A.",
+                "    EXIT.",
+                "2000-B.",
+                "    EXIT.",
+            ],
+        ),
     );
-    assert_eq!(
-        calls(&["    IF WS-FLAG = 'Y'", "        GOBACK", "    END-IF."]),
-        ["0000-START"],
-        "a conditional GOBACK still falls through"
-    );
-    // Control never reaches 0000-START after these: only the statements' own calls.
-    for (end, expected) in [
-        ("    GOBACK.", &[][..]),
-        ("    STOP RUN.", &[][..]),
-        ("    EXEC CICS RETURN END-EXEC.", &[][..]),
-        ("    GO TO 2000-B.", &["2000-B"][..]),
-    ] {
-        assert_eq!(calls(&["    DISPLAY 'START'", end]), expected, "{end}");
+    // 2000-B by the PERFORM; 1000-A is named by nothing (dead here, but the graph cannot tell).
+    assert_eq!(calls_from(&ex, "TOPPGM"), ["1000-A", "2000-B"]);
+    assert_eq!(callers_of(&ex, "2000-B"), ["TOPPGM"]);
+}
+
+#[test]
+fn two_programs_in_one_file_each_run_their_own_paragraph() {
+    // Bound by symbol, not by name: both programs have a MAIN-PARA.
+    let text = [
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. PGMONE.",
+        "       PROCEDURE DIVISION.",
+        "       MAIN-PARA.",
+        "           CALL 'SUBONE'.",
+        "       END PROGRAM PGMONE.",
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. PGMTWO.",
+        "       PROCEDURE DIVISION.",
+        "       MAIN-PARA.",
+        "           CALL 'SUBTWO'.",
+        "       END PROGRAM PGMTWO.",
+    ]
+    .join("\n")
+        + "\n";
+    let ex = extract("TWOPGM", &text);
+    for (program, sub) in [("PGMONE", "SUBONE"), ("PGMTWO", "SUBTWO")] {
+        let sym = &node(&ex, program).symbol;
+        let runs: Vec<_> = ex
+            .local_edges
+            .iter()
+            .filter(|e| &e.source == sym && e.kind == EdgeKind::Calls)
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(runs.len(), 1, "{program}: {runs:?}");
+        assert!(
+            ex.refs
+                .iter()
+                .any(|r| r.from == runs[0] && r.raw_name == sub),
+            "{program} runs the MAIN-PARA that calls {sub}"
+        );
     }
 }
 
@@ -986,7 +1058,12 @@ fn a_dynamic_call_through_an_item_named_like_the_program_keeps_its_ref() {
         .filter(|r| r.from == program.symbol && r.kind == EdgeKind::Calls)
         .map(|r| r.raw_name.as_str())
         .collect();
-    assert_eq!(from_program, ["MAIN-PARA"], "the entry only");
+    assert!(from_program.is_empty(), "{from_program:?}");
+    assert_eq!(
+        calls_from(&ex, "DRIVER"),
+        ["MAIN-PARA"],
+        "the paragraph it runs"
+    );
     assert_eq!(calls_from(&ex, "MAIN-PARA"), ["cobol-dynamic-call:SUBPGM"]);
 }
 
@@ -1013,10 +1090,14 @@ fn a_call_or_xctl_of_the_program_itself_starts_from_its_paragraph_only() {
         .filter(|r| r.from == program.symbol && r.kind == EdgeKind::Calls)
         .map(|r| r.raw_name.as_str())
         .collect();
+    assert!(
+        from_program.is_empty(),
+        "no program → itself ref: {from_program:?}"
+    );
     assert_eq!(
-        from_program,
+        calls_from(&ex, "SELFPGM"),
         ["MAIN-PARA"],
-        "the entry only, no program → itself ref"
+        "the paragraph it runs"
     );
     assert_eq!(calls_from(&ex, "MAIN-PARA"), ["SELFPGM"]);
 }

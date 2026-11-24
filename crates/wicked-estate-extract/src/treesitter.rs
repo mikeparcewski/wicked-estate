@@ -1744,58 +1744,6 @@ impl CobolDivision {
     }
 }
 
-/// The header a PROCEDURE DIVISION's control reaches first: its first paragraph or section header
-/// after the division's own header (`USING`, `RETURNING`, the period) and its DECLARATIVES.
-/// Statements before that header run first and then fall through to it, unless the last of them
-/// ends the run or jumps away ([`cobol_ends_the_run`]): then `None`, as for an ERROR before the
-/// header (what it hides is not known). Statements before the header are the program's own and
-/// carry their own edges either way.
-fn cobol_entry_header<'t>(
-    division: tree_sitter::Node<'t>,
-    src: &[u8],
-) -> Option<tree_sitter::Node<'t>> {
-    const PREAMBLE: &[&str] = &[
-        "PROCEDURE",
-        "DIVISION",
-        "procedure_using_chaining",
-        "procedure_returning",
-        "procedure_declaratives",
-        "period",
-    ];
-    let mut cursor = division.walk();
-    let mut last = None;
-    for child in division.named_children(&mut cursor) {
-        if child.is_extra() || PREAMBLE.contains(&child.kind()) {
-            continue;
-        }
-        if child.is_error() || child.is_missing() {
-            return None;
-        }
-        if is_cobol_header(child) {
-            return match last {
-                Some(statement) if cobol_ends_the_run(statement, src) => None,
-                _ => Some(child),
-            };
-        }
-        last = Some(child);
-    }
-    None
-}
-
-/// Whether a statement never falls through to the next one: GOBACK, STOP RUN, EXIT PROGRAM, GO TO,
-/// or EXEC CICS RETURN / XCTL.
-fn cobol_ends_the_run(statement: tree_sitter::Node, src: &[u8]) -> bool {
-    let words = cobol_label_words(statement, src);
-    let word = |i: usize| words.get(i).map(String::as_str);
-    match statement.kind() {
-        "goback_statement" | "goto_statement" => true,
-        "stop_statement" => word(1) == Some("RUN"),
-        "exit_statement" => word(1) == Some("PROGRAM"),
-        "exec_statement" => word(1) == Some("CICS") && matches!(word(2), Some("RETURN" | "XCTL")),
-        _ => false,
-    }
-}
-
 /// The words of a label or name node, uppercased: `A-PARA OF SECOND-SECTION` → 3 words.
 fn cobol_label_words(n: tree_sitter::Node, src: &[u8]) -> Vec<String> {
     n.utf8_text(src)
@@ -1818,9 +1766,6 @@ fn cobol_label_words(n: tree_sitter::Node, src: &[u8]) -> Vec<String> {
 ///   there (a typo, a name in another program, an ambiguous name) the range is unknown, and
 ///   only X and Y are returned, so they still resolve or park by name.
 /// - `GO TO A [B …] [DEPENDING ON X]` transfers control to each label: stored as a call to each.
-/// - A PROCEDURE DIVISION's entry ([`cobol_entry_header`]) runs as a PERFORM of that header, at
-///   the division's first byte, so the call starts from the program: lineage from a program
-///   reaches what its paragraphs call, and the program has a call of its own.
 ///
 /// Each division's headers are collected and indexed once, and each range costs its lookups and
 /// the headers it calls, so this is linear in the tree and the calls it returns.
@@ -1830,24 +1775,6 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<(String, usize,
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         push_children(&mut stack, node);
-        if node.kind() == "procedure_division" {
-            // The program's entry: run its first header, as a PERFORM of it would.
-            if let Some(entry) = cobol_entry_header(node, src) {
-                let div = divisions
-                    .entry(node.id())
-                    .or_insert_with(|| CobolDivision::of(node, src));
-                let h = &div.headers;
-                let i = h.partition_point(|x| x.start < entry.start_byte());
-                if h.get(i).is_some_and(|x| x.start == entry.start_byte()) {
-                    let span = entry
-                        .child_by_field_name("name")
-                        .map_or_else(|| ts_span(entry), ts_span);
-                    for p in &h[i..=h[i].last] {
-                        out.push((p.name.clone(), node.start_byte(), span));
-                    }
-                }
-            }
-        }
         if node.kind() == "goto_statement" {
             let mut cursor = node.walk();
             for label in node.children_by_field_name("to", &mut cursor) {
@@ -5381,6 +5308,8 @@ impl Extractor for TreeSitterExtractor {
         // The grammar has no paragraph wrapper, so we compute boundaries post-extraction.
         // `cobol_units`: the indexes in `defs` of the paragraphs and sections.
         let mut cobol_units: Vec<usize> = Vec::new();
+        // (program, paragraph or section) pairs the program runs itself: local `Calls` edges.
+        let mut cobol_runs: Vec<(SymbolId, SymbolId)> = Vec::new();
         if self.lang_name == "cobol" {
             let end_map = cobol_paragraph_end_map(&tree);
             // Attribution ranges too: a PERFORM, GO TO, CALL or data use inside a paragraph is
@@ -5398,6 +5327,20 @@ impl Extractor for TreeSitterExtractor {
             // section it sits in would park or bind to a same-named paragraph in another
             // program: no call.
             let unit_starts: HashSet<usize> = cobol_units.iter().map(|&i| defs[i].start).collect();
+            let programs: HashSet<&SymbolId> = def_nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Module)
+                .map(|n| &n.symbol)
+                .collect();
+            // The innermost program holding `pos`.
+            let program_at = |pos: usize| {
+                defs.iter()
+                    .filter(|d| programs.contains(&d.symbol) && d.start <= pos && pos < d.end)
+                    .min_by_key(|d| d.end - d.start)
+                    .map(|d| d.symbol.clone())
+            };
+            // (program, paragraph or section name) for every call a flow statement makes.
+            let mut named: HashSet<(Option<SymbolId>, String)> = HashSet::new();
             for (name, pos, span) in cobol_flow_calls(&tree, src) {
                 let name = fold_cobol_name(&self.lang_name, name);
                 // Only a paragraph or section can jump to itself; a PERFORM before the first
@@ -5407,11 +5350,26 @@ impl Extractor for TreeSitterExtractor {
                 }) {
                     continue;
                 }
+                named.insert((program_at(pos), name.to_ascii_uppercase()));
                 raw_refs.push((name, EdgeKind::Calls, pos, span));
+            }
+            // A paragraph or section that no flow statement of its program names is run by the
+            // program itself: it is where the program starts, one control falls into from the
+            // paragraph before it, a DECLARATIVES handler, or dead code (the graph cannot tell
+            // these apart without flow analysis). The program calls it, bound by symbol. Only a
+            // unit with no other caller in its program gets one, so no call site counts twice,
+            // and lineage from a program reaches every paragraph's calls.
+            for &i in &cobol_units {
+                let d = &defs[i];
+                if let Some(program) = program_at(d.start) {
+                    if !named.contains(&(Some(program.clone()), d.name.to_ascii_uppercase())) {
+                        cobol_runs.push((program, d.symbol.clone()));
+                    }
+                }
             }
             // A call starts from the paragraph or section it is in, never also from its program:
             // a program twin would be one call site counted as two callers. A program's callee
-            // programs are reached through its entry call (`cobol_entry_header`).
+            // programs are reached through the paragraphs it runs (`cobol_runs` above).
             let program_of_call = cobol_call_programs(&tree, src);
             // A literal CALL of the program itself made before its first paragraph starts from
             // the program: a self-edge, so no ref (one made in a paragraph is kept above).
@@ -5511,6 +5469,18 @@ impl Extractor for TreeSitterExtractor {
                     .with_location(Location::new(&file.path, Span::ZERO)),
                 );
             }
+        }
+        for (program, unit) in cobol_runs {
+            local_edges.push(
+                Edge::new(
+                    program,
+                    unit,
+                    EdgeKind::Calls,
+                    ResolutionTier::Parsed,
+                    "tree-sitter",
+                )
+                .with_location(Location::new(&file.path, Span::ZERO)),
+            );
         }
         nodes.extend(def_nodes);
 
@@ -8940,15 +8910,9 @@ See the [docs](docs/).
             .iter()
             .filter(|r| r.kind == EdgeKind::Calls)
             .collect();
-        // Each CALL from main-para only, plus the program's entry call to main-para.
-        let names: Vec<_> = calls.iter().map(|r| r.raw_name.as_str()).collect();
-        assert_eq!(
-            names.iter().filter(|n| **n == "PRICEPGM").count(),
-            2,
-            "{names:?}"
-        );
-        assert_eq!(names.len(), 3, "{names:?}");
-        assert!(names.contains(&"MAIN-PARA"), "{names:?}");
+        // Each CALL once, from main-para (the program runs main-para through a local edge).
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|r| r.raw_name == "PRICEPGM"));
     }
 
     #[test]

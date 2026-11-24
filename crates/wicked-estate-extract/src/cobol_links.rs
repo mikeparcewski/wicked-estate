@@ -30,8 +30,8 @@
 //! `References` refs above) start from the innermost paragraph or section holding the construct,
 //! as the tree-sitter extractor's PERFORM and data-name refs do. One call site is one caller:
 //! a call is never also stored from its program (that would count it twice). Lineage reaches a
-//! program's callee programs through the program's entry call to its first paragraph (see the
-//! extractor's `cobol_entry_header`). Every other link starts from the program Module whose span
+//! program's callee programs through the paragraphs the program runs itself (the extractor's
+//! program → paragraph `Calls` edges). Every other link starts from the program Module whose span
 //! holds the construct (nested programs pick the innermost), else the first program, else the
 //! copybook node, else the File node. Literal inference (dynamic calls,
 //! map names), labels and DD names are scoped to that program. A shared target is minted by the referencing file as a BOUNDARY record
@@ -2124,8 +2124,7 @@ mod tests {
             2,
             "the CALL and the XCTL, each from MAIN-PARA only: {c:?}"
         );
-        // ...and the program's entry call to MAIN-PARA.
-        assert_eq!(c.len(), 3, "{c:?}");
+        assert_eq!(c.len(), 2, "{c:?}");
         let f = ex.nodes.iter().find(|n| n.name == "WS-PGM").unwrap();
         assert_eq!(f.metadata["dynamic_call"]["status"], "unresolved");
         assert!(
@@ -2191,8 +2190,8 @@ mod tests {
             .iter()
             .filter(|r| r.kind == EdgeKind::Calls)
             .map(|r| {
-                // Each call starts from its paragraph, and from its program (a call to another
-                // program); the pair names the program holding it.
+                // Each call starts from its paragraph (or its program, before any paragraph); the
+                // pair names the program holding it.
                 let from = ex.nodes.iter().find(|n| n.symbol == r.from).unwrap();
                 assert!(
                     matches!(from.kind, NodeKind::Function | NodeKind::Module),

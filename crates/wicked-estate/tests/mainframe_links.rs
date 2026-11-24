@@ -610,3 +610,68 @@ fn a_paragraph_jumping_to_itself_binds_to_no_same_named_paragraph_elsewhere() {
             .is_empty()
     );
 }
+
+#[test]
+fn lineage_of_a_program_reaches_calls_in_paragraphs_no_statement_names() {
+    // FALLPGM falls from MAIN-PARA into NEXT-PARA, and its DECLARATIVES handler runs on an I/O
+    // error: no statement names either paragraph, so the program runs them itself. TWO.cbl holds
+    // two programs that both have a MAIN-PARA: each runs its own, bound by symbol.
+    let tmp = scratch("runs");
+    let root = tmp.0.join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let fall = cobol(
+        "FALLPGM",
+        &[
+            "DECLARATIVES.",
+            "ERR-SECTION SECTION.",
+            "    USE AFTER STANDARD ERROR PROCEDURE ON INFILE.",
+            "ERR-PARA.",
+            "    CALL 'LOGGER'.",
+            "END DECLARATIVES.",
+            "MAIN-PARA.",
+            "    DISPLAY 'START'.",
+            "NEXT-PARA.",
+            "    CALL 'SUBPGM'.",
+        ],
+    );
+    fs::write(root.join("FALLPGM.cbl"), fall).unwrap();
+    for leaf in ["SUBPGM", "LOGGER", "SUBONE", "SUBTWO"] {
+        let text = cobol(leaf, &["MAIN-PARA.", "    GOBACK."]);
+        fs::write(root.join(format!("{leaf}.cbl")), text).unwrap();
+    }
+    let two = [
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. PGMONE.",
+        "       PROCEDURE DIVISION.",
+        "       MAIN-PARA.",
+        "           CALL 'SUBONE'.",
+        "       END PROGRAM PGMONE.",
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. PGMTWO.",
+        "       PROCEDURE DIVISION.",
+        "       MAIN-PARA.",
+        "           CALL 'SUBTWO'.",
+        "       END PROGRAM PGMTWO.",
+    ]
+    .join("\n")
+        + "\n";
+    fs::write(root.join("TWO.cbl"), two).unwrap();
+    let db = tmp.0.join("graph.db");
+    assert_nothing_pruned(&index(&root, &db));
+    let fall = lineage_names(&db, "FALLPGM");
+    for callee in ["SUBPGM", "LOGGER"] {
+        assert!(
+            fall.contains(callee),
+            "{callee} not in FALLPGM's lineage: {fall:?}"
+        );
+    }
+    let one = lineage_names(&db, "PGMONE");
+    assert!(one.contains("SUBONE") && !one.contains("SUBTWO"), "{one:?}");
+    let two = lineage_names(&db, "PGMTWO");
+    assert!(two.contains("SUBTWO") && !two.contains("SUBONE"), "{two:?}");
+    // One caller per call site: the paragraph only.
+    assert_eq!(
+        use_edge_sources(&db, "SUBPGM"),
+        BTreeSet::from(["NEXT-PARA".to_string()])
+    );
+}
