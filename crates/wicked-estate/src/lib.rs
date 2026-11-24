@@ -489,7 +489,28 @@ fn resolve_with_codegraph(
     };
     let (owned, rest): (Vec<_>, Vec<_>) = refs.iter().cloned().partition(|r| cg.owns(r, ids));
     let mut resolution = resolve_all_with_coverage(resolvers, &rest, index)?;
-    let (edges, unresolved) = cg.resolve(&owned, ids, extracted);
+    let (mut edges, unbound, mut unresolved) = cg.resolve(&owned, ids, extracted);
+    // A ref codegraph bound nothing for goes to estate's resolvers, which may bind it only into
+    // files codegraph does not answer for: a file that fell back (its callers would otherwise
+    // lose every edge into it), a file in an unswitched language, a stylesheet or a JSON file.
+    // Inside codegraph's files its verdict stands, so whatever stays unbound parks.
+    let outside: Vec<OutsideCodegraph<'_>> = resolvers
+        .iter()
+        .map(|inner| OutsideCodegraph {
+            inner: *inner,
+            cg,
+            ids,
+        })
+        .collect();
+    let outside: Vec<&dyn Resolver> = outside.iter().map(|r| r as &dyn Resolver).collect();
+    let outside_index = OutsideCodegraphIndex {
+        inner: index,
+        cg,
+        ids,
+    };
+    let through = resolve_all_with_coverage(&outside, &unbound, &outside_index)?;
+    edges.extend(through.site_edges);
+    unresolved.extend(through.unresolved.iter().map(codegraph::park));
     let mut best: HashMap<(String, String, String), Edge> = resolution
         .edges
         .drain(..)
@@ -510,6 +531,120 @@ fn resolve_with_codegraph(
     resolution.site_edges.extend(edges);
     resolution.unresolved.extend(unresolved);
     Ok(resolution)
+}
+
+/// Switching codegraph off re-extracts the files it answered with estate's pipeline, which
+/// drops the nodes codegraph minted there. Say so before it happens, and name the minted ids
+/// something outside codegraph's own facts links to (a knowledge or memory edge, an
+/// annotation): those links dangle once the node is gone.
+fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String>) -> Result<()> {
+    let minted: Vec<Node> = store
+        .all_nodes()?
+        .into_iter()
+        .filter(|n| {
+            files.contains(&n.location.file)
+                && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+        })
+        .collect();
+    if minted.is_empty() {
+        return Ok(());
+    }
+    let mut linked = Vec::new();
+    for n in &minted {
+        let outside = store
+            .neighbors(&n.symbol, wicked_estate_core::Direction::Dependents)?
+            .iter()
+            .any(|e| e.kind != EdgeKind::Contains && !e.resolved_by.starts_with("codegraph:"));
+        if outside {
+            linked.push(n.symbol.0.clone());
+        }
+    }
+    eprintln!(
+        "CODEGRAPH-OFF: {} node(s) codegraph minted in {} file(s) leave the graph; {} carry links from outside codegraph's facts, which will dangle{}",
+        minted.len(),
+        files.len(),
+        linked.len(),
+        if linked.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ": {}",
+                linked
+                    .iter()
+                    .take(20)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    );
+    Ok(())
+}
+
+/// The symbol index as the fall-through resolvers see it: name lookups and scans skip the
+/// definitions of files codegraph answers for, so a same-named definition there neither binds
+/// nor makes a candidate set ambiguous. `get` stays whole: resolvers look up the ref's own
+/// source node, which lives in a codegraph file.
+struct OutsideCodegraphIndex<'a> {
+    inner: &'a dyn SymbolIndex,
+    cg: &'a codegraph::Prepared,
+    ids: &'a codegraph::IdMap,
+}
+
+impl SymbolIndex for OutsideCodegraphIndex<'_> {
+    fn by_name(&self, name: &str) -> Vec<Node> {
+        let mut nodes = self.inner.by_name(name);
+        nodes.retain(|n| !self.cg.answers_file(&n.location.file, self.ids));
+        nodes
+    }
+
+    fn get(&self, id: &SymbolId) -> Option<Node> {
+        self.inner.get(id)
+    }
+
+    fn all_nodes(&self) -> Result<Vec<Node>> {
+        let mut nodes = self.inner.all_nodes()?;
+        nodes.retain(|n| !self.cg.answers_file(&n.location.file, self.ids));
+        Ok(nodes)
+    }
+
+    fn language_family(&self, language: &str) -> Option<String> {
+        self.inner.language_family(language)
+    }
+}
+
+/// An estate resolver whose edges into files codegraph answers for are dropped (see
+/// [`resolve_with_codegraph`]).
+struct OutsideCodegraph<'a> {
+    inner: &'a dyn Resolver,
+    cg: &'a codegraph::Prepared,
+    ids: &'a codegraph::IdMap,
+}
+
+impl Resolver for OutsideCodegraph<'_> {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn tier(&self) -> wicked_estate_core::ResolutionTier {
+        self.inner.tier()
+    }
+
+    fn resolve(
+        &self,
+        refs: &[wicked_estate_core::UnresolvedRef],
+        index: &dyn wicked_estate_core::SymbolIndex,
+    ) -> Result<Vec<Edge>> {
+        let mut edges = self.inner.resolve(refs, index)?;
+        // A target the index does not hold (a synthetic infra or rules endpoint) is never one
+        // of codegraph's definitions, so it stays.
+        edges.retain(|e| {
+            index
+                .get(&e.target)
+                .is_none_or(|n| !self.cg.answers_file(&n.location.file, self.ids))
+        });
+        Ok(edges)
+    }
 }
 
 fn call_value_ref_hints(
@@ -2244,6 +2379,17 @@ fn index_path_inner(
                 codegraph_forced.extend(forced);
                 codegraph_state = Some(prepared);
             }
+            Err(reason) if !stored_fingerprints.is_empty() => {
+                // The store holds codegraph's facts (minted ids that knowledge and memory may
+                // link to). One failed run must not switch the whole repo to the other producer:
+                // stop before any graph write, so the last good graph stays. Only an explicit
+                // switch-off (no --codegraph) hands the files back to estate.
+                let msg = format!(
+                    "CODEGRAPH-FAILED: {reason}; the graph keeps its last good state. Fix the run, or index without --codegraph to hand these files back to estate's pipeline"
+                );
+                eprintln!("{msg}");
+                return Err(wicked_estate_core::Error::Invalid(msg));
+            }
             Err(reason) => {
                 eprintln!(
                     "CODEGRAPH-FALLBACK: {reason}; estate's own pipeline runs for every file"
@@ -2267,6 +2413,9 @@ fn index_path_inner(
             })
             .map(|(path, _)| path.clone()),
     );
+    if codegraph_cfg.is_none() && !codegraph_forced.is_empty() {
+        report_minted_going_away(store, &codegraph_forced)?;
+    }
     changed_seed.extend(codegraph_forced.iter().cloned());
 
     // Call-derived value-flow edges can be stored with a changed callee-owned parameter/return

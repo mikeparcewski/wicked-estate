@@ -475,6 +475,11 @@ fn run_codegraph(cfg: &CodegraphConfig) -> std::result::Result<(), String> {
         .env("DO_NOT_TRACK", "1")
         .env("CODEGRAPH_NO_UPDATE_CHECK", "1")
         .env("CI", "1")
+        // The mirror sits under the user's work tree by default (`.wicked-estate/`): codegraph's
+        // `git` calls must not find the user's repo above it, and `init` must never offer to
+        // install git hooks there.
+        .env("GIT_CEILING_DIRECTORIES", &cfg.state_dir)
+        .env("CODEGRAPH_FORCE_WATCH", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
@@ -482,6 +487,9 @@ fn run_codegraph(cfg: &CodegraphConfig) -> std::result::Result<(), String> {
         // Windows needs SystemRoot for its own DLL loading; it is not a secret.
         cmd.env("SystemRoot", path);
     }
+    // Its own process group, so a timeout takes codegraph's `git` children down with it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start codegraph ({e})"))?;
@@ -498,6 +506,10 @@ fn run_codegraph(cfg: &CodegraphConfig) -> std::result::Result<(), String> {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= cfg.timeout => {
+                #[cfg(unix)]
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{}", child.id())])
+                    .status();
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
@@ -816,6 +828,9 @@ pub fn prepare(
     };
     std::fs::create_dir_all(&cfg.state_dir).map_err(|e| format!("state dir: {e}"))?;
     state_dir_outside_sources(&cfg.state_dir, input.root)?;
+    // The mirror and the scratch home are never one `git add -A` away from a commit.
+    std::fs::write(cfg.state_dir.join(".gitignore"), "*\n")
+        .map_err(|e| format!("state dir: {e}"))?;
     #[cfg(test)]
     if let Some(sql) = TEST_DATABASE_SQL.with(|t| t.borrow().clone()) {
         // Tests stand a recorded codegraph database (real bundle output, see
@@ -1031,6 +1046,9 @@ fn name_tail(raw: &str) -> String {
                 .map(|r| r.split(':').next().unwrap_or(r))
         })
         .unwrap_or(raw);
+    // An import spec keeps its quotes in estate (`'./util'`, `"@lib/util"`, `<stdio.h>`) and
+    // loses them in codegraph's refName.
+    let raw = raw.trim_matches(|c: char| matches!(c, '\'' | '"' | '`' | '<' | '>'));
     let raw = raw.trim_end_matches("()");
     let tail = raw
         .rsplit(['.', ':', '\\', '>', '/'])
@@ -1365,18 +1383,27 @@ impl Prepared {
         sites
     }
 
+    /// Whether codegraph answers for the definitions of `path`: an `Ok` file the id map did not
+    /// hand back to estate. Estate's resolvers bind into every other file.
+    pub(crate) fn answers_file(&self, path: &str, ids: &IdMap) -> bool {
+        matches!(self.verdicts.get(path), Some(Verdict::Ok)) && !ids.ambiguous.contains_key(path)
+    }
+
     /// Answer `refs` (all owned by codegraph, from files extracted this run) and add the
     /// codegraph-only facts of those files. Returns the site edges (one per bound ref, plus
-    /// codegraph-only edges) and the refs left unresolved, with the `codegraph:` prefix.
+    /// codegraph-only edges), the estate refs codegraph bound nothing for (unchanged, for
+    /// estate's resolvers to try against files codegraph does not answer for), and codegraph's
+    /// own unresolved rows at sites no estate ref covered (with the `codegraph:` prefix).
     pub(crate) fn resolve(
         &self,
         refs: &[UnresolvedRef],
         ids: &IdMap,
         extracted: &HashSet<String>,
-    ) -> (Vec<Edge>, Vec<UnresolvedRef>) {
+    ) -> (Vec<Edge>, Vec<UnresolvedRef>, Vec<UnresolvedRef>) {
         let sites = self.sites();
         let mut consumed = self.consumed.lock().unwrap_or_else(|e| e.into_inner());
         let mut edges = Vec::new();
+        let mut unbound = Vec::new();
         let mut unresolved = Vec::new();
         let mut covered: HashSet<(String, u32, String)> = HashSet::new();
         let mut dropped = 0usize;
@@ -1397,7 +1424,17 @@ impl Prepared {
         for r in refs {
             let key = key_of(r);
             covered.insert(key.clone());
-            let mut hits: Vec<usize> = sites.get(&key).cloned().unwrap_or_default();
+            // A site binds only a ref of a fitting kind: a call never takes a `references` or
+            // `imports` site that shares its line and name.
+            let mut hits: Vec<usize> = sites
+                .get(&key)
+                .map(|v| {
+                    v.iter()
+                        .copied()
+                        .filter(|i| site_kind_fits(&r.kind, &self.snap.edges[*i].kind))
+                        .collect()
+                })
+                .unwrap_or_default();
             let exact: Vec<usize> = hits
                 .iter()
                 .copied()
@@ -1427,10 +1464,7 @@ impl Prepared {
                 bound = true;
             }
             if !bound {
-                let mut parked = r.clone();
-                parked.raw_name = format!("{CODEGRAPH_REF_PREFIX}{}", r.raw_name);
-                parked.hints = Default::default();
-                unresolved.push(parked);
+                unbound.push(r.clone());
             }
         }
         // Codegraph-only edges sourced in files extracted this run.
@@ -1509,7 +1543,26 @@ impl Prepared {
             });
         }
         *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) += dropped;
-        (edges, unresolved)
+        (edges, unbound, unresolved)
+    }
+}
+
+/// Park a ref no resolver bound: the `codegraph:` prefix keeps every estate resolver, back-fill
+/// included, from name-binding it later (`routed_elsewhere`).
+pub(crate) fn park(r: &UnresolvedRef) -> UnresolvedRef {
+    let mut parked = r.clone();
+    parked.raw_name = format!("{CODEGRAPH_REF_PREFIX}{}", r.raw_name);
+    parked.hints = Default::default();
+    parked
+}
+
+/// Whether a codegraph site edge of kind `cg` can answer an estate ref of kind `estate`.
+fn site_kind_fits(estate: &EdgeKind, cg: &str) -> bool {
+    let call = matches!(cg, "calls" | "instantiates");
+    match estate {
+        EdgeKind::Calls | EdgeKind::Instantiates => call,
+        EdgeKind::Imports => cg == "imports",
+        _ => !call && cg != "imports",
     }
 }
 
@@ -1567,10 +1620,12 @@ fn codegraph_edge(
     location: Location,
 ) -> Edge {
     let confidence = e.confidence.unwrap_or(0.5);
-    let tier = if confidence >= 0.85 {
-        ResolutionTier::ImportMap
-    } else {
-        ResolutionTier::Heuristic
+    // The tier names codegraph's method, never its confidence: only an import or a file path
+    // is an import-map resolution; name, receiver, qualified-name and framework matches are
+    // heuristics (codegraph's confidence still rides on the edge).
+    let tier = match e.resolved_by.as_deref() {
+        Some("import" | "file-path") => ResolutionTier::ImportMap,
+        _ => ResolutionTier::Heuristic,
     };
     let mut edge = Edge::new(
         source,
@@ -1850,39 +1905,179 @@ mod tests {
         assert!(calls.iter().any(|(_, _, by)| by.starts_with("codegraph:")));
     }
 
+    fn try_index(
+        store: &mut SqliteStore,
+        root: &Path,
+        cfg: Option<&CodegraphConfig>,
+        sql: Option<&str>,
+    ) -> wicked_estate_core::Result<()> {
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = sql.map(str::to_string));
+        let out = crate::index_path_with(store, root, None, cfg).map(|_| ());
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = None);
+        out
+    }
+
     #[test]
-    fn a_failed_run_and_switching_off_both_return_every_file_to_estates_resolvers() {
+    fn a_failed_run_keeps_the_last_good_graph_and_only_switching_off_hands_files_back() {
+        // Coord r2 F3 (W12): one failed run must not move the whole repo to the other producer
+        // (that deletes every minted node and leaves knowledge links dangling).
         let tmp = tempfile::tempdir().unwrap();
         let cfg = config(tmp.path());
         let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
         index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
-        assert!(
-            store
-                .meta_get_key(FINGERPRINTS_META)
-                .is_some_and(|v| !v.is_empty())
-        );
-        // Codegraph fails: the files it answered re-extract and resolve with estate's resolvers.
-        index(&mut store, &fixture_root(), Some(&cfg), Some("FAIL"));
+        let fingerprints = store.meta_get_key(FINGERPRINTS_META);
+        assert!(fingerprints.as_deref().is_some_and(|v| !v.is_empty()));
+        let point = "ts-java . . . src/p/Shapes/Shapes#Point#";
+        let graph = |store: &SqliteStore| {
+            let mut nodes: Vec<String> = store
+                .all_nodes()
+                .unwrap()
+                .into_iter()
+                .map(|n| n.symbol.0)
+                .collect();
+            nodes.sort();
+            (nodes, edges(store, EdgeKind::Calls))
+        };
+        let before = graph(&store);
+        assert!(before.0.iter().any(|n| n == point));
+        // Codegraph fails with codegraph state in the store: the index stops, loudly, and the
+        // graph is the last good one.
+        let err = try_index(&mut store, &fixture_root(), Some(&cfg), Some("FAIL")).unwrap_err();
+        assert!(err.to_string().contains("CODEGRAPH-FAILED"), "{err}");
+        assert_eq!(graph(&store), before);
+        assert_eq!(store.meta_get_key(FINGERPRINTS_META), fingerprints);
+        // An explicit switch-off hands every file back to estate's resolvers, once.
+        index(&mut store, &fixture_root(), None, None);
         let calls = edges(&store, EdgeKind::Calls);
         assert!(!calls.is_empty());
         assert!(
             calls.iter().all(|(_, _, by)| !by.starts_with("codegraph:")),
             "{calls:?}"
         );
+        assert!(!graph(&store).0.iter().any(|n| n == point));
         assert_eq!(store.meta_get_key(FINGERPRINTS_META).as_deref(), Some(""));
-        // On again, then off: the same.
-        index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
-        assert!(
-            edges(&store, EdgeKind::Calls)
-                .iter()
-                .any(|(_, _, by)| by.starts_with("codegraph:"))
-        );
-        index(&mut store, &fixture_root(), None, None);
+        // With no codegraph state stored, a failed run falls back to estate's pipeline.
+        index(&mut store, &fixture_root(), Some(&cfg), Some("FAIL"));
         assert!(
             edges(&store, EdgeKind::Calls)
                 .iter()
                 .all(|(_, _, by)| !by.starts_with("codegraph:"))
         );
+    }
+
+    #[test]
+    fn callers_of_a_file_that_fell_back_keep_their_edges_into_it() {
+        // Coord r2 F1 (W16): src/lib/util.ts grew past the cap (size_exceeded, no nodes). Its
+        // caller src/svc.ts is still codegraph's; the call to helper must bind into the fallen
+        // back file through estate's resolvers, and never to the decoy codegraph answers for.
+        let sql = format!(
+            "{FIXTURE_SQL}\nUPDATE files SET errors = '[{{\"message\":\"too big\",\"severity\":\"error\",\"code\":\"size_exceeded\"}}]', node_count = 0 WHERE path = 'src/lib/util.ts';\n\
+             DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = 'src/lib/util.ts') OR target IN (SELECT id FROM nodes WHERE file_path = 'src/lib/util.ts');\n\
+             DELETE FROM unresolved_refs WHERE file_path = 'src/lib/util.ts';\n\
+             DELETE FROM nodes WHERE file_path = 'src/lib/util.ts';"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(&sql));
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get = calls_from(&calls, GET);
+        assert!(
+            from_get
+                .iter()
+                .any(|(_, t, by)| t == LIB_HELPER && !by.starts_with("codegraph:")),
+            "get() keeps its call into the fallen-back file: {from_get:?}"
+        );
+        assert!(
+            !from_get.iter().any(|(_, t, _)| t == DECOY_HELPER),
+            "{from_get:?}"
+        );
+        assert!(
+            store
+                .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}helper"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_import_of_a_file_codegraph_never_sees_keeps_its_edge() {
+        // Coord r2 F2 (W12): `import './styles.css'` has no codegraph site (the mirror holds only
+        // switched sources), so it goes to estate's resolvers instead of parking.
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for e in std::fs::read_dir(from).unwrap() {
+                let e = e.unwrap();
+                if e.file_type().unwrap().is_dir() {
+                    copy(&e.path(), &to.join(e.file_name()));
+                } else {
+                    std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        copy(&fixture_root(), &root);
+        let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+        std::fs::write(
+            root.join("src/svc.ts"),
+            format!("{svc}import './styles.css';\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join("src/styles.css"), ".user { color: red; }\n").unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
+        let imports = edges(&store, EdgeKind::Imports);
+        assert!(
+            imports
+                .iter()
+                .any(|(_, t, by)| t.contains("src/styles.css") && !by.starts_with("codegraph:")),
+            "{imports:?}"
+        );
+        assert!(
+            store
+                .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}'./styles.css'"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_site_binds_only_a_ref_of_a_fitting_kind_and_the_tier_names_the_method() {
+        // Coord r2 L9, L10.
+        assert!(site_kind_fits(&EdgeKind::Calls, "calls"));
+        assert!(site_kind_fits(&EdgeKind::Calls, "instantiates"));
+        assert!(!site_kind_fits(&EdgeKind::Calls, "references"));
+        assert!(!site_kind_fits(&EdgeKind::Calls, "imports"));
+        assert!(site_kind_fits(&EdgeKind::Imports, "imports"));
+        assert!(!site_kind_fits(&EdgeKind::References, "calls"));
+        assert!(site_kind_fits(&EdgeKind::References, "type_of"));
+        let cg = |by: &str| CgEdge {
+            source: "a".into(),
+            target: "b".into(),
+            kind: "calls".into(),
+            confidence: Some(0.95),
+            resolved_by: Some(by.into()),
+            ref_name: None,
+            line: Some(1),
+            col: Some(0),
+        };
+        let at = Location::new("a.ts", Span::ZERO);
+        let tier = |by: &str| {
+            codegraph_edge(
+                SymbolId("a".into()),
+                SymbolId("b".into()),
+                EdgeKind::Calls,
+                &cg(by),
+                at.clone(),
+            )
+            .provenance
+        };
+        use wicked_estate_core::Provenance;
+        assert_eq!(tier("import"), Provenance::ImportMap);
+        assert_eq!(tier("instance-method"), Provenance::Heuristic);
+        assert_eq!(tier("framework"), Provenance::Heuristic);
     }
 
     #[test]
@@ -2096,6 +2291,12 @@ mod tests {
             assert!(!root.join(inside).join("tree").exists());
         }
         run(root.join(".wicked-estate/graph.db.codegraph/_")).unwrap();
+        // Coord r2 L4: the state dir ignores itself.
+        assert_eq!(
+            std::fs::read_to_string(root.join(".wicked-estate/graph.db.codegraph/_/.gitignore"))
+                .unwrap(),
+            "*\n"
+        );
         run(tmp.path().join("elsewhere/_")).unwrap();
     }
 
@@ -2130,6 +2331,9 @@ mod tests {
         assert_eq!(name_tail("import-alias:h:helper"), "h");
         assert_eq!(name_tail("Foo::bar"), "bar");
         assert_eq!(name_tail("./util"), "util");
+        assert_eq!(name_tail("'./util'"), "util");
+        assert_eq!(name_tail("\"@lib/util\""), "util");
+        assert_eq!(name_tail("<stdio.h>"), name_tail("stdio.h"));
     }
 
     #[test]
