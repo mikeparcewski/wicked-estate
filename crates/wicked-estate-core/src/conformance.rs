@@ -2853,6 +2853,247 @@ fn sup_truncated(e: &Edge) -> u64 {
         .unwrap_or(0)
 }
 
+/// wicked-estate#543: edge contributions. An edge between two nodes neither file defines,
+/// asserted by two files (two RACF members `PERMIT P ID(U)`, two JCL streams binding one DD to
+/// one dataset), is ONE `(source, target, kind)` row. `remove_file` of either asserting file must
+/// leave it, owned by (located in) the other; removing the second removes it. Re-extracting a file
+/// (remove + upsert) re-asserts its contribution. An edge whose SOURCE node lives in the removed
+/// file still goes with it, whatever other file asserted it.
+pub fn edge_contribution_suite<S: GraphStore>(store: &mut S) {
+    const DEFS: &str = "ec/defs.txt";
+    const A: &str = "ec/a.racf";
+    const B: &str = "ec/b.racf";
+    const C: &str = "ec/c.racf";
+    let node = |name: &str, file: &str, kind: NodeKind| {
+        Node::new(
+            sym(name),
+            kind,
+            name,
+            Language::new("rust"),
+            Location::new(file, Span::ZERO),
+        )
+    };
+    let asserted = |file: &str, src: &str, tgt: &str, conf: f32| {
+        let mut e = Edge::new(
+            sym(src),
+            sym(tgt),
+            EdgeKind::References,
+            ResolutionTier::Parsed,
+            "conformance",
+        )
+        .with_location(Location::new(file, Span::ZERO));
+        e.confidence = crate::Confidence::new(conf);
+        e
+    };
+    // The edge `src -> tgt` as the store answers it: `None` when absent, else its owning file.
+    let owner_of = |store: &S, src: &str, tgt: &str| -> Option<String> {
+        let edges: Vec<Edge> = store
+            .neighbors(&sym(src), Direction::Dependencies)
+            .expect("neighbors")
+            .into_iter()
+            .filter(|e| e.target == sym(tgt) && e.kind == EdgeKind::References)
+            .collect();
+        assert!(
+            edges.len() <= 1,
+            "one row per (source, target, kind): {edges:?}"
+        );
+        edges.first().map(|e| {
+            e.location
+                .as_ref()
+                .map(|l| l.file.clone())
+                .unwrap_or_default()
+        })
+    };
+    let owner = |store: &S, src: &str| owner_of(store, src, "ec_u");
+    // Re-extract `file`: remove it, then write its assertions.
+    let index_all = |store: &mut S, file: &str, edges: &[Edge]| {
+        store.begin_batch().expect("begin");
+        store.remove_file(file).expect("remove_file");
+        store.upsert_edges(edges).expect("upsert edges");
+        store.commit_batch().expect("commit");
+    };
+    let index = |store: &mut S, file: &str, conf: f32| {
+        index_all(store, file, &[asserted(file, "ec_p", "ec_u", conf)]);
+    };
+    let remove = |store: &mut S, file: &str| {
+        store.begin_batch().expect("begin");
+        store.remove_file(file).expect("remove_file");
+        store.commit_batch().expect("commit");
+    };
+    store
+        .upsert_nodes(&[
+            node("ec_p", DEFS, NodeKind::Function),
+            node("ec_u", DEFS, NodeKind::Function),
+        ])
+        .expect("shared nodes");
+
+    // (EC-1) A then B assert the edge; B's higher confidence owns the row. Removing B (the owner)
+    // leaves the edge, now owned by A. Removing A too removes it.
+    index(store, A, 0.6);
+    index(store, B, 0.9);
+    assert_eq!(
+        owner(store, "ec_p").as_deref(),
+        Some(B),
+        "EC-1: B wins the row"
+    );
+    remove(store, B);
+    assert_eq!(
+        owner(store, "ec_p").as_deref(),
+        Some(A),
+        "EC-1: A still asserts it"
+    );
+    remove(store, A);
+    assert_eq!(owner(store, "ec_p"), None, "EC-1: no file asserts it");
+
+    // (EC-2) Removing the NON-owner leaves the owner's row as it was.
+    index(store, A, 0.9);
+    index(store, B, 0.6);
+    assert_eq!(owner(store, "ec_p").as_deref(), Some(A));
+    remove(store, B);
+    assert_eq!(owner(store, "ec_p").as_deref(), Some(A), "EC-2: owner kept");
+    remove(store, A);
+    assert_eq!(owner(store, "ec_p"), None);
+
+    // (EC-3) Re-extracting a file re-asserts its contribution: A, B, re-extract A, remove B → A.
+    // Then re-extract A again and remove A → gone (B's contribution went with B).
+    index(store, A, 0.6);
+    index(store, B, 0.9);
+    index(store, A, 0.6);
+    remove(store, B);
+    assert_eq!(
+        owner(store, "ec_p").as_deref(),
+        Some(A),
+        "EC-3: A re-asserted it"
+    );
+    index(store, A, 0.6);
+    remove(store, A);
+    assert_eq!(
+        owner(store, "ec_p"),
+        None,
+        "EC-3: B's contribution left with B"
+    );
+
+    // (EC-4) Three files, removed one by one, in both orders after the owner: the survivors of a
+    // removal are recorded again, so a second owner removal still finds the last file.
+    for order in [[A, B], [B, A]] {
+        index(store, A, 0.5);
+        index(store, B, 0.7);
+        index(store, C, 0.9);
+        remove(store, C);
+        assert_eq!(
+            owner(store, "ec_p").as_deref(),
+            Some(B),
+            "EC-4: best survivor"
+        );
+        remove(store, order[0]);
+        let last = order[1];
+        assert_eq!(
+            owner(store, "ec_p").as_deref(),
+            Some(last),
+            "EC-4 {order:?}"
+        );
+        remove(store, last);
+        assert_eq!(owner(store, "ec_p"), None, "EC-4 {order:?}");
+    }
+
+    // (EC-5) An edge whose SOURCE lives in the removed file goes with its source, even though
+    // another file asserted it too.
+    store
+        .upsert_nodes(&[node("ec_s", A, NodeKind::Function)])
+        .expect("source node in A");
+    store
+        .upsert_edges(&[
+            asserted(A, "ec_s", "ec_u", 0.6),
+            asserted(B, "ec_s", "ec_u", 0.9),
+        ])
+        .expect("two assertions");
+    assert_eq!(owner(store, "ec_s").as_deref(), Some(B));
+    remove(store, A);
+    assert_eq!(owner(store, "ec_s"), None, "EC-5: the source node is gone");
+    remove(store, B);
+    assert_eq!(owner(store, "ec_s"), None);
+
+    // (EC-6) A supported key (TS-S2A): the files' base contributions are tracked under support
+    // too. A, B, C assert it, a producer supports it, C then B are removed, support is
+    // retracted: A's base contribution is what is left.
+    let so = sup_owner("ec-producer", "ec");
+    let support = {
+        let mut e = asserted("ec/scip.ts", "ec_p", "ec_u", 0.95);
+        e.resolved_by = "ec-producer".into();
+        e
+    };
+    index(store, A, 0.5);
+    index(store, B, 0.7);
+    index(store, C, 0.9);
+    sup_replace(store, &so, 1, std::slice::from_ref(&support)).expect("support");
+    remove(store, C);
+    remove(store, B);
+    sup_replace(store, &so, 2, &[]).expect("retract");
+    assert_eq!(
+        owner(store, "ec_p").as_deref(),
+        Some(A),
+        "EC-6: A's base survives"
+    );
+    remove(store, A);
+    assert_eq!(owner(store, "ec_p"), None);
+
+    // (EC-7) Import keep: an Import node homed in A, targeted by an edge A and B both assert
+    // from a node in another file. Removing A keeps the Import (re-homed to B) and the edge.
+    store
+        .upsert_nodes(&[
+            node("ec_imp", A, NodeKind::Import),
+            node("ec_q", DEFS, NodeKind::Function),
+        ])
+        .expect("import + importer");
+    store
+        .upsert_edges(&[
+            asserted(A, "ec_q", "ec_imp", 0.9),
+            asserted(B, "ec_q", "ec_imp", 0.6),
+        ])
+        .expect("two assertions");
+    remove(store, A);
+    let imp = store.get_node(&sym("ec_imp")).expect("get_node");
+    assert_eq!(
+        imp.map(|n| n.location.file),
+        Some(B.to_string()),
+        "EC-7: the Import stays, homed in B"
+    );
+    assert_eq!(
+        owner_of(store, "ec_q", "ec_imp").as_deref(),
+        Some(B),
+        "EC-7"
+    );
+    remove(store, B);
+    assert_eq!(owner_of(store, "ec_q", "ec_imp"), None);
+
+    // (EC-8) A pruned dangling edge's contributions go with it, also when support re-projects
+    // the key: removing an asserting file later must not bring a base back.
+    store
+        .upsert_nodes(&[
+            node("ec_s2", DEFS, NodeKind::Function),
+            node("ec_t2", "ec/t.txt", NodeKind::Function),
+        ])
+        .expect("endpoints");
+    index_all(store, A, &[asserted(A, "ec_s2", "ec_t2", 0.6)]);
+    index_all(store, B, &[asserted(B, "ec_s2", "ec_t2", 0.9)]);
+    let dangling = {
+        let mut e = asserted("ec/scip.ts", "ec_s2", "ec_t2", 0.95);
+        e.resolved_by = "ec-producer".into();
+        e
+    };
+    sup_replace(store, &so, 3, std::slice::from_ref(&dangling)).expect("support");
+    remove(store, "ec/t.txt");
+    store.prune_dangling_edges().expect("prune");
+    remove(store, B);
+    sup_replace(store, &so, 4, &[]).expect("retract");
+    assert_eq!(
+        owner_of(store, "ec_s2", "ec_t2"),
+        None,
+        "EC-8: the pruned edge's contributions went with it"
+    );
+    remove(store, A);
+}
+
 /// TS-S2A: the authoritative, replaceable support plane (`crate::support`,
 /// `docs/ENGINE-CONTRACT.md` §3.4). Run on a FRESH store. Every shipped backend runs it; a new
 /// backend must pass it alongside [`graph_store_suite`].

@@ -73,6 +73,12 @@ fn surrealstore_multi_file_contributions() {
     conformance::multi_file_contribution_suite(&mut fresh());
 }
 
+/// Edge contributions (wicked-estate#543): the same suite every other shipped backend runs.
+#[test]
+fn surrealstore_edge_contributions() {
+    conformance::edge_contribution_suite(&mut fresh());
+}
+
 /// TS-S2A authoritative, replaceable edge support — the same suite every shipped backend runs.
 /// SurrealStore has no batch transaction, so each replacement commits as one `BEGIN … COMMIT`.
 #[test]
