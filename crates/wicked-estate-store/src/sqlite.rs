@@ -9713,4 +9713,183 @@ mod tests {
              {small} next to 1k: FTS maintenance scales with other repos' rows (#420)"
         );
     }
+
+    // ── #589: the open-time FTS check is O(log n) on a verified store ────────
+
+    /// VM op-ticks `f` costs on `conn` (`Connection::progress_handler`, as the #420 gate counts).
+    fn op_ticks(conn: &Connection, f: impl FnOnce(&Connection)) -> u64 {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let ops = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&ops);
+        conn.progress_handler(
+            1,
+            Some(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        f(conn);
+        conn.progress_handler(0, None::<fn() -> bool>);
+        ops.load(Ordering::Relaxed)
+    }
+
+    /// #589: on a store this build verified and then wrote in a batched session (an index run's
+    /// shape: skip-FTS nodes plus the bulk FTS rebuild, then a re-extract of one file), the FTS
+    /// check a writer open runs and the read-only currency check each cost the same at 10k nodes
+    /// as at 1k. The full row check (#571) reads every FTS row: 10x the rows, ~10x the ops.
+    #[test]
+    fn a_verified_stores_open_time_fts_check_does_not_grow_with_its_rows_589() {
+        fn costs(nodes: usize) -> (u64, u64) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("flat.db");
+            {
+                let mut store = SqliteStore::open(&path).unwrap();
+                let all: Vec<Node> = (0..nodes)
+                    .map(|i| fts_node(&format!("n{i}"), &format!("f/{}.rs", i / 100)))
+                    .collect();
+                let files: Vec<String> = (0..nodes.div_ceil(100))
+                    .map(|f| format!("f/{f}.rs"))
+                    .collect();
+                store.begin_batch().unwrap();
+                store.upsert_nodes_no_fts(&all).unwrap();
+                store
+                    .rebuild_fts_for_files(&files.iter().map(String::as_str).collect::<Vec<_>>())
+                    .unwrap();
+                store.commit_batch().unwrap();
+                store.begin_batch().unwrap();
+                store.remove_file("f/0.rs").unwrap();
+                store.upsert_nodes(&all[..100]).unwrap();
+                store.commit_batch().unwrap();
+            }
+            let writer = Connection::open(&path).unwrap();
+            let w = op_ticks(&writer, |c| migrate_fts_rowids(c).unwrap());
+            drop(writer);
+            let ro = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let r = op_ticks(&ro, |c| check_current(c).unwrap());
+            (w, r)
+        }
+        let (w1, r1) = costs(1_000);
+        let (w10, r10) = costs(10_000);
+        assert!(
+            w10 < w1 * 2,
+            "the writer open's FTS check cost {w10} op-ticks at 10k nodes vs {w1} at 1k (#589)"
+        );
+        assert!(
+            r10 < r1 * 2,
+            "the read-only currency check cost {r10} op-ticks at 10k nodes vs {r1} at 1k (#589)"
+        );
+    }
+
+    /// The `(rowid, symbol)` of every FTS row, by rowid.
+    fn fts_rows(conn: &Connection) -> Vec<(i64, String)> {
+        let mut stmt = conn
+            .prepare("SELECT rowid, symbol FROM nodes_fts ORDER BY rowid")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// A verified store with nodes `a` (sid 1) and `c` (sid 5) in f.rs and `b` (sid 3) in g.rs:
+    /// sids 2 and 4 are edge-only symbols, so automatic rowids cannot pass for sids.
+    fn verified_abc(path: &std::path::Path) {
+        {
+            let mut store = SqliteStore::open(path).unwrap();
+            store.upsert_nodes(&[fts_node("a", "f.rs")]).unwrap();
+            store.intern("gap1").unwrap();
+            store.upsert_nodes(&[fts_node("b", "g.rs")]).unwrap();
+            store.intern("gap2").unwrap();
+            store.upsert_nodes(&[fts_node("c", "f.rs")]).unwrap();
+        }
+        // A writer open of this build checks the rows (and may record that it did).
+        let store = SqliteStore::open(path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(
+            fts_rows(&store.conn),
+            vec![(1, "a".into()), (3, "b".into()), (5, "c".into())],
+            "fixture: sids 1, 3 and 5"
+        );
+    }
+
+    /// #589, the counterexample that sank the top-rowid fingerprint: an OLDER binary re-indexes
+    /// f.rs (its FTS rows deleted by symbol text, re-inserted with automatic rowids), which puts
+    /// the top node back on its own sid and `a` on a gap: rows (3,b) (4,a) (5,c). The highest
+    /// rowid, its symbol and the row count all match the verified store. The read-only check
+    /// refuses it (without reaching a write), the next writer open rebuilds, and an erasure of
+    /// `a` afterwards leaves none of its text searchable.
+    #[test]
+    fn an_older_writers_reindex_that_restores_the_top_row_is_still_rebuilt_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("older-reindex.db");
+        verified_abc(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DELETE FROM nodes_fts WHERE symbol IN ('a', 'c'); \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) \
+                   VALUES('a', 'a', '', 'oldbinarytoken'); \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES('c', 'c', '', 'docc');",
+            )
+            .unwrap();
+            assert_eq!(
+                fts_rows(&conn),
+                vec![(3, "b".into()), (4, "a".into()), (5, "c".into())],
+                "fixture: the older writer's rows"
+            );
+        }
+        let err = SqliteStore::open_readonly_current(&path)
+            .err()
+            .expect("rows not keyed by sid await a writer's rebuild");
+        assert!(err.to_string().contains("predates this build"), "{err}");
+        assert!(
+            err.to_string().contains("not all keyed"),
+            "the read-only check says why, never a failed write: {err}"
+        );
+        let mut store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        store.remove_nodes(&[sym("a")]).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "oldbinarytoken"), Vec::<String>::new());
+        assert_eq!(fts_hits(&store, "doca"), Vec::<String>::new());
+        drop(store);
+        assert!(SqliteStore::open_readonly_current(&path).is_ok());
+    }
+
+    /// #589: an older binary deleting a non-top FTS row (the top row, the count of nodes and the
+    /// highest sid unchanged) is caught on the next open and rebuilt.
+    #[test]
+    fn an_older_writers_delete_of_a_lower_fts_row_is_still_rebuilt_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("older-delete.db");
+        verified_abc(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("DELETE FROM nodes_fts WHERE symbol = 'a'")
+                .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "doca"), vec!["a".to_string()]);
+    }
+
+    /// #589: nodes this build wrote without their FTS rows (the skip-FTS path) and committed
+    /// before the bulk FTS rebuild ran (a run cut short) are not taken as verified by the next
+    /// open: it rebuilds them into search.
+    #[test]
+    fn skip_fts_nodes_committed_without_their_rebuild_are_rebuilt_on_the_next_open_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skip-fts.db");
+        verified_abc(&path);
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            store.begin_batch().unwrap();
+            store.upsert_nodes_no_fts(&[fts_node("d", "h.rs")]).unwrap();
+            store.commit_batch().unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "docd"), vec!["d".to_string()]);
+    }
 }
