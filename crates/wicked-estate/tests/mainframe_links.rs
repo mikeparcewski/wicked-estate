@@ -614,8 +614,9 @@ fn a_paragraph_jumping_to_itself_binds_to_no_same_named_paragraph_elsewhere() {
 #[test]
 fn lineage_of_a_program_reaches_calls_in_paragraphs_no_statement_names() {
     // FALLPGM falls from MAIN-PARA into NEXT-PARA, and its DECLARATIVES handler runs on an I/O
-    // error: no statement names either paragraph, so the program runs them itself. TWO.cbl holds
-    // two programs that both have a MAIN-PARA: each runs its own, bound by symbol.
+    // error: no statement names either paragraph, so the program runs them itself. CYCPGM's two
+    // paragraphs jump to each other. TWO.cbl holds two programs that both PERFORM a WORK-PARA of
+    // their own: each binds to its own, by symbol.
     let tmp = scratch("runs");
     let root = tmp.0.join("repo");
     fs::create_dir_all(&root).unwrap();
@@ -635,7 +636,18 @@ fn lineage_of_a_program_reaches_calls_in_paragraphs_no_statement_names() {
         ],
     );
     fs::write(root.join("FALLPGM.cbl"), fall).unwrap();
-    for leaf in ["SUBPGM", "LOGGER", "SUBONE", "SUBTWO"] {
+    let cyc = cobol(
+        "CYCPGM",
+        &[
+            "MAIN-PARA.",
+            "    CALL 'SUBCYC'",
+            "    GO TO WORK-PARA.",
+            "WORK-PARA.",
+            "    GO TO MAIN-PARA.",
+        ],
+    );
+    fs::write(root.join("CYCPGM.cbl"), cyc).unwrap();
+    for leaf in ["SUBPGM", "LOGGER", "SUBONE", "SUBTWO", "SUBCYC"] {
         let text = cobol(leaf, &["MAIN-PARA.", "    GOBACK."]);
         fs::write(root.join(format!("{leaf}.cbl")), text).unwrap();
     }
@@ -643,13 +655,17 @@ fn lineage_of_a_program_reaches_calls_in_paragraphs_no_statement_names() {
         "       IDENTIFICATION DIVISION.",
         "       PROGRAM-ID. PGMONE.",
         "       PROCEDURE DIVISION.",
-        "       MAIN-PARA.",
+        "       MAIN-ONE.",
+        "           PERFORM WORK-PARA.",
+        "       WORK-PARA.",
         "           CALL 'SUBONE'.",
         "       END PROGRAM PGMONE.",
         "       IDENTIFICATION DIVISION.",
         "       PROGRAM-ID. PGMTWO.",
         "       PROCEDURE DIVISION.",
-        "       MAIN-PARA.",
+        "       MAIN-TWO.",
+        "           PERFORM WORK-PARA.",
+        "       WORK-PARA.",
         "           CALL 'SUBTWO'.",
         "       END PROGRAM PGMTWO.",
     ]
@@ -667,6 +683,7 @@ fn lineage_of_a_program_reaches_calls_in_paragraphs_no_statement_names() {
     }
     let one = lineage_names(&db, "PGMONE");
     assert!(one.contains("SUBONE") && !one.contains("SUBTWO"), "{one:?}");
+    assert!(lineage_names(&db, "CYCPGM").contains("SUBCYC"));
     let two = lineage_names(&db, "PGMTWO");
     assert!(two.contains("SUBTWO") && !two.contains("SUBONE"), "{two:?}");
     // One caller per call site: the paragraph only.

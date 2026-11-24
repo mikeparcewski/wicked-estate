@@ -1265,17 +1265,183 @@ fn before_the_first_paragraph_only_a_literal_self_call_is_dropped() {
         .iter()
         .find(|n| n.name == "PAYROLL" && n.kind == NodeKind::Module)
         .unwrap();
-    let lines: Vec<u32> = ex
-        .refs
+    // The CALL and the XCTL of the program itself make no ref; the PERFORM binds to the
+    // paragraph PAYROLL.
+    assert!(
+        !ex.refs
+            .iter()
+            .any(|r| r.from == program.symbol && r.kind == EdgeKind::Calls),
+        "{:?}",
+        ex.refs
+    );
+    let para = ex
+        .nodes
         .iter()
-        .filter(|r| r.from == program.symbol && r.kind == EdgeKind::Calls)
-        .map(|r| r.location.span.start_line)
-        .collect();
+        .find(|n| n.name == "PAYROLL" && n.kind == NodeKind::Function)
+        .unwrap();
     let perform = text
         .lines()
         .position(|l| l.trim() == "PERFORM PAYROLL")
         .unwrap() as u32;
-    assert_eq!(lines, [perform], "only the PERFORM of paragraph PAYROLL");
+    assert!(ex.local_edges.iter().any(|e| {
+        e.source == program.symbol
+            && e.target == para.symbol
+            && e.kind == EdgeKind::Calls
+            && e.location
+                .as_ref()
+                .is_some_and(|l| l.span.start_line == perform)
+    }));
+}
+
+// ── round-2 delta folds: cycles, sections, symbols ─────────────────────────────────────────────
+
+#[test]
+fn a_cycle_no_unnamed_paragraph_reaches_is_run_from_its_first_paragraph() {
+    // MAIN-PARA and WORK-PARA jump to each other, so a statement names both. The program still
+    // runs the first, and SUBPGM's one caller stays MAIN-PARA.
+    let ex = extract(
+        "LOOPPGM",
+        &program(
+            "LOOPPGM",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    CALL 'SUBPGM'",
+                "    GO TO WORK-PARA.",
+                "WORK-PARA.",
+                "    GO TO MAIN-PARA.",
+            ],
+        ),
+    );
+    assert_eq!(calls_from(&ex, "LOOPPGM"), ["MAIN-PARA"]);
+    assert_eq!(callers_of(&ex, "SUBPGM"), ["MAIN-PARA"]);
+    // A loop that control falls into: the program runs 0000-INIT, and 1000-READ starts the loop.
+    let ex = extract(
+        "READPGM",
+        &program(
+            "READPGM",
+            DATA,
+            &[
+                "0000-INIT.",
+                "    DISPLAY 'START'.",
+                "1000-READ.",
+                "    GO TO 2000-PROC.",
+                "2000-PROC.",
+                "    CALL 'SUBPGM'",
+                "    GO TO 1000-READ.",
+            ],
+        ),
+    );
+    assert_eq!(calls_from(&ex, "READPGM"), ["0000-INIT", "1000-READ"]);
+    assert_eq!(callers_of(&ex, "2000-PROC"), ["1000-READ"]);
+}
+
+#[test]
+fn a_qualified_perform_of_a_same_named_paragraph_is_not_a_self_jump() {
+    // FIRST-SECTION's A-PARA performs SECOND-SECTION's A-PARA: a call, and FIRST-SECTION's A-PARA
+    // (named by no statement) is still the program's.
+    let text = program(
+        "QUALPGM",
+        DATA,
+        &[
+            "FIRST-SECTION SECTION.",
+            "A-PARA.",
+            "    PERFORM A-PARA OF SECOND-SECTION",
+            "    GOBACK.",
+            "SECOND-SECTION SECTION.",
+            "A-PARA.",
+            "    CALL 'SUBPGM'.",
+        ],
+    );
+    let ex = extract("QUALPGM", &text);
+    let paras: std::collections::BTreeSet<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.name == "A-PARA" && n.kind == NodeKind::Function)
+        .map(|n| n.symbol.clone())
+        .collect();
+    // Paragraph ids carry no section (#580), so the two may share one id: then the call is not
+    // stored (no self-edges). With two ids, the PERFORM is a call, never a jump to itself.
+    assert!(ex.local_edges.iter().all(|e| e.source != e.target));
+    if paras.len() == 2 {
+        let line = text
+            .lines()
+            .position(|l| l.trim() == "PERFORM A-PARA OF SECOND-SECTION")
+            .unwrap() as u32;
+        assert!(
+            ex.local_edges.iter().any(|e| e.kind == EdgeKind::Calls
+                && e.location
+                    .as_ref()
+                    .is_some_and(|l| l.span.start_line == line)),
+            "{:?}",
+            ex.local_edges
+        );
+    }
+}
+
+#[test]
+fn a_go_to_a_section_runs_its_paragraphs() {
+    let ex = extract(
+        "GOSECT",
+        &program(
+            "GOSECT",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    GO TO ERR-SECTION.",
+                "ERR-SECTION SECTION.",
+                "ERR-1.",
+                "    CALL 'ERRPGM'.",
+                "ERR-2.",
+                "    EXIT.",
+            ],
+        ),
+    );
+    assert_eq!(
+        calls_from(&ex, "MAIN-PARA"),
+        ["ERR-1", "ERR-2", "ERR-SECTION"]
+    );
+}
+
+#[test]
+fn two_programs_in_one_file_bind_a_performed_shared_name_to_their_own_paragraph() {
+    let text = [
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. PGMONE.",
+        "       PROCEDURE DIVISION.",
+        "       MAIN-ONE.",
+        "           PERFORM WORK-PARA.",
+        "       WORK-PARA.",
+        "           CALL 'SUBONE'.",
+        "       END PROGRAM PGMONE.",
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. PGMTWO.",
+        "       PROCEDURE DIVISION.",
+        "       MAIN-TWO.",
+        "           PERFORM WORK-PARA.",
+        "       WORK-PARA.",
+        "           CALL 'SUBTWO'.",
+        "       END PROGRAM PGMTWO.",
+    ]
+    .join("\n")
+        + "\n";
+    let ex = extract("TWOWORK", &text);
+    for (main, sub) in [("MAIN-ONE", "SUBONE"), ("MAIN-TWO", "SUBTWO")] {
+        let sym = &node(&ex, main).symbol;
+        let work: Vec<_> = ex
+            .local_edges
+            .iter()
+            .filter(|e| &e.source == sym && e.kind == EdgeKind::Calls)
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(work.len(), 1, "{main}: {work:?}");
+        assert!(
+            ex.refs
+                .iter()
+                .any(|r| r.from == work[0] && r.raw_name == sub),
+            "{main} performs the WORK-PARA that calls {sub}"
+        );
+    }
 }
 
 // ── cost guards ──────────────────────────────────────────────────────────────────────────────
@@ -1314,6 +1480,25 @@ fn many_exec_blocks_without_end_exec_extract_in_linear_time() {
     assert_extracts_within(
         "EXECPGM",
         &program("EXECPGM", DATA, &body),
+        std::time::Duration::from_secs(30),
+    );
+}
+
+#[test]
+fn many_paragraphs_extract_in_linear_time() {
+    // Each flow call and each paragraph looks up its unit and program once: 6,000 paragraphs,
+    // each performing the next.
+    let mut body = Vec::new();
+    for i in 0..6_000 {
+        body.push(format!("P{i}."));
+        body.push(format!("    PERFORM P{}.", i + 1));
+    }
+    body.push("P6000.".to_string());
+    body.push("    GOBACK.".to_string());
+    let body: Vec<&str> = body.iter().map(String::as_str).collect();
+    assert_extracts_within(
+        "MANYPGM",
+        &program("MANYPGM", DATA, &body),
         std::time::Duration::from_secs(30),
     );
 }
