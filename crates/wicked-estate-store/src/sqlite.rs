@@ -429,6 +429,10 @@ fn schema_objects_present(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// (#589) The read-only check's refusal of FTS rows not all keyed by their node's sid: the graph
+/// awaits a writer's #420 rebuild, which a read-only check never runs.
+const FTS_NOT_KEYED: &str = "the FTS rows are not all keyed by their node's sid";
+
 /// The read-only currency check behind [`SqliteStore::open_readonly_current`]. Its error names
 /// what is missing: a schema object, or the columns this build's schema has that the graph lacks.
 fn check_current(conn: &Connection) -> Result<()> {
@@ -439,9 +443,7 @@ fn check_current(conn: &Connection) -> Result<()> {
             if fts_stamped(conn)? || fts_rowid_migrated(conn)? {
                 Ok(())
             } else {
-                Err(wicked_estate_core::Error::Invalid(
-                    "the FTS rows are not all keyed by their node's sid".into(),
-                ))
+                Err(wicked_estate_core::Error::Invalid(FTS_NOT_KEYED.into()))
             }
         })
         .map_err(|e| {
@@ -585,7 +587,8 @@ fn wanted_a_write(e: &Error) -> bool {
 /// private copy of the database and its `-wal` in a fresh `0700` temp directory, so SQLite's
 /// sidecars are created there and never beside the graph (wicked-estate#506). The originals are
 /// only read, as plain files. `Some(Err)` only on evidence that the graph's schema predates this
-/// build (an object or a column it lacks, or a migration that wants to write); anything else that goes wrong with the copy (no temp
+/// build (an object or a column it lacks, a migration that wants to write, or FTS rows that await
+/// a writer's rebuild, #589); anything else that goes wrong with the copy (no temp
 /// space, a temp directory that is the graph's own, a copy SQLite cannot open) is `None`, and the
 /// ordinary open decides. A directory a killed process left behind is removed by the next check
 /// once it is ten minutes old.
@@ -631,7 +634,8 @@ fn check_private_copy(real: &std::path::Path) -> Option<Result<()>> {
         Err(e)
             if matches!(schema_objects_present(&conn), Err(Error::Invalid(_)))
                 || !missing_columns(&conn).is_empty()
-                || wanted_a_write(&e) =>
+                || wanted_a_write(&e)
+                || e.to_string().contains(FTS_NOT_KEYED) =>
         {
             Some(Err(e))
         }
