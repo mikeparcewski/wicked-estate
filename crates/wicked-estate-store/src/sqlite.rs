@@ -6576,7 +6576,7 @@ mod tests {
                 .unwrap();
             stmt.query_map(args, |r| r.get::<_, String>(3))
                 .unwrap()
-                .map(Result::unwrap)
+                .map(|row| row.unwrap())
                 .collect::<Vec<_>>()
                 .join("\n")
         };
