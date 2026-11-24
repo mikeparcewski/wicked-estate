@@ -583,18 +583,26 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
 
 /// The symbol index as the fall-through resolvers see it: name lookups and scans skip the
 /// definitions of files codegraph answers for, so a same-named definition there neither binds
-/// nor makes a candidate set ambiguous. `get` stays whole: resolvers look up the ref's own
-/// source node, which lives in a codegraph file.
+/// nor makes a candidate set ambiguous. File nodes and `get` stay whole: resolvers look up the
+/// importing file and the ref's own source node, which live in a codegraph file (the relative
+/// import resolver reads the importer's language from its File node). An edge into a codegraph
+/// file is dropped afterwards by [`OutsideCodegraph`].
 struct OutsideCodegraphIndex<'a> {
     inner: &'a dyn SymbolIndex,
     cg: &'a codegraph::Prepared,
     ids: &'a codegraph::IdMap,
 }
 
+impl OutsideCodegraphIndex<'_> {
+    fn visible(&self, n: &Node) -> bool {
+        n.kind == NodeKind::File || !self.cg.answers_file(&n.location.file, self.ids)
+    }
+}
+
 impl SymbolIndex for OutsideCodegraphIndex<'_> {
     fn by_name(&self, name: &str) -> Vec<Node> {
         let mut nodes = self.inner.by_name(name);
-        nodes.retain(|n| !self.cg.answers_file(&n.location.file, self.ids));
+        nodes.retain(|n| self.visible(n));
         nodes
     }
 
@@ -604,7 +612,7 @@ impl SymbolIndex for OutsideCodegraphIndex<'_> {
 
     fn all_nodes(&self) -> Result<Vec<Node>> {
         let mut nodes = self.inner.all_nodes()?;
-        nodes.retain(|n| !self.cg.answers_file(&n.location.file, self.ids));
+        nodes.retain(|n| self.visible(n));
         Ok(nodes)
     }
 
