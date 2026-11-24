@@ -2,6 +2,203 @@
   {
     "nodes": [
       {
+        "symbol": "file . cbl/ACCTPGM.cbl:",
+        "kind": "file",
+        "name": "cbl/ACCTPGM.cbl",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#",
+        "kind": "module",
+        "name": "ACCTPGM",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 276,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 9,
+            "end_col": 18
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#ACCT.",
+        "kind": "field",
+        "name": "ACCT",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 177,
+            "end_byte": 184,
+            "start_line": 5,
+            "start_col": 7,
+            "end_line": 5,
+            "end_col": 14
+          }
+        },
+        "signature": "01 ACCT",
+        "metadata": {
+          "cobol_parents": [],
+          "cobol_program": "ACCTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#BAL.",
+        "kind": "field",
+        "name": "BAL",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 196,
+            "end_byte": 211,
+            "start_line": 6,
+            "start_col": 10,
+            "end_line": 6,
+            "end_col": 25
+          }
+        },
+        "signature": "05 BAL PIC 9(4)",
+        "metadata": {
+          "cobol_parents": [
+            "ACCT"
+          ],
+          "cobol_program": "ACCTPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#MAIN-PARA().",
+        "kind": "function",
+        "name": "MAIN-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 247,
+            "end_byte": 276,
+            "start_line": 8,
+            "start_col": 7,
+            "end_line": 9,
+            "end_col": 18
+          }
+        },
+        "signature": "MAIN-PARA.",
+        "metadata": {
+          "behaviour": "stub",
+          "behaviour_reason": "exit_only",
+          "cobol_program": "ACCTPGM"
+        }
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/ACCTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/ACCTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#ACCT.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/ACCTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#BAL.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/ACCTPGM.cbl:",
+        "target": "ts-cobol . . . cbl/ACCTPGM/ACCTPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/ACCTPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
         "symbol": "file . cbl/CUSTPGM.cbl:",
         "kind": "file",
         "name": "cbl/CUSTPGM.cbl",
@@ -875,6 +1072,232 @@
           ],
           "cobol_programs": [
             "CUSTPGM"
+          ],
+          "cobol_role": "data"
+        }
+      }
+    ]
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cbl/FRAGPGM.cbl:",
+        "kind": "file",
+        "name": "cbl/FRAGPGM.cbl",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#",
+        "kind": "module",
+        "name": "FRAGPGM",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 7,
+            "end_byte": 249,
+            "start_line": 0,
+            "start_col": 7,
+            "end_line": 9,
+            "end_col": 18
+          }
+        },
+        "signature": "IDENTIFICATION DIVISION.",
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#ACCT.",
+        "kind": "field",
+        "name": "ACCT",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 121,
+            "end_byte": 128,
+            "start_line": 4,
+            "start_col": 7,
+            "end_line": 4,
+            "end_col": 14
+          }
+        },
+        "signature": "01 ACCT",
+        "metadata": {
+          "cobol_parents": [],
+          "cobol_program": "FRAGPGM"
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#MAIN-PARA().",
+        "kind": "function",
+        "name": "MAIN-PARA",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 186,
+            "end_byte": 249,
+            "start_line": 7,
+            "start_col": 7,
+            "end_line": 9,
+            "end_col": 18
+          }
+        },
+        "signature": "MAIN-PARA.",
+        "metadata": {
+          "behaviour": "real",
+          "cobol_program": "FRAGPGM"
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic ACCTFRAG:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "ACCTFRAG",
+        "language": "cobol",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 142,
+            "end_byte": 150,
+            "start_line": 5,
+            "start_col": 12,
+            "end_line": 5,
+            "end_col": 20
+          }
+        },
+        "metadata": {
+          "boundary_reason": "COPY ACCTFRAG: no copybook source named ACCTFRAG is indexed",
+          "is_declaration": true
+        }
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cbl/FRAGPGM.cbl:",
+        "target": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/FRAGPGM.cbl:",
+        "target": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#ACCT.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cbl/FRAGPGM.cbl:",
+        "target": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#MAIN-PARA().",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#",
+        "target": "cobol-copybook synthetic ACCTFRAG:",
+        "kind": "imports",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 142,
+            "end_byte": 150,
+            "start_line": 5,
+            "start_col": 12,
+            "end_line": 5,
+            "end_col": 20
+          }
+        },
+        "metadata": {
+          "via": "copy"
+        }
+      }
+    ],
+    "refs": [
+      {
+        "from": "ts-cobol . . . cbl/FRAGPGM/FRAGPGM#",
+        "raw_name": "BAL",
+        "kind": "references",
+        "location": {
+          "file": "cbl/FRAGPGM.cbl",
+          "span": {
+            "start_byte": 218,
+            "end_byte": 221,
+            "start_line": 8,
+            "start_col": 21,
+            "end_line": 8,
+            "end_col": 24
+          }
+        },
+        "hints": {
+          "cobol_copies": [
+            "ACCTFRAG"
+          ],
+          "cobol_of": [
+            "ACCT"
+          ],
+          "cobol_programs": [
+            "FRAGPGM"
           ],
           "cobol_role": "data"
         }
@@ -1905,6 +2328,293 @@
         }
       }
     ]
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cpy/ACCTFRAG.cpy:",
+        "kind": "file",
+        "name": "cpy/ACCTFRAG.cpy",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ACCTFRAG/BAL.",
+        "kind": "field",
+        "name": "BAL",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTFRAG.cpy",
+          "span": {
+            "start_byte": 10,
+            "end_byte": 25,
+            "start_line": 0,
+            "start_col": 10,
+            "end_line": 0,
+            "end_col": 25
+          }
+        },
+        "signature": "05 BAL PIC 9(4)",
+        "metadata": {
+          "cobol_copybook": "ACCTFRAG",
+          "cobol_open": true,
+          "cobol_parents": []
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic ACCTFRAG:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "ACCTFRAG",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "signature": "COPYBOOK",
+        "metadata": {}
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cpy/ACCTFRAG.cpy:",
+        "target": "ts-cobol . . . cpy/ACCTFRAG/BAL.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ACCTFRAG:",
+        "target": "ts-cobol . . . cpy/ACCTFRAG/BAL.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTFRAG.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
+  },
+  {
+    "nodes": [
+      {
+        "symbol": "file . cpy/ACCTREC.cpy:",
+        "kind": "file",
+        "name": "cpy/ACCTREC.cpy",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ACCTREC/ACCT.",
+        "kind": "field",
+        "name": "ACCT",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 77,
+            "end_byte": 84,
+            "start_line": 1,
+            "start_col": 7,
+            "end_line": 1,
+            "end_col": 14
+          }
+        },
+        "signature": "01 ACCT",
+        "metadata": {
+          "cobol_copybook": "ACCTREC",
+          "cobol_parents": []
+        }
+      },
+      {
+        "symbol": "ts-cobol . . . cpy/ACCTREC/BAL.",
+        "kind": "field",
+        "name": "BAL",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 96,
+            "end_byte": 111,
+            "start_line": 2,
+            "start_col": 10,
+            "end_line": 2,
+            "end_col": 25
+          }
+        },
+        "signature": "05 BAL PIC 9(4)",
+        "metadata": {
+          "cobol_copybook": "ACCTREC",
+          "cobol_parents": [
+            "ACCT"
+          ]
+        }
+      },
+      {
+        "symbol": "cobol-copybook synthetic ACCTREC:",
+        "kind": {
+          "other": "copybook"
+        },
+        "name": "ACCTREC",
+        "language": "cobol",
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "signature": "COPYBOOK",
+        "metadata": {}
+      }
+    ],
+    "local_edges": [
+      {
+        "source": "file . cpy/ACCTREC.cpy:",
+        "target": "ts-cobol . . . cpy/ACCTREC/ACCT.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "file . cpy/ACCTREC.cpy:",
+        "target": "ts-cobol . . . cpy/ACCTREC/BAL.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ACCTREC:",
+        "target": "ts-cobol . . . cpy/ACCTREC/ACCT.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "cobol-copybook synthetic ACCTREC:",
+        "target": "ts-cobol . . . cpy/ACCTREC/BAL.",
+        "kind": "contains",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "cobol-text",
+        "evidence_count": 0,
+        "location": {
+          "file": "cpy/ACCTREC.cpy",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      }
+    ],
+    "refs": []
   },
   {
     "nodes": [

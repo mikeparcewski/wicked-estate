@@ -615,7 +615,13 @@ impl LogicalBuilder<'_> {
             while b > s && matches!(src[b - 1], b'\n' | b'\r') {
                 b -= 1;
             }
-            s + (b - s).min(72)
+            // Column 72 in bytes, moved back to a character boundary so the logical text stays
+            // valid UTF-8 and the offset map exact.
+            let mut t = s + (b - s).min(72);
+            while t > s && t < src.len() && (src[t] & 0xC0) == 0x80 {
+                t -= 1;
+            }
+            t
         };
         let card = |i: usize| -> Option<&[u8]> {
             let (s, e) = lines[i];
@@ -632,6 +638,16 @@ impl LogicalBuilder<'_> {
             let at = (s + 7..stop(i)).find(|&p| src[p] != b' ')?;
             (src[at] == q).then_some(at)
         };
+        // The continuation of a literal open on line `i`: the next line that is not a comment
+        // card or blank, when it is a continuation card carrying the same quote.
+        let continuation_after = |i: usize, q: u8| -> Option<(usize, usize)> {
+            let k = (i + 1..lines.len()).find(|&k| {
+                let (s, e) = lines[k];
+                let blank = src[s..e].iter().all(u8::is_ascii_whitespace);
+                !blank && !card(k).is_some_and(|b| matches!(b[6], b'*' | b'/'))
+            })?;
+            continuation(k, q).map(|at| (k, at))
+        };
         let mut joined = false;
         let mut i = 0;
         let mut col = 0; // where line i's unread code starts (after a joined literal)
@@ -640,12 +656,9 @@ impl LogicalBuilder<'_> {
             let open = card(i)
                 .filter(|b| !matches!(b[6], b'*' | b'/'))
                 .and_then(|_| open_literal(src, s + col.max(7), stop(i)));
-            let Some((q, next)) = open.and_then(|q| {
-                (i + 1 < lines.len())
-                    .then(|| continuation(i + 1, q))
-                    .flatten()
-                    .map(|at| (q, at))
-            }) else {
+            let Some((q, (first, next))) =
+                open.and_then(|q| continuation_after(i, q).map(|c| (q, c)))
+            else {
                 self.copy(s + col, e);
                 i += 1;
                 col = 0;
@@ -653,7 +666,7 @@ impl LogicalBuilder<'_> {
             };
             joined = true;
             self.copy(s + col, stop(i));
-            let (mut j, mut at) = (i + 1, next);
+            let (mut j, mut at) = (first, next);
             loop {
                 let close = literal_close(src, at + 1, stop(j), q);
                 match close {
@@ -667,12 +680,9 @@ impl LogicalBuilder<'_> {
                     }
                     None => {
                         self.copy(at + 1, stop(j));
-                        match (j + 1 < lines.len())
-                            .then(|| continuation(j + 1, q))
-                            .flatten()
-                        {
-                            Some(n) => {
-                                j += 1;
+                        match continuation_after(j, q) {
+                            Some((k, n)) => {
+                                j = k;
                                 at = n;
                             }
                             None => {
@@ -734,8 +744,9 @@ fn literal_close(src: &[u8], from: usize, stop: usize, q: u8) -> Option<usize> {
 }
 
 /// The last blank in `src[s..=s + CARD_CODE_COLS]` outside literals and before a `*>` comment or
-/// an SQL `--` comment (a blank, then `--`): where a free-format line longer than a card breaks
-/// onto the next card. A comment runs to the end of its line, so nothing after it moves.
+/// an SQL `--` comment: where a free-format line longer than a card breaks onto the next card. A
+/// comment runs to the end of its line, so nothing after it moves (any `--` counts, as the SQL
+/// lexer reads it).
 fn card_split(src: &[u8], s: usize, body_end: usize) -> Option<usize> {
     let limit = (s + CARD_CODE_COLS).min(body_end);
     let mut quote: Option<u8> = None;
@@ -747,10 +758,7 @@ fn card_split(src: &[u8], s: usize, body_end: usize) -> Option<usize> {
             Some(_) => {}
             None if c == b'\'' || c == b'"' => quote = Some(c),
             None if c == b'*' && src.get(i + 1) == Some(&b'>') => return best,
-            None if c == b'-'
-                && src.get(i + 1) == Some(&b'-')
-                && (i == s || src[i - 1] == b' ') =>
-            {
+            None if c == b'-' && src.get(i + 1) == Some(&b'-') => {
                 return best;
             }
             None if c == b' ' && i > s => best = Some(i),
@@ -773,10 +781,9 @@ impl LogicalSource {
         } else if !has_continuation_card(text) || !b.continued_literals() {
             return None;
         }
-        let text_out = match String::from_utf8(b.out) {
-            Ok(s) => s,
-            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-        };
+        // Every cut is at an ASCII byte or a character boundary; should one not be, the file is
+        // read as it is rather than through an inexact map.
+        let text_out = String::from_utf8(b.out).ok()?;
         Some(Self {
             text: text_out,
             runs: b.runs,
@@ -3238,13 +3245,17 @@ mod tests {
 
     /// The role fixtures' sources, in index order.
     const ROLE_FIXTURES: &[&str] = &[
+        "cbl/ACCTPGM.cbl",
         "cbl/CUSTPGM.cbl",
+        "cbl/FRAGPGM.cbl",
         "cbl/OTHREC.cpy",
         "cbl/OTHPGM.cbl",
         "cbl/RECUR.cbl",
         "cbl/RECUR2.cbl",
         "cbl/SHIPPGM.cbl",
         "cbl/TWOPGM.cbl",
+        "cpy/ACCTFRAG.cpy",
+        "cpy/ACCTREC.cpy",
         "cpy/CUSTFRAG.cpy",
         "cpy/CUSTREC.cpy",
         "cpy/ORDFRAG.cpy",
@@ -3503,8 +3514,8 @@ mod tests {
     #[test]
     fn free_format_operators_and_sql_comments_stay_what_they_are() {
         let sql = format!(
-            "    EXEC SQL SELECT A INTO :W FROM REALTAB -- {} FROM GHOST\n    END-EXEC.\n",
-            "x".repeat(60)
+            "    EXEC SQL SELECT A INTO :W FROM REALTAB -- {0} FROM GHOST\n    END-EXEC.\n    EXEC SQL SELECT A INTO :W FROM REALTAB--{0} FROM GHOST\n    END-EXEC.\n",
+            "x ".repeat(30)
         );
         let text = format!(
             ">>SOURCE FORMAT FREE\nIDENTIFICATION DIVISION.\nPROGRAM-ID. P.\nDATA DIVISION.\nWORKING-STORAGE SECTION.\n01 W PIC 9.\n01 BASE PIC 9.\n01 RATE PIC 9.\nPROCEDURE DIVISION.\nMAIN-PARA.\n    COMPUTE W = BASE\n* RATE.\n{sql}    GOBACK.\n"
@@ -3525,6 +3536,38 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    /// A comment card between a literal and its continuation does not stop the join.
+    #[test]
+    fn continued_literal_joins_across_a_comment_card() {
+        let text = format!(
+            "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. ORDPGM.\n       PROCEDURE DIVISION.\n{:>72}\n      * a comment\n\n      -    'P\n      * another\n      -    'PGM') END-EXEC.\n           GOBACK.\n",
+            "EXEC CICS LINK PROGRAM('SHI",
+        );
+        let ex = run("cbl/ORDPGM.cbl", &text);
+        assert_eq!(
+            refs_named(&ex, EdgeKind::Calls, "SHIPPGM").len(),
+            1,
+            "{:?}",
+            calls(&ex)
+        );
+    }
+
+    /// Column 72 inside a multibyte character: the map stays exact for everything after it.
+    #[test]
+    fn continued_literal_cut_inside_a_multibyte_character_keeps_spans_exact() {
+        let first = format!("{}\u{e9}\n", " ".repeat(11) + "DISPLAY '" + &"A".repeat(51));
+        assert_eq!(first.find('\u{e9}'), Some(71));
+        let text = format!(
+            "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. P.\n       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n       01 W PIC 9.\n       PROCEDURE DIVISION.\n{first}      -    'B'.\n           MOVE 1 TO W.\n"
+        );
+        let l = LogicalSource::of(&text).expect("a continued literal");
+        assert!(l.text.is_char_boundary(l.text.len()));
+        let ex = run("cbl/P.cbl", &text);
+        let w = refs_named(&ex, EdgeKind::References, "W");
+        assert!(!w.is_empty(), "{:?}", ex.refs);
+        assert!(w.iter().all(|r| at(&text, &r.location.span) == "W"));
     }
 
     #[test]

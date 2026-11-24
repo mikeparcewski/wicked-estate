@@ -599,10 +599,10 @@ fn qualifier_match(n: &wicked_estate_core::Node, qualifiers: &[String]) -> Optio
 /// The targets of a role-tagged COBOL ref, or `None` (it parks) when there is none or the best
 /// tier holds more than one definition.
 ///
-/// - **data** binds a COBOL data item (`Field`) that meets its `OF`/`IN` qualifiers (items whose
-///   own groups meet them beat copybook fragments that might): first one of its own program (or
-///   of a program that contains it), else one in a copybook its program COPYs, else one in any
-///   other copybook. Another program's storage is a candidate only for a ref written in a
+/// - **data** binds a COBOL data item (`Field`) that meets its `OF`/`IN` qualifiers: first one
+///   of its own program (or of a program that contains it), else one in a copybook its program
+///   COPYs, else one in any other copybook; within that tier, items whose own groups meet the
+///   qualifiers beat copybook fragments that only might. Another program's storage is a candidate only for a ref written in a
 ///   copybook, and a paragraph of the same spelling never is.
 /// - **label** binds a COBOL paragraph or section, by the same tiers.
 /// - **program** binds the unique program `Module` (COBOL, HLASM, PL/I, C, C++), never a
@@ -643,20 +643,18 @@ fn cobol_targets(
         return (only.symbol != r.from).then_some((candidates, CobolTier::Elsewhere));
     }
     candidates.retain(|n| n.symbol != r.from);
-    if role == DATA {
-        if let Some(qualifiers) = string_list(r.hints.get(QUALIFIERS)) {
-            let met: Vec<_> = candidates
-                .into_iter()
-                .filter_map(|n| qualifier_match(&n, &qualifiers).map(|own| (own, n)))
-                .collect();
-            let own = met.iter().any(|(own, _)| *own);
-            candidates = met
-                .into_iter()
-                .filter(|(o, _)| *o == own)
-                .map(|(_, n)| n)
-                .collect();
-        }
-    }
+    // How each candidate meets a data use's qualifiers: `true` by its own groups, `false` only as
+    // a copybook fragment; a candidate that cannot meet them is gone.
+    let qualifiers = (role == DATA)
+        .then(|| string_list(r.hints.get(QUALIFIERS)))
+        .flatten();
+    let met: Vec<(bool, wicked_estate_core::Node)> = candidates
+        .into_iter()
+        .filter_map(|n| match &qualifiers {
+            Some(q) => qualifier_match(&n, q).map(|own| (own, n)),
+            None => Some((true, n)),
+        })
+        .collect();
     let copies: std::collections::HashSet<String> = string_list(r.hints.get(COPIES))
         .unwrap_or_default()
         .into_iter()
@@ -680,19 +678,23 @@ fn cobol_targets(
             None
         }
     };
-    let scored: Vec<_> = candidates
+    let scored: Vec<_> = met
         .into_iter()
-        .filter_map(|n| tier_of(&n).map(|t| (t, n)))
+        .filter_map(|(own, n)| tier_of(&n).map(|t| (t, own, n)))
         .collect();
+    // The best tier wins; within it, items whose own groups meet the qualifiers beat fragments.
     for tier in [CobolTier::SameFile, CobolTier::Copied, CobolTier::Elsewhere] {
-        let best: Vec<_> = scored
-            .iter()
-            .filter(|(t, _)| *t == tier)
-            .map(|(_, n)| n.clone())
-            .collect();
-        if !best.is_empty() {
-            return one_overload_family(best.iter()).then_some((best, tier));
+        let in_tier: Vec<_> = scored.iter().filter(|(t, ..)| *t == tier).collect();
+        if in_tier.is_empty() {
+            continue;
         }
+        let own = in_tier.iter().any(|(_, own, _)| *own);
+        let best: Vec<_> = in_tier
+            .into_iter()
+            .filter(|(_, o, _)| *o == own)
+            .map(|(.., n)| n.clone())
+            .collect();
+        return one_overload_family(best.iter()).then_some((best, tier));
     }
     None
 }
@@ -4033,6 +4035,23 @@ mod tests {
             edges
                 .iter()
                 .all(|(_, t, k, _)| *k != EdgeKind::Calls || !t.ends_with(":RECUR")),
+            "{edges:#?}"
+        );
+    }
+
+    /// The tier comes first: a COPYd fragment beats an item whose own groups meet the qualifiers
+    /// but sits in a copybook the program does not COPY, or in another program.
+    #[test]
+    fn cobol_qualifier_preference_stays_inside_the_winning_tier() {
+        let edges = cobol_role_edges(false);
+        assert_eq!(
+            edges_from(
+                &edges,
+                "cbl/FRAGPGM.cbl:FRAGPGM",
+                EdgeKind::References,
+                "BAL"
+            ),
+            ["cpy/ACCTFRAG.cpy:BAL"],
             "{edges:#?}"
         );
     }
