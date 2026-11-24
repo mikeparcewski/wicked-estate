@@ -6525,6 +6525,75 @@ mod tests {
         )
     }
 
+    /// #577: a name-prefix lookup reads the prefix's rows, not the rest of the name index. Its
+    /// upper bound sat inside `?2 IS NULL OR …`, which SQLite cannot use as an index constraint,
+    /// so a prefix near the start of the index walked every name after it. The cost of finding
+    /// the one `alpha` must not grow with 10x the names that sort after it.
+    #[test]
+    fn a_name_prefix_lookup_does_not_walk_the_names_after_the_prefix_577() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use wicked_estate_core::GraphRead;
+        fn ops_for(after: usize) -> u64 {
+            let mut store = open();
+            let mut nodes: Vec<Node> = (0..after)
+                .map(|i| make_node(&format!("zeta{i}"), &format!("z/{}.rs", i / 100)))
+                .collect();
+            nodes.push(make_node("Alpha", "a.rs"));
+            store.upsert_nodes_no_fts(&nodes).unwrap();
+            let ops = Arc::new(AtomicU64::new(0));
+            let counter = Arc::clone(&ops);
+            store.conn.progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            let hits = store.find_symbols_by_name_prefix("alp", None).unwrap();
+            store.conn.progress_handler(0, None::<fn() -> bool>);
+            assert_eq!(hits.len(), 1, "{hits:?}");
+            ops.load(Ordering::Relaxed)
+        }
+        let small = ops_for(1_000);
+        let large = ops_for(10_000);
+        assert!(
+            large < small * 2,
+            "a prefix lookup cost {large} op-ticks with 10k names after it vs {small} with 1k: \
+             it walks the name index past the prefix (#577)"
+        );
+    }
+
+    /// #577: both statements search `idx_nodes_name_folded`; the bounded one with both bounds as
+    /// index constraints, the open one (no successor exists) with the lower bound only.
+    #[test]
+    fn the_name_prefix_statements_search_the_folded_index_by_their_bounds_577() {
+        let store = open();
+        let plan = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> String {
+            let mut stmt = store
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            stmt.query_map(args, |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let bounded = plan(name_prefix_sql(true), &[&"alp", &"alq", &10]);
+        assert!(
+            bounded.contains("USING INDEX idx_nodes_name_folded (<expr>>? AND <expr><?)"),
+            "{bounded}"
+        );
+        let open_above = plan(name_prefix_sql(false), &[&"", &10]);
+        assert!(
+            open_above.contains("USING INDEX idx_nodes_name_folded (<expr>>?)"),
+            "{open_above}"
+        );
+        assert_eq!(prefix_successor("alp").as_deref(), Some("alq"));
+        assert_eq!(prefix_successor(""), None);
+    }
+
     #[test]
     fn sqlite_remove_file_clears_content_row() {
         use wicked_estate_core::GraphWrite;
@@ -9370,74 +9439,5 @@ mod tests {
             "re-extracting one file cost {large} op-ticks next to 10k co-located FTS rows vs \
              {small} next to 1k: FTS maintenance scales with other repos' rows (#420)"
         );
-    }
-
-    /// #577: a name-prefix lookup reads the prefix's rows, not the rest of the name index. Its
-    /// upper bound sat inside `?2 IS NULL OR …`, which SQLite cannot use as an index constraint,
-    /// so a prefix near the start of the index walked every name after it. The cost of finding
-    /// the one `alpha` must not grow with 10x the names that sort after it.
-    #[test]
-    fn a_name_prefix_lookup_does_not_walk_the_names_after_the_prefix_577() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use wicked_estate_core::GraphRead;
-        fn ops_for(after: usize) -> u64 {
-            let mut store = open();
-            let mut nodes: Vec<Node> = (0..after)
-                .map(|i| make_node(&format!("zeta{i}"), &format!("z/{}.rs", i / 100)))
-                .collect();
-            nodes.push(make_node("Alpha", "a.rs"));
-            store.upsert_nodes_no_fts(&nodes).unwrap();
-            let ops = Arc::new(AtomicU64::new(0));
-            let counter = Arc::clone(&ops);
-            store.conn.progress_handler(
-                1,
-                Some(move || {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    false
-                }),
-            );
-            let hits = store.find_symbols_by_name_prefix("alp", None).unwrap();
-            store.conn.progress_handler(0, None::<fn() -> bool>);
-            assert_eq!(hits.len(), 1, "{hits:?}");
-            ops.load(Ordering::Relaxed)
-        }
-        let small = ops_for(1_000);
-        let large = ops_for(10_000);
-        assert!(
-            large < small * 2,
-            "a prefix lookup cost {large} op-ticks with 10k names after it vs {small} with 1k: \
-             it walks the name index past the prefix (#577)"
-        );
-    }
-
-    /// #577: both statements search `idx_nodes_name_folded`; the bounded one with both bounds as
-    /// index constraints, the open one (no successor exists) with the lower bound only.
-    #[test]
-    fn the_name_prefix_statements_search_the_folded_index_by_their_bounds_577() {
-        let store = open();
-        let plan = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> String {
-            let mut stmt = store
-                .conn
-                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-                .unwrap();
-            stmt.query_map(args, |r| r.get::<_, String>(3))
-                .unwrap()
-                .map(Result::unwrap)
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let bounded = plan(name_prefix_sql(true), &[&"alp", &"alq", &10]);
-        assert!(
-            bounded.contains("USING INDEX idx_nodes_name_folded (<expr>>? AND <expr><?)"),
-            "{bounded}"
-        );
-        let open_above = plan(name_prefix_sql(false), &[&"", &10]);
-        assert!(
-            open_above.contains("USING INDEX idx_nodes_name_folded (<expr>>?)"),
-            "{open_above}"
-        );
-        assert_eq!(prefix_successor("alp").as_deref(), Some("alq"));
-        assert_eq!(prefix_successor(""), None);
     }
 }
