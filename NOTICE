@@ -55,6 +55,10 @@ COBOL tree-sitter external scanner (patched)
   License:   MIT License (the terms of this product's LICENSE file)
              Copyright (c) 2016 Max Brunsfeld
              The upstream license text ships in the directory (LICENSE).
+             arborium's packaging edits to scanner.c (the tree_sitter_cobol_*
+             symbol names, a fixed MAX_KEYWORDS buffer), from
+             https://github.com/bearcove/arborium: MIT License,
+             Copyright (c) 2024 Amos Wenger
 -------------------------------------------------------------------------------
 Visual Basic 6 tree-sitter grammar
   Path:      crates/wicked-estate-extract/vendor/tree-sitter-vb6/

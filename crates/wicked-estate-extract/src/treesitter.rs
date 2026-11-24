@@ -1533,11 +1533,19 @@ fn cobol_paragraph_end_map(tree: &tree_sitter::Tree) -> std::collections::HashMa
                 map.insert(node.start_byte(), end);
             }
         }
-        for i in 0..node.child_count() {
-            stack.push(node.child(i).unwrap());
-        }
+        push_children(&mut stack, node);
     }
     map
+}
+
+/// Push `node`'s children onto a depth-first `stack` so they pop in source order. A cursor walks
+/// them: `Node::child(i)` costs O(i), so an index loop is quadratic in a node's child count, and
+/// error recovery can give one ERROR node tens of thousands of children.
+fn push_children<'t>(stack: &mut Vec<tree_sitter::Node<'t>>, node: tree_sitter::Node<'t>) {
+    let mut cursor = node.walk();
+    let at = stack.len();
+    stack.extend(node.children(&mut cursor));
+    stack[at..].reverse();
 }
 
 /// Parents whose children are the flat COBOL paragraph/section headers and statements.
@@ -1609,9 +1617,8 @@ fn cobol_call_programs(tree: &tree_sitter::Tree, src: &[u8]) -> HashMap<usize, (
                 out.insert(x.start_byte(), (p, literal));
             }
         }
-        for i in 0..node.child_count() {
-            stack.push((node.child(i).unwrap(), program));
-        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor).map(|c| (c, program)));
     }
     out
 }
@@ -1651,9 +1658,7 @@ impl CobolDivision {
                 }
                 continue;
             }
-            for i in 0..n.child_count() {
-                walk.push(n.child(i).unwrap());
-            }
+            push_children(&mut walk, n);
         }
         found.sort_by_key(|(start, _, _, _)| *start);
         let mut headers: Vec<CobolHeader> = Vec::with_capacity(found.len());
@@ -1739,6 +1744,58 @@ impl CobolDivision {
     }
 }
 
+/// The header a PROCEDURE DIVISION's control reaches first: its first paragraph or section header
+/// after the division's own header (`USING`, `RETURNING`, the period) and its DECLARATIVES.
+/// Statements before that header run first and then fall through to it, unless the last of them
+/// ends the run or jumps away ([`cobol_ends_the_run`]): then `None`, as for an ERROR before the
+/// header (what it hides is not known). Statements before the header are the program's own and
+/// carry their own edges either way.
+fn cobol_entry_header<'t>(
+    division: tree_sitter::Node<'t>,
+    src: &[u8],
+) -> Option<tree_sitter::Node<'t>> {
+    const PREAMBLE: &[&str] = &[
+        "PROCEDURE",
+        "DIVISION",
+        "procedure_using_chaining",
+        "procedure_returning",
+        "procedure_declaratives",
+        "period",
+    ];
+    let mut cursor = division.walk();
+    let mut last = None;
+    for child in division.named_children(&mut cursor) {
+        if child.is_extra() || PREAMBLE.contains(&child.kind()) {
+            continue;
+        }
+        if child.is_error() || child.is_missing() {
+            return None;
+        }
+        if is_cobol_header(child) {
+            return match last {
+                Some(statement) if cobol_ends_the_run(statement, src) => None,
+                _ => Some(child),
+            };
+        }
+        last = Some(child);
+    }
+    None
+}
+
+/// Whether a statement never falls through to the next one: GOBACK, STOP RUN, EXIT PROGRAM, GO TO,
+/// or EXEC CICS RETURN / XCTL.
+fn cobol_ends_the_run(statement: tree_sitter::Node, src: &[u8]) -> bool {
+    let words = cobol_label_words(statement, src);
+    let word = |i: usize| words.get(i).map(String::as_str);
+    match statement.kind() {
+        "goback_statement" | "goto_statement" => true,
+        "stop_statement" => word(1) == Some("RUN"),
+        "exit_statement" => word(1) == Some("PROGRAM"),
+        "exec_statement" => word(1) == Some("CICS") && matches!(word(2), Some("RETURN" | "XCTL")),
+        _ => false,
+    }
+}
+
 /// The words of a label or name node, uppercased: `A-PARA OF SECOND-SECTION` → 3 words.
 fn cobol_label_words(n: tree_sitter::Node, src: &[u8]) -> Vec<String> {
     n.utf8_text(src)
@@ -1761,6 +1818,9 @@ fn cobol_label_words(n: tree_sitter::Node, src: &[u8]) -> Vec<String> {
 ///   there (a typo, a name in another program, an ambiguous name) the range is unknown, and
 ///   only X and Y are returned, so they still resolve or park by name.
 /// - `GO TO A [B …] [DEPENDING ON X]` transfers control to each label: stored as a call to each.
+/// - A PROCEDURE DIVISION's entry ([`cobol_entry_header`]) runs as a PERFORM of that header, at
+///   the division's first byte, so the call starts from the program: lineage from a program
+///   reaches what its paragraphs call, and the program has a call of its own.
 ///
 /// Each division's headers are collected and indexed once, and each range costs its lookups and
 /// the headers it calls, so this is linear in the tree and the calls it returns.
@@ -1769,8 +1829,24 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<(String, usize,
     let mut divisions: HashMap<usize, CobolDivision> = HashMap::new();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
-        for i in (0..node.child_count()).rev() {
-            stack.push(node.child(i).unwrap());
+        push_children(&mut stack, node);
+        if node.kind() == "procedure_division" {
+            // The program's entry: run its first header, as a PERFORM of it would.
+            if let Some(entry) = cobol_entry_header(node, src) {
+                let div = divisions
+                    .entry(node.id())
+                    .or_insert_with(|| CobolDivision::of(node, src));
+                let h = &div.headers;
+                let i = h.partition_point(|x| x.start < entry.start_byte());
+                if h.get(i).is_some_and(|x| x.start == entry.start_byte()) {
+                    let span = entry
+                        .child_by_field_name("name")
+                        .map_or_else(|| ts_span(entry), ts_span);
+                    for p in &h[i..=h[i].last] {
+                        out.push((p.name.clone(), node.start_byte(), span));
+                    }
+                }
+            }
         }
         if node.kind() == "goto_statement" {
             let mut cursor = node.walk();
@@ -5333,29 +5409,10 @@ impl Extractor for TreeSitterExtractor {
                 }
                 raw_refs.push((name, EdgeKind::Calls, pos, span));
             }
-            // A CALL of another program is the program's call too: lineage (Calls and Imports
-            // only) lists a program's callee programs from the program, not only from the
-            // paragraph that calls. The ref at the program's first byte starts from its Module.
-            // A literal CALL of the program itself gets no program twin (a self-edge); a dynamic
-            // CALL's target is not known yet, so its twin is always kept.
+            // A call starts from the paragraph or section it is in, never also from its program:
+            // a program twin would be one call site counted as two callers. A program's callee
+            // programs are reached through its entry call (`cobol_entry_header`).
             let program_of_call = cobol_call_programs(&tree, src);
-            let projected: Vec<_> = raw_refs
-                .iter()
-                .filter(|(_, ek, _, _)| *ek == EdgeKind::Calls)
-                .filter_map(|(name, _, pos, span)| {
-                    let &(program, literal) = program_of_call.get(pos)?;
-                    let module = enclosing_def(&defs, program);
-                    // A CALL outside every paragraph already starts from the program.
-                    if enclosing_def(&defs, *pos).map(|d| d.start) == module.map(|d| d.start) {
-                        return None;
-                    }
-                    if literal && module.is_some_and(|m| m.name.eq_ignore_ascii_case(name)) {
-                        return None;
-                    }
-                    Some((name.clone(), EdgeKind::Calls, program, *span))
-                })
-                .collect();
-            raw_refs.extend(projected);
             // A literal CALL of the program itself made before its first paragraph starts from
             // the program: a self-edge, so no ref (one made in a paragraph is kept above).
             raw_refs.retain(|(name, ek, pos, _)| {
@@ -8883,9 +8940,15 @@ See the [docs](docs/).
             .iter()
             .filter(|r| r.kind == EdgeKind::Calls)
             .collect();
-        // Each CALL from main-para and from the program (a call to another program is both's).
-        assert_eq!(calls.len(), 4);
-        assert!(calls.iter().all(|r| r.raw_name == "PRICEPGM"));
+        // Each CALL from main-para only, plus the program's entry call to main-para.
+        let names: Vec<_> = calls.iter().map(|r| r.raw_name.as_str()).collect();
+        assert_eq!(
+            names.iter().filter(|n| **n == "PRICEPGM").count(),
+            2,
+            "{names:?}"
+        );
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names.contains(&"MAIN-PARA"), "{names:?}");
     }
 
     #[test]

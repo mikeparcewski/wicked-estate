@@ -136,6 +136,34 @@ fn cobol(id: &str, body: &[&str]) -> String {
     out.join("\n") + "\n"
 }
 
+/// The names of the distinct sources of the stored use edges into nodes named `target`: the
+/// edge kinds wicked-core's corroboration counts as callers (`is_use_edge`).
+fn use_edge_sources(db: &Path, target: &str) -> BTreeSet<String> {
+    let store = SqliteStore::open(db).unwrap();
+    let nodes: HashMap<_, Node> = store
+        .all_nodes()
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.symbol.clone(), n))
+        .collect();
+    let is_use = |k: &EdgeKind| match k {
+        EdgeKind::Calls | EdgeKind::References | EdgeKind::Instantiates => true,
+        EdgeKind::Other(t) => matches!(
+            t.as_str(),
+            "invokes" | "uses" | "accesses" | "serves" | "reads" | "writes"
+        ),
+        _ => false,
+    };
+    store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| is_use(&e.kind) && e.source != e.target)
+        .filter(|e| nodes.get(&e.target).is_some_and(|n| n.name == target))
+        .map(|e| nodes[&e.source].name.clone())
+        .collect()
+}
+
 fn assert_nothing_pruned(stderr: &str) {
     assert!(
         !stderr.contains("pruned"),
@@ -182,10 +210,10 @@ fn brief_fixture_links_resolve_through_the_user_queries() {
 
     // JCL STEP1 → ORDPGM → SHIPPGM → TAXPGM, as two legs + TAXPGM's blast radius (the shortest
     // STEP1 → TAXPGM path is the direct `CALL 'TAXPGM'`, which is correct). The LINK is made by
-    // paragraph MAIN-PARA, and a call to another program is the program's call too.
+    // paragraph MAIN-PARA, the program's entry.
     assert_eq!(
         path_names(&db, "STEP1", "SHIPPGM"),
-        ["STEP1", "ORDPGM", "SHIPPGM"]
+        ["STEP1", "ORDPGM", "MAIN-PARA", "SHIPPGM"]
     );
     assert!(dependent_names(&db, "SHIPPGM").contains("MAIN-PARA"));
     let lineage = lineage_names(&db, "ORDPGM");
@@ -195,6 +223,12 @@ fn brief_fixture_links_resolve_through_the_user_queries() {
             "{callee} not in ORDPGM's lineage: {lineage:?}"
         );
     }
+    // One call site is one caller. wicked-core's corroboration counts each distinct source of a
+    // use edge into a program as independent evidence, so the LINK must not also start from ORDPGM.
+    assert_eq!(
+        use_edge_sources(&db, "SHIPPGM"),
+        BTreeSet::from(["MAIN-PARA".to_string()])
+    );
     assert_eq!(path_names(&db, "SHIPPGM", "TAXPGM"), ["SHIPPGM", "TAXPGM"]);
     let tax = dependent_names(&db, "TAXPGM");
     for who in ["SHIPPGM", "ORDPGM", "STEP1"] {
@@ -205,14 +239,14 @@ fn brief_fixture_links_resolve_through_the_user_queries() {
     }
 
     // The dynamic CALL WS-PGM ('PRICEPGM'): no PRICEPGM in this repo, so it parks under the
-    // prefixed name (from CALC-PARA and from ORDPGM), and WS-PGM says why it resolved to that name.
+    // prefixed name (from CALC-PARA, the one call site), and WS-PGM says why it resolved to that name.
     let store = SqliteStore::open(&db).unwrap();
     assert_eq!(
         store
             .unresolved_refs_for_name("cobol-dynamic-call:PRICEPGM")
             .unwrap()
             .len(),
-        2
+        1
     );
     let nodes = store.all_nodes().unwrap();
     assert!(
@@ -255,16 +289,12 @@ fn dynamic_call_binds_at_heuristic_and_backfills_when_the_program_appears() {
         .filter(|e| e.kind != EdgeKind::Contains)
         .filter(|e| nodes.get(&e.target).is_some_and(|n| n.name == "PRICEPGM"))
         .collect();
-    // The paragraph that makes the CALL, and its program (a call to another program is both's).
+    // The paragraph that makes the CALL, only: one call site is one caller (corroboration).
     let sources: BTreeSet<&str> = to_price
         .iter()
         .map(|e| nodes[&e.source].name.as_str())
         .collect();
-    assert_eq!(
-        sources,
-        BTreeSet::from(["CALC-PARA", "ORDPGM"]),
-        "{to_price:?}"
-    );
+    assert_eq!(sources, BTreeSet::from(["CALC-PARA"]), "{to_price:?}");
     for edge in &to_price {
         assert_eq!(edge.kind, EdgeKind::Calls);
         assert_eq!(
@@ -313,7 +343,7 @@ fn documented_edges() -> Vec<(&'static str, NodeKind, EdgeKind)> {
         // cobol_links.rs (+ the tree-sitter COBOL extractor): calls and data uses start from the
         // paragraph, which the program contains; every other link starts from the program.
         ("cbl/", NodeKind::Function, EdgeKind::Calls),
-        // ...and a call to another program from the program too (lineage walks Calls only).
+        // ...and the program's entry: it runs its first paragraph.
         ("cbl/", NodeKind::Module, EdgeKind::Calls),
         ("cbl/", NodeKind::Module, EdgeKind::Contains),
         ("cbl/", NodeKind::Module, EdgeKind::Imports),

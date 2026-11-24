@@ -398,10 +398,8 @@ fn go_to_targets_become_calls_from_the_paragraph() {
 #[test]
 fn calls_and_data_uses_start_from_the_paragraph_that_makes_them() {
     let ex = extract("THRUPGM", &program("THRUPGM", DATA, THRU));
-    assert!(
-        calls_from(&ex, "THRUPGM").is_empty(),
-        "no call starts at the program"
-    );
+    // The program's one call is its entry: it runs its first paragraph.
+    assert_eq!(calls_from(&ex, "THRUPGM"), ["MAIN-PARA"]);
     assert_eq!(refs_from(&ex, "1000-A"), ["WS-A", "WS-B", "WS-FLAG"]);
     assert_eq!(refs_from(&ex, "1000-B"), ["WS-A", "WS-B"]);
     assert_eq!(refs_from(&ex, "2000-B"), ["WS-FLAG"]);
@@ -480,8 +478,8 @@ fn cics_and_sql_calls_and_data_uses_start_from_the_paragraph() {
     let ex = extract("LINKPGM", &text);
     assert_eq!(calls_from(&ex, "1000-LINK"), ["SUBPGM"]);
     assert_eq!(refs_from(&ex, "1000-LINK"), ["WS-A", "WS-B"]);
-    // A call to another program is the program's too (see the lineage projection below).
-    assert_eq!(calls_from(&ex, "LINKPGM"), ["SUBPGM"]);
+    // The LINK is the paragraph's only: the program's one call is its entry.
+    assert_eq!(calls_from(&ex, "LINKPGM"), ["MAIN-PARA"]);
     assert!(refs_from(&ex, "LINKPGM").is_empty());
 }
 
@@ -658,12 +656,8 @@ fn a_jump_to_its_own_paragraph_is_no_call() {
     );
     let ex = extract("LOOPPGM", &text);
     assert_eq!(calls_from(&ex, "LOOP-PARA"), ["DONE-PARA"]);
-    assert!(
-        !ex.refs
-            .iter()
-            .any(|r| r.kind == EdgeKind::Calls && r.raw_name == "LOOP-PARA"),
-        "a self-targeting call must not be a ref"
-    );
+    // The only call to LOOP-PARA is the program's entry, not the GO TO inside it.
+    assert_eq!(callers_of(&ex, "LOOP-PARA"), ["LOOPPGM"]);
 }
 
 #[test]
@@ -694,29 +688,150 @@ fn sort_input_and_output_procedures_call_every_paragraph_of_their_range() {
     );
 }
 
+/// Every `Calls` ref source to `target`, by node name, sorted: one per call site's container.
+fn callers_of(ex: &Extraction, target: &str) -> Vec<String> {
+    let mut out: Vec<String> = ex
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Calls && r.raw_name == target)
+        .filter_map(|r| ex.nodes.iter().find(|n| n.symbol == r.from))
+        .map(|n| n.name.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[test]
-fn a_call_to_another_program_is_also_the_programs_call() {
-    // Lineage walks Calls only: the program must still list the programs its paragraphs call, as
-    // a program → program edge next to the paragraph's. PERFORM and GO TO stay paragraph-only.
+fn one_call_site_is_one_caller_the_paragraph_that_makes_it() {
+    // Corroboration (wicked-core) counts each distinct caller of a program as an independent
+    // source: a call stored from the paragraph AND from its program would be one site counted as
+    // two. Static CALL, CICS XCTL and a dynamic CALL each start from the paragraph only.
     let text = program(
         "CALLPGM",
-        DATA,
+        &["01  WS-PGM        PIC X(8) VALUE 'DYNPGM'."],
         &[
             "MAIN-PARA.",
             "    PERFORM 1000-CALL.",
             "    GOBACK.",
             "1000-CALL.",
-            "    CALL 'SUBPGM' USING WS-A",
+            "    CALL 'SUBPGM' USING WS-PGM",
+            "    CALL WS-PGM",
             "    EXEC CICS XCTL PROGRAM('NEXTPGM') END-EXEC.",
         ],
     );
     let ex = extract("CALLPGM", &text);
-    assert_eq!(calls_from(&ex, "1000-CALL"), ["NEXTPGM", "SUBPGM"]);
-    assert_eq!(calls_from(&ex, "CALLPGM"), ["NEXTPGM", "SUBPGM"]);
+    for target in ["SUBPGM", "NEXTPGM", "cobol-dynamic-call:DYNPGM"] {
+        assert_eq!(callers_of(&ex, target), ["1000-CALL"], "{target}");
+    }
     assert_eq!(calls_from(&ex, "MAIN-PARA"), ["1000-CALL"]);
+    assert_eq!(calls_from(&ex, "CALLPGM"), ["MAIN-PARA"]);
 }
 
-// ── round-1 re-review folds ──────────────────────────────────────────────────────────────────
+// ── the program's entry ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_program_runs_its_first_paragraph() {
+    // A program whose statements all sit in paragraphs calls its first one: lineage from the
+    // program reaches what its paragraphs call, and the program has a behaviour edge of its own.
+    let ex = extract(
+        "CALLPGM",
+        &program(
+            "CALLPGM",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    PERFORM 1000-CALL",
+                "    GOBACK.",
+                "1000-CALL.",
+                "    CALL 'SUBPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(calls_from(&ex, "CALLPGM"), ["MAIN-PARA"]);
+    assert_eq!(callers_of(&ex, "MAIN-PARA"), ["CALLPGM"]);
+    assert_eq!(callers_of(&ex, "1000-CALL"), ["MAIN-PARA"]);
+}
+
+#[test]
+fn the_entry_skips_using_comments_and_declaratives_and_runs_a_first_section_whole() {
+    let using = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. USINGPGM.\n       \
+                 DATA DIVISION.\n       LINKAGE SECTION.\n       01  LK-A PIC X.\n       \
+                 PROCEDURE DIVISION USING LK-A.\n      * the entry\n       MAIN-PARA.\n           \
+                 GOBACK.\n";
+    assert_eq!(
+        calls_from(&extract("USINGPGM", using), "USINGPGM"),
+        ["MAIN-PARA"]
+    );
+    let decl = program(
+        "DECLPGM",
+        DATA,
+        &[
+            "DECLARATIVES.",
+            "ERR-SECTION SECTION.",
+            "    USE AFTER STANDARD ERROR PROCEDURE ON INFILE.",
+            "ERR-PARA.",
+            "    EXIT.",
+            "END DECLARATIVES.",
+            "MAIN-PARA.",
+            "    GOBACK.",
+        ],
+    );
+    assert_eq!(
+        calls_from(&extract("DECLPGM", &decl), "DECLPGM"),
+        ["MAIN-PARA"]
+    );
+    let section = program(
+        "SECTPGM",
+        DATA,
+        &[
+            "MAIN-SECTION SECTION.",
+            "MAIN-PARA.",
+            "    GOBACK.",
+            "MAIN-EXIT.",
+            "    EXIT.",
+            "WORK-SECTION SECTION.",
+            "WORK-PARA.",
+            "    EXIT.",
+        ],
+    );
+    assert_eq!(
+        calls_from(&extract("SECTPGM", &section), "SECTPGM"),
+        ["MAIN-EXIT", "MAIN-PARA", "MAIN-SECTION"]
+    );
+}
+
+#[test]
+fn statements_before_the_first_paragraph_fall_through_to_it_unless_they_end_the_run() {
+    // CBSTM03A.CBL:262-296: the division opens with statements and then falls into 0000-START,
+    // so the program's callee programs are reached through it.
+    let calls = |body: &[&str]| {
+        let mut lines = body.to_vec();
+        lines.extend(["0000-START.", "    PERFORM 2000-B.", "2000-B.", "    EXIT."]);
+        calls_from(
+            &extract("TOPPGM", &program("TOPPGM", DATA, &lines)),
+            "TOPPGM",
+        )
+    };
+    assert_eq!(
+        calls(&["    DISPLAY 'START'", "    OPEN OUTPUT WS-A."]),
+        ["0000-START"]
+    );
+    assert_eq!(
+        calls(&["    IF WS-FLAG = 'Y'", "        GOBACK", "    END-IF."]),
+        ["0000-START"],
+        "a conditional GOBACK still falls through"
+    );
+    // Control never reaches 0000-START after these: only the statements' own calls.
+    for (end, expected) in [
+        ("    GOBACK.", &[][..]),
+        ("    STOP RUN.", &[][..]),
+        ("    EXEC CICS RETURN END-EXEC.", &[][..]),
+        ("    GO TO 2000-B.", &["2000-B"][..]),
+    ] {
+        assert_eq!(calls(&["    DISPLAY 'START'", end]), expected, "{end}");
+    }
+}
 
 #[test]
 fn an_unterminated_copy_replacing_does_not_take_the_next_paragraph() {
@@ -849,11 +964,11 @@ fn a_paragraph_named_like_the_program_it_calls_keeps_its_call() {
             .any(|r| r.from == para.symbol && r.raw_name == "SHIPPGM"),
         "the paragraph's CALL is not a self-jump"
     );
-    assert_eq!(calls_from(&ex, "ORDPGM"), ["SHIPPGM"]);
+    assert_eq!(calls_from(&ex, "ORDPGM"), ["MAIN-PARA"]);
 }
 
 #[test]
-fn a_dynamic_call_through_an_item_named_like_the_program_keeps_both_refs() {
+fn a_dynamic_call_through_an_item_named_like_the_program_keeps_its_ref() {
     let text = program(
         "DRIVER",
         &["01  DRIVER        PIC X(8) VALUE 'SUBPGM'."],
@@ -871,12 +986,12 @@ fn a_dynamic_call_through_an_item_named_like_the_program_keeps_both_refs() {
         .filter(|r| r.from == program.symbol && r.kind == EdgeKind::Calls)
         .map(|r| r.raw_name.as_str())
         .collect();
-    assert_eq!(from_program, ["cobol-dynamic-call:SUBPGM"]);
+    assert_eq!(from_program, ["MAIN-PARA"], "the entry only");
     assert_eq!(calls_from(&ex, "MAIN-PARA"), ["cobol-dynamic-call:SUBPGM"]);
 }
 
 #[test]
-fn a_call_or_xctl_of_the_program_itself_has_no_program_twin() {
+fn a_call_or_xctl_of_the_program_itself_starts_from_its_paragraph_only() {
     let text = program(
         "SELFPGM",
         DATA,
@@ -892,11 +1007,16 @@ fn a_call_or_xctl_of_the_program_itself_has_no_program_twin() {
         .iter()
         .find(|n| n.name == "SELFPGM" && n.kind == NodeKind::Module)
         .unwrap();
-    assert!(
-        !ex.refs
-            .iter()
-            .any(|r| r.from == program.symbol && r.kind == EdgeKind::Calls),
-        "a program → itself ref is a self-edge"
+    let from_program: Vec<_> = ex
+        .refs
+        .iter()
+        .filter(|r| r.from == program.symbol && r.kind == EdgeKind::Calls)
+        .map(|r| r.raw_name.as_str())
+        .collect();
+    assert_eq!(
+        from_program,
+        ["MAIN-PARA"],
+        "the entry only, no program → itself ref"
     );
     assert_eq!(calls_from(&ex, "MAIN-PARA"), ["SELFPGM"]);
 }
@@ -1075,4 +1195,44 @@ fn before_the_first_paragraph_only_a_literal_self_call_is_dropped() {
         .position(|l| l.trim() == "PERFORM PAYROLL")
         .unwrap() as u32;
     assert_eq!(lines, [perform], "only the PERFORM of paragraph PAYROLL");
+}
+
+// ── cost guards ──────────────────────────────────────────────────────────────────────────────
+
+/// Extracts `text` as `name.cbl` and fails when that takes longer than a generous bound. The
+/// bounds sit far above the fixed code's run (a few seconds in a debug build) and below the
+/// quadratic one each guards against, so a loaded runner does not trip them.
+fn assert_extracts_within(name: &str, text: &str, bound: std::time::Duration) {
+    let started = std::time::Instant::now();
+    let _ = extract(name, text);
+    let took = started.elapsed();
+    assert!(took < bound, "{name}: {took:?} (bound {bound:?})");
+}
+
+#[test]
+fn a_rust_source_saved_as_cbl_does_not_walk_error_children_quadratically() {
+    // Error recovery gives one ERROR node a child per token in text the grammar rejects; walking a
+    // node's children by index (`Node::child(i)` is O(i)) was quadratic: about a minute for these
+    // 8,000 lines in a debug build. (The parse itself still costs more on such text than it did
+    // when recovery swallowed whole lines: wicked-estate#583.)
+    let text: String = include_str!("../src/treesitter.rs")
+        .lines()
+        .take(8_000)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_extracts_within("RUSTTEXT", &text, std::time::Duration::from_secs(30));
+}
+
+#[test]
+fn many_exec_blocks_without_end_exec_extract_in_linear_time() {
+    // Each scan for END-EXEC stops at the next EXEC (scanner patch 3); without that, each one
+    // reads to the end of the file: quadratic.
+    let body: Vec<&str> = std::iter::once("MAIN-PARA.")
+        .chain(std::iter::repeat_n("    EXEC CICS RETURN.", 16_000))
+        .collect();
+    assert_extracts_within(
+        "EXECPGM",
+        &program("EXECPGM", DATA, &body),
+        std::time::Duration::from_secs(30),
+    );
 }

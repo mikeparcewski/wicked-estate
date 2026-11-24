@@ -7,7 +7,7 @@
 //!
 //! | Source construct | Stored as |
 //! |---|---|
-//! | `EXEC CICS LINK/XCTL PROGRAM('P')` | `Calls` refs paragraph → `P` and program → `P` (any language; parks if absent) |
+//! | `EXEC CICS LINK/XCTL PROGRAM('P')` | `Calls` ref paragraph → `P` (any language; parks if absent) |
 //! | `EXEC CICS SEND MAP('M') [MAPSET('S')]` | `other:writes` edge program → shared `cics-map:S.M` |
 //! | `EXEC CICS RECEIVE MAP('M') [MAPSET('S')]` | `other:reads` edge program → shared `cics-map:S.M` |
 //! | `EXEC SQL SELECT … FROM T` (and cursors, subselects, joins, MERGE `USING`) | `other:reads` edge program → shared `db2:T` |
@@ -28,11 +28,12 @@
 //!
 //! **Every source is a real node** of this extraction. Calls and data uses (the `Calls` and
 //! `References` refs above) start from the innermost paragraph or section holding the construct,
-//! as the tree-sitter extractor's PERFORM and data-name refs do; a call to another program (LINK,
-//! XCTL, and the extractor's `CALL`) is also the program's, so lineage, which walks `Calls`
-//! only, lists a program's callee programs. Every other link starts from the
-//! program Module whose span holds the construct (nested programs pick the innermost), else the
-//! first program, else the copybook node, else the File node. Literal inference (dynamic calls,
+//! as the tree-sitter extractor's PERFORM and data-name refs do. One call site is one caller:
+//! a call is never also stored from its program (that would count it twice). Lineage reaches a
+//! program's callee programs through the program's entry call to its first paragraph (see the
+//! extractor's `cobol_entry_header`). Every other link starts from the program Module whose span
+//! holds the construct (nested programs pick the innermost), else the first program, else the
+//! copybook node, else the File node. Literal inference (dynamic calls,
 //! map names), labels and DD names are scoped to that program. A shared target is minted by the referencing file as a BOUNDARY record
 //! ([`Node::as_boundary`]) whose reason says what source would define it; the defining file's
 //! record wins in the store when it is indexed (see [`crate::contrib`]).
@@ -1132,20 +1133,11 @@ impl Pass<'_> {
                             self.dynamic_ref_name(prog, &op.value)
                         };
                         if !raw.is_empty() {
-                            // From the paragraph, and from the program too (a call to another
-                            // program is the program's: lineage walks Calls only). A LINK or XCTL
-                            // of the program itself gets no program twin: a self-edge.
+                            // From the paragraph or section it is in, else the program; never
+                            // from both (one call site, one caller). From the program itself, a
+                            // LINK or XCTL of the program is a self-edge: no ref.
                             let unit = self.anchors.unit(whole.start());
                             let own = op.literal && program_id.as_deref() == Some(raw.as_str());
-                            if unit != from && !own {
-                                self.out.refs.push(UnresolvedRef::new(
-                                    from.clone(),
-                                    raw.clone(),
-                                    EdgeKind::Calls,
-                                    loc.clone(),
-                                ));
-                            }
-                            // From the program itself (before any paragraph): no self-edge.
                             if !(unit == from && own) {
                                 self.out.refs.push(UnresolvedRef::new(
                                     unit,
@@ -1850,13 +1842,10 @@ mod tests {
         let ex = run("cbl/ORDPGM.cbl", ORDPGM);
         let pgm = module_sym(&ex, "ORDPGM");
         let link: Vec<_> = ex.refs.iter().filter(|r| r.raw_name == "SHIPPGM").collect();
-        // A call starts from the paragraph that makes it, and a call to another program from the
-        // program too; a table read from the program.
+        // A call starts from the paragraph that makes it, only (one site, one caller); a table
+        // read from the program.
         let sources: BTreeSet<_> = link.iter().map(|r| r.from.clone()).collect();
-        assert_eq!(
-            sources,
-            BTreeSet::from([paragraph_sym(&ex, "MAIN-PARA"), pgm.clone()])
-        );
+        assert_eq!(sources, BTreeSet::from([paragraph_sym(&ex, "MAIN-PARA")]));
         assert!(link.iter().all(|r| r.kind == EdgeKind::Calls));
         let reads = edge_to(
             &ex,
@@ -2049,11 +2038,8 @@ mod tests {
             })
             .map(|r| r.raw_name.as_str())
             .collect();
-        // From MAIN-PARA and from the program.
-        assert_eq!(
-            flag_names,
-            vec!["cobol-dynamic-var:WS-FLAG", "cobol-dynamic-var:WS-FLAG"]
-        );
+        // From MAIN-PARA only: one call site, one caller.
+        assert_eq!(flag_names, vec!["cobol-dynamic-var:WS-FLAG"]);
     }
 
     #[test]
@@ -2135,10 +2121,11 @@ mod tests {
             c.iter()
                 .filter(|r| *r == "cobol-dynamic-var:WS-PGM")
                 .count(),
-            4,
-            "the CALL and the XCTL, each from MAIN-PARA and from the program: {c:?}"
+            2,
+            "the CALL and the XCTL, each from MAIN-PARA only: {c:?}"
         );
-        assert_eq!(c.len(), 4, "{c:?}");
+        // ...and the program's entry call to MAIN-PARA.
+        assert_eq!(c.len(), 3, "{c:?}");
         let f = ex.nodes.iter().find(|n| n.name == "WS-PGM").unwrap();
         assert_eq!(f.metadata["dynamic_call"]["status"], "unresolved");
         assert!(
