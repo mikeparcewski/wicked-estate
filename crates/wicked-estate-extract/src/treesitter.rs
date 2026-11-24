@@ -294,9 +294,33 @@ fn lang_markdown() -> tree_sitter::Language {
     tree_sitter_md::LANGUAGE.into()
 }
 
-// Legacy mainframe: COBOL via the arborium-cobol grammar (tree-sitter 0.24-compatible).
+// Legacy mainframe: COBOL via the arborium-cobol grammar's parse tables, with the patched external
+// scanner from `vendor/tree-sitter-cobol-scanner` (compiled by build.rs). The crate's own scanner
+// turned any one unparsed statement into a parse stop: everything after it became one ERROR node,
+// so the paragraphs there got no node (wicked-estate#578). See that scanner's header for the two
+// patches.
+unsafe extern "C" {
+    fn wicked_cobol_language(
+        base: *const tree_sitter::ffi::TSLanguage,
+    ) -> *const tree_sitter::ffi::TSLanguage;
+}
+
 fn lang_cobol() -> tree_sitter::Language {
-    arborium_cobol::language().into()
+    static PATCHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let ptr = *PATCHED.get_or_init(|| {
+        let base: tree_sitter::Language = arborium_cobol::language().into();
+        // SAFETY: `base` is the crate's static TSLanguage; the C side only reads it, copies it
+        // once into its own static, and returns that copy (or NULL on an ABI mismatch).
+        let patched = unsafe { wicked_cobol_language(base.into_raw()) };
+        assert!(
+            !patched.is_null(),
+            "arborium-cobol's language is not the ABI-15, 7-external-token layout the patched \
+             COBOL scanner was written for"
+        );
+        patched as usize
+    });
+    // SAFETY: non-null (asserted above) and points at a static that lives for the process.
+    unsafe { tree_sitter::Language::from_raw(ptr as *const tree_sitter::ffi::TSLanguage) }
 }
 
 // ── W2.1 arborium batch — ABI 15 grammars (tree-sitter 0.25) ─────────────────
@@ -1504,16 +1528,24 @@ fn cobol_paragraph_end_map(tree: &tree_sitter::Tree) -> std::collections::HashMa
     // procedure_division may be nested under program_definition etc., so walk the whole tree.
     let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
-        if COBOL_HEADERS.contains(&node.kind()) {
+        if is_cobol_header(node) {
             if let Some(end) = cobol_paragraph_end(node) {
                 map.insert(node.start_byte(), end);
             }
         }
-        for i in 0..node.child_count() {
-            stack.push(node.child(i).unwrap());
-        }
+        push_children(&mut stack, node);
     }
     map
+}
+
+/// Push `node`'s children onto a depth-first `stack` so they pop in source order. A cursor walks
+/// them: `Node::child(i)` costs O(i), so an index loop is quadratic in a node's child count, and
+/// error recovery can give one ERROR node tens of thousands of children.
+fn push_children<'t>(stack: &mut Vec<tree_sitter::Node<'t>>, node: tree_sitter::Node<'t>) {
+    let mut cursor = node.walk();
+    let at = stack.len();
+    stack.extend(node.children(&mut cursor));
+    stack[at..].reverse();
 }
 
 /// Parents whose children are the flat COBOL paragraph/section headers and statements.
@@ -1521,23 +1553,453 @@ const COBOL_PROC_PARENTS: &[&str] = &["procedure_division", "procedure_declarati
 /// The node kinds that start a COBOL paragraph or section.
 pub(crate) const COBOL_HEADERS: &[&str] = &["paragraph_header", "section_header"];
 
-/// End byte of the COBOL paragraph/section a header starts: the next header's start in the same
-/// `procedure_division` / `procedure_declaratives`, else the end of that parent. `None` when the
-/// header's parent is neither. The single boundary rule shared by the span fixup and the
-/// behaviour classifier.
-pub(crate) fn cobol_paragraph_end(header: tree_sitter::Node) -> Option<usize> {
+/// A paragraph or section header that is one: a header node with no ERROR child. Error recovery
+/// builds headers out of statement words the grammar cannot parse (`ENTRY 'DLITCBL' USING A.`
+/// gives a header named `ENTRY` or `A` holding an ERROR); those are neither nodes nor boundaries.
+/// A header whose period is on the next line (`2000-SEND-MAP` then `.`) is a real one.
+pub(crate) fn is_cobol_header(node: tree_sitter::Node) -> bool {
+    if !COBOL_HEADERS.contains(&node.kind()) {
+        return false;
+    }
+    let mut cursor = node.walk();
+    !node.children(&mut cursor).any(|c| c.is_error())
+}
+
+/// End byte of the COBOL paragraph/section a header starts, in the same `procedure_division` /
+/// `procedure_declaratives`: for a paragraph, the next header's start; for a section, the next
+/// SECTION header's start, so a section spans its paragraphs. Else the end of that parent. `None`
+/// when the header's parent is neither. The span fixup's (and so the attribution's) boundary.
+fn cobol_paragraph_end(header: tree_sitter::Node) -> Option<usize> {
+    if header.kind() == "section_header" {
+        cobol_next_header_start(header, &["section_header"])
+    } else {
+        cobol_next_header_start(header, COBOL_HEADERS)
+    }
+}
+
+/// End byte of the statements right after a COBOL header: the next header's start, of either
+/// kind, in the same parent, else that parent's end; `None` as [`cobol_paragraph_end`]. The
+/// behaviour classifier's boundary: a section's own statements stop at its first paragraph.
+pub(crate) fn cobol_body_end(header: tree_sitter::Node) -> Option<usize> {
+    cobol_next_header_start(header, COBOL_HEADERS)
+}
+
+fn cobol_next_header_start(header: tree_sitter::Node, ends: &[&str]) -> Option<usize> {
     let parent = header.parent()?;
     if !COBOL_PROC_PARENTS.contains(&parent.kind()) {
         return None;
     }
     let mut next = header.next_sibling();
     while let Some(sib) = next {
-        if COBOL_HEADERS.contains(&sib.kind()) {
+        if ends.contains(&sib.kind()) && is_cobol_header(sib) {
             return Some(sib.start_byte());
         }
         next = sib.next_sibling();
     }
     Some(parent.end_byte())
+}
+
+/// For each COBOL `CALL` statement (keyed by the start byte of its target operand, the call
+/// ref's position): the first byte of the program that holds it, and whether the operand is a
+/// literal (a program name) rather than a data item (a dynamic call).
+fn cobol_call_programs(tree: &tree_sitter::Tree, src: &[u8]) -> HashMap<usize, (usize, bool)> {
+    let mut out = HashMap::new();
+    let mut stack = vec![(tree.root_node(), None)];
+    while let Some((node, program)) = stack.pop() {
+        let program = if node.kind() == "program_definition" {
+            Some(node.start_byte())
+        } else {
+            program
+        };
+        if node.kind() == "call_statement" {
+            if let (Some(p), Some(x)) = (program, node.child_by_field_name("x")) {
+                let literal = matches!(src.get(x.start_byte()), Some(b'\'' | b'"'));
+                out.insert(x.start_byte(), (p, literal));
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor).map(|c| (c, program)));
+    }
+    out
+}
+
+/// A COBOL paragraph or section header of a PROCEDURE DIVISION, for [`cobol_flow_calls`].
+struct CobolHeader {
+    start: usize,
+    name: String,
+    /// The section it is in (a paragraph) or `None` (a section, or a paragraph before any).
+    section: Option<String>,
+    is_section: bool,
+    /// For a section, the index of its last paragraph (itself when it has none); else itself.
+    last: usize,
+}
+
+/// The headers of one PROCEDURE DIVISION in source order, and their indexes: by name, and (for
+/// paragraphs) by name and section.
+struct CobolDivision {
+    headers: Vec<CobolHeader>,
+    by_name: HashMap<String, Vec<usize>>,
+    by_section: HashMap<(String, Option<String>), Vec<usize>>,
+}
+
+impl CobolDivision {
+    fn of(division: tree_sitter::Node, src: &[u8]) -> Self {
+        // (start, name, is a section, the parent: the division or its DECLARATIVES)
+        let mut found: Vec<(usize, String, bool, usize)> = Vec::new();
+        let mut walk = vec![division];
+        while let Some(n) = walk.pop() {
+            if is_cobol_header(n) {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .and_then(|w| cobol_label_words(w, src).into_iter().next())
+                {
+                    let parent = n.parent().map_or(0, |p| p.id());
+                    found.push((n.start_byte(), name, n.kind() == "section_header", parent));
+                }
+                continue;
+            }
+            push_children(&mut walk, n);
+        }
+        found.sort_by_key(|(start, _, _, _)| *start);
+        let mut headers: Vec<CobolHeader> = Vec::with_capacity(found.len());
+        // The open section; it ends at END DECLARATIVES (a header with another parent).
+        let mut section: Option<(String, usize, usize)> = None;
+        for (i, (start, name, is_section, parent)) in found.into_iter().enumerate() {
+            if section.as_ref().is_some_and(|(_, _, p)| *p != parent) {
+                section = None;
+            }
+            if is_section {
+                section = Some((name.clone(), i, parent));
+            } else if let Some((_, s, _)) = &section {
+                headers[*s].last = i;
+            }
+            headers.push(CobolHeader {
+                start,
+                section: if is_section {
+                    None
+                } else {
+                    section.as_ref().map(|(n, _, _)| n.clone())
+                },
+                name,
+                is_section,
+                last: i,
+            });
+        }
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_section: HashMap<(String, Option<String>), Vec<usize>> = HashMap::new();
+        for (i, h) in headers.iter().enumerate() {
+            by_name.entry(h.name.clone()).or_default().push(i);
+            if !h.is_section {
+                by_section
+                    .entry((h.name.clone(), h.section.clone()))
+                    .or_default()
+                    .push(i);
+            }
+        }
+        Self {
+            headers,
+            by_name,
+            by_section,
+        }
+    }
+
+    /// The section of the statement at `pos`: that of the last header before it.
+    fn section_at(&self, pos: usize) -> Option<&str> {
+        let i = self
+            .headers
+            .partition_point(|h| h.start <= pos)
+            .checked_sub(1)?;
+        let h = &self.headers[i];
+        if h.is_section {
+            Some(h.name.as_str())
+        } else {
+            h.section.as_deref()
+        }
+    }
+
+    /// The header a PERFORM endpoint names, as an index: `name [OF|IN section]`. A qualified name
+    /// is looked up in that section. An unqualified one that names more than one paragraph means
+    /// the one in `own` (the referring statement's section), as COBOL reads it. `None` when no
+    /// single header matches.
+    fn endpoint(&self, words: &[String], own: Option<&str>) -> Option<usize> {
+        let in_section = |name: &String, section: Option<&str>| {
+            self.by_section
+                .get(&(name.clone(), section.map(str::to_string)))
+                .map(Vec::as_slice)
+        };
+        let hits = match words {
+            [name] => match self.by_name.get(name)?.as_slice() {
+                [one] => Some(std::slice::from_ref(one)),
+                _ => in_section(name, own),
+            },
+            [name, kw, section] if matches!(kw.as_str(), "OF" | "IN") => {
+                in_section(name, Some(section))
+            }
+            _ => None,
+        };
+        match hits? {
+            [one] => Some(*one),
+            _ => None,
+        }
+    }
+}
+
+/// The words of a label or name node, uppercased: `A-PARA OF SECOND-SECTION` → 3 words.
+fn cobol_label_words(n: tree_sitter::Node, src: &[u8]) -> Vec<String> {
+    n.utf8_text(src)
+        .map(|t| {
+            t.split_ascii_whitespace()
+                .map(str::to_ascii_uppercase)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One call a COBOL control-flow statement makes: the target's name, the statement's first byte,
+/// the label's span, and the first byte of the paragraph or section header it names when the
+/// statement's PROCEDURE DIVISION has exactly one such header (`None`: a name to resolve later).
+struct CobolFlowCall {
+    name: String,
+    pos: usize,
+    span: Span,
+    header: Option<usize>,
+}
+
+/// The PROCEDURE DIVISION holding `node`, if any.
+fn cobol_division_of(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut division = node.parent();
+    while let Some(d) = division {
+        if d.kind() == "procedure_division" {
+            return Some(d);
+        }
+        division = d.parent();
+    }
+    None
+}
+
+/// The calls of COBOL control flow:
+///
+/// - `PERFORM X [THRU Y]`, and a SORT or MERGE `INPUT|OUTPUT PROCEDURE IS X [THRU Y]`, run X and
+///   every paragraph or section header after X's, up to and including Y's, in source order,
+///   among the headers of the PROCEDURE DIVISION holding the statement. A section runs all its
+///   paragraphs, so a range that ends at a section (or a PERFORM of a section) runs through the
+///   section's last paragraph. An endpoint is `name [OF|IN section]` (see
+///   [`CobolDivision::endpoint`]); the call names the paragraph. When X or Y is not one header
+///   there (a typo, a name in another program, an ambiguous name) the range is unknown, and
+///   only X and Y are returned: each one header names as above (a section with its paragraphs),
+///   the other by name, so it still resolves or parks.
+/// - `GO TO A [B …] [DEPENDING ON X]` transfers control to each label, looked up the same way;
+///   a GO TO of a section runs its paragraphs.
+///
+/// Each division's headers are collected and indexed once, and each range costs its lookups and
+/// the headers it calls, so this is linear in the tree and the calls it returns.
+fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> {
+    let mut out = Vec::new();
+    let mut divisions: HashMap<usize, CobolDivision> = HashMap::new();
+    let mut stack = vec![tree.root_node()];
+    // Every header from `s` through the last one `e` runs (a section through its last paragraph).
+    let run = |out: &mut Vec<CobolFlowCall>, div: &CobolDivision, s: usize, e: usize, pos, span| {
+        let h = &div.headers;
+        for p in &h[s..=h[e].last] {
+            out.push(CobolFlowCall {
+                name: p.name.clone(),
+                pos,
+                span,
+                header: Some(p.start),
+            });
+        }
+    };
+    while let Some(node) = stack.pop() {
+        push_children(&mut stack, node);
+        let is_goto = node.kind() == "goto_statement";
+        if !is_goto && node.kind() != "perform_procedure" {
+            continue;
+        }
+        // The statement: GO TO, PERFORM, or the SORT / MERGE holding the INPUT/OUTPUT PROCEDURE.
+        let pos = if is_goto {
+            node.start_byte()
+        } else {
+            node.parent().map_or(node.start_byte(), |p| p.start_byte())
+        };
+        let mut cursor = node.walk();
+        let labels: Vec<_> = if is_goto {
+            node.children_by_field_name("to", &mut cursor).collect()
+        } else {
+            node.named_children(&mut cursor)
+                .filter(|k| k.kind() == "label")
+                .collect()
+        };
+        let div = cobol_division_of(node).map(|d| {
+            &*divisions
+                .entry(d.id())
+                .or_insert_with(|| CobolDivision::of(d, src))
+        });
+        let own = div.and_then(|d| d.section_at(pos));
+        // A label's words, its first word, and the one header it names in this division.
+        let endpoint = |label: tree_sitter::Node| {
+            let words = cobol_label_words(label, src);
+            let at = div.and_then(|d| d.endpoint(&words, own));
+            words.into_iter().next().map(|name| (name, at))
+        };
+        let by_name = |out: &mut Vec<CobolFlowCall>, name: String, label| {
+            out.push(CobolFlowCall {
+                name,
+                pos,
+                span: ts_span(label),
+                header: None,
+            });
+        };
+        if is_goto {
+            for label in labels {
+                match (endpoint(label), div) {
+                    (Some((_, Some(s))), Some(d)) => run(&mut out, d, s, s, pos, ts_span(label)),
+                    (Some((name, _)), _) => by_name(&mut out, name, label),
+                    (None, _) => {}
+                }
+            }
+            continue;
+        }
+        let Some(&first) = labels.first() else {
+            continue;
+        };
+        let Some((from, start)) = endpoint(first) else {
+            continue;
+        };
+        // One endpoint on its own: its header (and a section's paragraphs) when known, else its
+        // name.
+        let single = |out: &mut Vec<CobolFlowCall>, name: String, at: Option<usize>, label| match (
+            at, div,
+        ) {
+            (Some(i), Some(d)) => run(out, d, i, i, pos, ts_span(label)),
+            _ => by_name(out, name, label),
+        };
+        match labels.get(1).copied() {
+            // PERFORM X: X, and a section's paragraphs.
+            None => single(&mut out, from, start, first),
+            Some(last) => {
+                let end = endpoint(last);
+                match (start, end.as_ref().and_then(|(_, e)| *e), div) {
+                    (Some(s), Some(e), Some(d)) if s <= e => {
+                        out.push(CobolFlowCall {
+                            name: from,
+                            pos,
+                            span: ts_span(first),
+                            header: Some(d.headers[s].start),
+                        });
+                        let h = &d.headers;
+                        for p in &h[s + 1..=h[e].last] {
+                            out.push(CobolFlowCall {
+                                name: p.name.clone(),
+                                pos,
+                                span: ts_span(last),
+                                header: Some(p.start),
+                            });
+                        }
+                    }
+                    // The range is unknown: X and Y only (a section with its paragraphs).
+                    _ => {
+                        single(&mut out, from, start, first);
+                        if let Some((to, at)) = end {
+                            single(&mut out, to, at, last);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The innermost COBOL program at each byte, as `(from byte, program)` steps sorted by byte (look
+/// one up with the last step at or before it). Programs nest or follow one another, so one sweep
+/// over them in source order, with a stack of the open ones, builds the steps: linear in the
+/// definitions plus a sort of the programs.
+fn cobol_program_steps<'d>(
+    defs: &'d [DefRec],
+    def_nodes: &[Node],
+) -> Vec<(usize, Option<&'d SymbolId>)> {
+    let mut first: HashMap<&SymbolId, &DefRec> = HashMap::new();
+    for d in defs {
+        first.entry(&d.symbol).or_insert(d);
+    }
+    let mut programs: Vec<&DefRec> = def_nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Module)
+        .filter_map(|n| first.get(&n.symbol).copied())
+        .collect();
+    programs.sort_by_key(|d| (d.start, std::cmp::Reverse(d.end)));
+    let mut steps = Vec::new();
+    let mut open: Vec<&DefRec> = Vec::new();
+    let close = |open: &mut Vec<&'d DefRec>, steps: &mut Vec<(usize, Option<&'d SymbolId>)>, at| {
+        while let Some(&top) = open.last() {
+            if top.end > at {
+                break;
+            }
+            open.pop();
+            steps.push((top.end, open.last().map(|d| &d.symbol)));
+        }
+    };
+    for p in programs {
+        close(&mut open, &mut steps, p.start);
+        steps.push((p.start, Some(&p.symbol)));
+        open.push(p);
+    }
+    close(&mut open, &mut steps, usize::MAX);
+    steps
+}
+
+/// The strongly connected component of each vertex of a graph given as adjacency lists, as an id
+/// below the vertex count (Tarjan's algorithm, iterative: linear in vertices and edges).
+fn strongly_connected(next: &[Vec<usize>]) -> Vec<usize> {
+    const NONE: usize = usize::MAX;
+    let n = next.len();
+    let (mut index, mut low) = (vec![NONE; n], vec![0; n]);
+    let mut on_stack = vec![false; n];
+    let mut component = vec![NONE; n];
+    let (mut stack, mut work) = (Vec::new(), Vec::<(usize, usize)>::new());
+    let (mut count, mut components) = (0, 0);
+    for root in 0..n {
+        if index[root] != NONE {
+            continue;
+        }
+        index[root] = count;
+        low[root] = count;
+        count += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        work.push((root, 0));
+        while let Some(&(v, i)) = work.last() {
+            if let Some(&w) = next[v].get(i) {
+                work.last_mut().expect("non-empty").1 += 1;
+                if index[w] == NONE {
+                    index[w] = count;
+                    low[w] = count;
+                    count += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(u, _)) = work.last() {
+                low[u] = low[u].min(low[v]);
+            }
+            if low[v] == index[v] {
+                while let Some(w) = stack.pop() {
+                    on_stack[w] = false;
+                    component[w] = components;
+                    if w == v {
+                        break;
+                    }
+                }
+                components += 1;
+            }
+        }
+    }
+    component
 }
 
 /// Give the next header its whole line, then trim the preceding paragraph's trailing whitespace.
@@ -4251,8 +4713,15 @@ impl TreeSitterExtractor {
         parser
             .set_language(&self.language)
             .map_err(|e| Error::Extraction(e.to_string()))?;
+        // COBOL: the grammar parses the text with PROCEDURE DIVISION COPY statements blanked
+        // (`cobol_links::grammar_view`); every node's text is still read from `file.text`.
+        let cobol_view = if self.lang_name == "cobol" {
+            crate::cobol_links::grammar_view(&file.text)
+        } else {
+            None
+        };
         let tree = parser
-            .parse(file.text.as_bytes(), None)
+            .parse(cobol_view.as_deref().unwrap_or(&file.text).as_bytes(), None)
             .ok_or_else(|| Error::Extraction(format!("parse failed for {}", file.path)))?;
         // Reuse the query compiled once at construction time.
         let query = &self.query;
@@ -4587,7 +5056,10 @@ impl TreeSitterExtractor {
             {
                 // The name must come from the same kind as the anchor.
                 // (In rare cases where multiple kinds appear in one match this guards correctness.)
-                if anchor_kind == *name_kind {
+                // A COBOL header that error recovery built from statement words is no definition.
+                let recovered_header =
+                    COBOL_HEADERS.contains(&anchor_node.kind()) && !is_cobol_header(anchor_node);
+                if anchor_kind == *name_kind && !recovered_header {
                     let signature = anchor_node
                         .utf8_text(src)
                         .ok()
@@ -4805,9 +5277,9 @@ impl TreeSitterExtractor {
 
         // ── Pass 2: mint definition ids (ADR-002 amendment — type-nested identity) ──
         // MUST run before the COBOL span fixup below: the fixup mutates `def_nodes`, which this
-        // pass populates. `PendingDef`/`DefRec` keep PRE-fixup byte ranges (identical to the
-        // `enclosing()` inputs the one-pass design used); the fixup keeps mutating only
-        // `node.location.span` afterwards.
+        // pass populates. Ids are minted from `PendingDef`'s PRE-fixup header ranges, so they do
+        // not change. The fixup then widens a paragraph's or section's `DefRec.end` (the
+        // attribution range `enclosing()` reads) and its `node.location.span` to the whole body.
         {
             // Dedupe by (start, end, name): a def captured by two patterns (a decorated TS class,
             // a Rust `function_item` matched as both function and impl-method, a Python method
@@ -5005,8 +5477,133 @@ impl TreeSitterExtractor {
         // ── COBOL paragraph span fixup ────────────────────────────────────
         // Extend paragraph_header / section_header spans to cover the full body.
         // The grammar has no paragraph wrapper, so we compute boundaries post-extraction.
+        // `cobol_units`: the indexes in `defs` of the paragraphs and sections.
+        let mut cobol_units: Vec<usize> = Vec::new();
+        // (program, paragraph or section) pairs the program runs itself, and the flow calls bound
+        // to a header of their own division: local `Calls` edges.
+        let mut cobol_runs: Vec<(SymbolId, SymbolId)> = Vec::new();
+        let mut cobol_flow_edges: Vec<(SymbolId, SymbolId, Span)> = Vec::new();
         if self.lang_name == "cobol" {
             let end_map = cobol_paragraph_end_map(&tree);
+            // Attribution ranges too: a PERFORM, GO TO, CALL or data use inside a paragraph is
+            // the paragraph's, not the whole program's (`enclosing` picks the smallest range, so
+            // a paragraph inside a section wins over the section). Ids were minted above from the
+            // header ranges and do not change.
+            for (i, d) in defs.iter_mut().enumerate() {
+                if let Some(&true_end) = end_map.get(&d.start) {
+                    d.end = d.end.max(true_end);
+                    cobol_units.push(i);
+                }
+            }
+            // PERFORM (and its THRU range), SORT/MERGE procedures and GO TO. A call to a header
+            // of its own PROCEDURE DIVISION is a local edge bound by symbol: two programs in one
+            // file may share a paragraph name. Any other target is a ref by name. Estate stores
+            // no self-edges (the resolvers drop a self-candidate), so a jump to the paragraph or
+            // section it sits in is no call: by name it would park or bind elsewhere.
+            let mut units: Vec<usize> = cobol_units.clone();
+            units.sort_by_key(|&i| defs[i].start);
+            let unit_by_start: HashMap<usize, usize> = units
+                .iter()
+                .enumerate()
+                .map(|(k, &i)| (defs[i].start, k))
+                .collect();
+            // The innermost paragraph or section holding `pos` (a section's own statements stop
+            // at its first paragraph), as an index into `units`.
+            let unit_at = |pos: usize| {
+                let k = units
+                    .partition_point(|&i| defs[i].start <= pos)
+                    .checked_sub(1)?;
+                (pos < defs[units[k]].end).then_some(k)
+            };
+            // The innermost program holding `pos`, from sorted (from byte, program) steps.
+            let steps = cobol_program_steps(&defs, &def_nodes);
+            let program_at = |pos: usize| {
+                let i = steps.partition_point(|s| s.0 <= pos).checked_sub(1)?;
+                steps[i].1.cloned()
+            };
+            // The flow graph between units, for which units the program runs itself.
+            let mut next: Vec<Vec<usize>> = vec![Vec::new(); units.len()];
+            let mut from_program: Vec<usize> = Vec::new();
+            for call in cobol_flow_calls(&tree, src) {
+                let name = fold_cobol_name(&self.lang_name, call.name);
+                let source = unit_at(call.pos);
+                let target = call.header.and_then(|h| unit_by_start.get(&h).copied());
+                let from = match (target, source) {
+                    (Some(_), Some(k)) => Some(defs[units[k]].symbol.clone()),
+                    (Some(_), None) => program_at(call.pos),
+                    (None, _) => None,
+                };
+                match (target, from) {
+                    (Some(t), _) if source == Some(t) => {}
+                    // Same-named paragraphs of two sections share one id (#580): no self-edge.
+                    (Some(t), Some(from)) if from == defs[units[t]].symbol => {}
+                    (Some(t), Some(from)) => {
+                        cobol_flow_edges.push((from, defs[units[t]].symbol.clone(), call.span));
+                        match source {
+                            Some(k) => next[k].push(t),
+                            None => from_program.push(t),
+                        }
+                    }
+                    _ => {
+                        if source.is_some_and(|k| defs[units[k]].name.eq_ignore_ascii_case(&name)) {
+                            continue;
+                        }
+                        raw_refs.push((name, EdgeKind::Calls, call.pos, call.span));
+                    }
+                }
+            }
+            // A paragraph or section that no flow statement of its program reaches is run by the
+            // program itself: where the program starts, one that control falls into from the
+            // paragraph before it, a DECLARATIVES handler, or dead code (the graph cannot tell
+            // these apart without flow analysis). The program calls it, bound by symbol: the first
+            // unit, in source order, of each strongly connected component of the flow graph that
+            // no other unit calls (a unit nothing calls, or a cycle nothing outside it enters),
+            // unless a statement before the first paragraph reaches it. Lineage from a program so
+            // reaches every paragraph's calls, and a unit another unit reaches keeps that caller
+            // only.
+            let mut seen = vec![false; units.len()];
+            let mut stack = from_program;
+            while let Some(k) = stack.pop() {
+                if !std::mem::replace(&mut seen[k], true) {
+                    stack.extend(next[k].iter().copied());
+                }
+            }
+            let component = strongly_connected(&next);
+            let mut entered = vec![false; units.len()];
+            for (k, targets) in next.iter().enumerate() {
+                for &t in targets {
+                    if component[t] != component[k] {
+                        entered[component[t]] = true;
+                    }
+                }
+            }
+            let mut runs: HashSet<(SymbolId, SymbolId)> = HashSet::new();
+            for (k, &unit) in units.iter().enumerate() {
+                if seen[k] || std::mem::replace(&mut entered[component[k]], true) {
+                    continue;
+                }
+                if let Some(program) = program_at(defs[unit].start) {
+                    let run = (program, defs[unit].symbol.clone());
+                    if runs.insert(run.clone()) {
+                        cobol_runs.push(run);
+                    }
+                }
+            }
+            // A call starts from the paragraph or section it is in, never also from its program:
+            // a program twin would be one call site counted as two callers. A program's callee
+            // programs are reached through the paragraphs it runs (`cobol_runs` above).
+            let program_of_call = cobol_call_programs(&tree, src);
+            // A literal CALL of the program itself made before its first paragraph starts from
+            // the program: a self-edge, so no ref (one made in a paragraph is kept above).
+            raw_refs.retain(|(name, ek, pos, _)| {
+                let Some(&(program, true)) = program_of_call.get(pos) else {
+                    return true;
+                };
+                let module = enclosing_def(&defs, program);
+                *ek != EdgeKind::Calls
+                    || enclosing_def(&defs, *pos).map(|d| d.start) != module.map(|d| d.start)
+                    || !module.is_some_and(|m| m.name.eq_ignore_ascii_case(name))
+            });
             for node in &mut def_nodes {
                 let start = node.location.span.start_byte as usize;
                 if let Some(&true_end) = end_map.get(&start) {
@@ -5061,6 +5658,58 @@ impl TreeSitterExtractor {
                     file_symbol.clone(),
                     d.symbol.clone(),
                     EdgeKind::Contains,
+                    ResolutionTier::Parsed,
+                    "tree-sitter",
+                )
+                .with_location(Location::new(&file.path, Span::ZERO)),
+            );
+        }
+        // COBOL: a program contains its sections and paragraphs, a section its paragraphs. Calls
+        // and data uses start from the paragraph, so this edge is what keeps the program in a
+        // field's or a callee's blast radius, and on the path from a JCL step to a called program.
+        for &i in &cobol_units {
+            let d = &defs[i];
+            let container = defs
+                .iter()
+                .enumerate()
+                .filter(|(j, c)| {
+                    *j != i
+                        && c.start <= d.start
+                        && d.end <= c.end
+                        && (c.start, c.end) != (d.start, d.end)
+                })
+                .min_by_key(|(_, c)| c.end - c.start);
+            if let Some((_, c)) = container {
+                local_edges.push(
+                    Edge::new(
+                        c.symbol.clone(),
+                        d.symbol.clone(),
+                        EdgeKind::Contains,
+                        ResolutionTier::Parsed,
+                        "tree-sitter",
+                    )
+                    .with_location(Location::new(&file.path, Span::ZERO)),
+                );
+            }
+        }
+        for (from, to, span) in cobol_flow_edges {
+            local_edges.push(
+                Edge::new(
+                    from,
+                    to,
+                    EdgeKind::Calls,
+                    ResolutionTier::Parsed,
+                    "tree-sitter",
+                )
+                .with_location(Location::new(&file.path, span)),
+            );
+        }
+        for (program, unit) in cobol_runs {
+            local_edges.push(
+                Edge::new(
+                    program,
+                    unit,
+                    EdgeKind::Calls,
                     ResolutionTier::Parsed,
                     "tree-sitter",
                 )
@@ -8499,8 +9148,68 @@ See the [docs](docs/).
             .iter()
             .filter(|r| r.kind == EdgeKind::Calls)
             .collect();
+        // Each CALL once, from main-para (the program runs main-para through a local edge).
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|r| r.raw_name == "PRICEPGM"));
+    }
+
+    #[test]
+    fn cobol_program_steps_pick_the_innermost_program_at_each_byte() {
+        // OUTER holds A-PARA and the nested INNER; NEXT follows OUTER; LAST starts where NEXT
+        // ends. A paragraph is no program.
+        let rec = |name: &str, start, end| DefRec {
+            symbol: Symbol::synthetic("test", name).id(),
+            start,
+            end,
+            name: name.to_string(),
+        };
+        let defs = vec![
+            rec("OUTER", 0, 100),
+            rec("A-PARA", 10, 20),
+            rec("INNER", 50, 90),
+            rec("NEXT", 100, 150),
+            rec("LAST", 150, 160),
+        ];
+        let node = |d: &DefRec, kind| {
+            Node::new(
+                d.symbol.clone(),
+                kind,
+                d.name.clone(),
+                Language::new("cobol"),
+                Location::new("p.cbl", Span::ZERO),
+            )
+        };
+        let def_nodes: Vec<Node> = defs
+            .iter()
+            .map(|d| {
+                let kind = if d.name == "A-PARA" {
+                    NodeKind::Function
+                } else {
+                    NodeKind::Module
+                };
+                node(d, kind)
+            })
+            .collect();
+        let steps = cobol_program_steps(&defs, &def_nodes);
+        let at = |pos: usize| {
+            let i = steps.partition_point(|s| s.0 <= pos).checked_sub(1)?;
+            let sym = steps[i].1?;
+            defs.iter()
+                .find(|d| &d.symbol == sym)
+                .map(|d| d.name.as_str())
+        };
+        for (pos, want) in [
+            (0, Some("OUTER")),
+            (15, Some("OUTER")),
+            (50, Some("INNER")),
+            (89, Some("INNER")),
+            (90, Some("OUTER")),
+            (100, Some("NEXT")),
+            (150, Some("LAST")),
+            (160, None),
+        ] {
+            assert_eq!(at(pos), want, "byte {pos}: {steps:?}");
+        }
     }
 
     #[test]
@@ -8522,15 +9231,24 @@ See the [docs](docs/).
             .unwrap()
             .extract(&sf("price.cbl", "cobol", code))
             .unwrap();
-        assert!(
+        let para = |name: &str| {
             ex.nodes
                 .iter()
-                .any(|n| n.kind == NodeKind::Function && n.name == "MAIN-PARA")
-        );
+                .find(|n| n.kind == NodeKind::Function && n.name == name)
+                .unwrap_or_else(|| panic!("{name}"))
+                .symbol
+                .clone()
+        };
+        let (entry, main) = (para("ENTRY-PARA"), para("MAIN-PARA"));
+        // The lowercase PERFORM names a header of its own division: a local edge from the
+        // paragraph that makes it, on the PERFORM line (row 7), bound to MAIN-PARA.
         assert!(
-            ex.refs
-                .iter()
-                .any(|r| r.kind == EdgeKind::Calls && r.raw_name == "MAIN-PARA")
+            ex.local_edges.iter().any(|e| e.kind == EdgeKind::Calls
+                && e.source == entry
+                && e.target == main
+                && e.location.as_ref().is_some_and(|l| l.span.start_line == 7)),
+            "{:?}",
+            ex.local_edges
         );
         assert!(
             ex.refs

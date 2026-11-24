@@ -7,7 +7,7 @@
 //!
 //! | Source construct | Stored as |
 //! |---|---|
-//! | `EXEC CICS LINK/XCTL PROGRAM('P')` | `Calls` ref program → `P` (any language; parks if absent) |
+//! | `EXEC CICS LINK/XCTL PROGRAM('P')` | `Calls` ref paragraph → `P` (any language; parks if absent) |
 //! | `EXEC CICS SEND MAP('M') [MAPSET('S')]` | `other:writes` edge program → shared `cics-map:S.M` |
 //! | `EXEC CICS RECEIVE MAP('M') [MAPSET('S')]` | `other:reads` edge program → shared `cics-map:S.M` |
 //! | `EXEC SQL SELECT … FROM T` (and cursors, subselects, joins, MERGE `USING`) | `other:reads` edge program → shared `db2:T` |
@@ -18,7 +18,7 @@
 //! | `SELECT F ASSIGN TO DD` | `other:uses` edge program → shared `ddname:<PGM>.<DD>` (JCL defines it) |
 //! | `CALL VAR` / `PROGRAM(VAR)`, VAR holding one literal | `Calls` ref `cobol-dynamic-call:<LIT>` (Heuristic) |
 //! | the same, VAR with several values / a non-literal / none | `Calls` ref `cobol-dynamic-var:<VAR>` (parked; reason on VAR's field) |
-//! | `:HOSTVAR`, CICS `COMMAREA()/INTO()/FROM()` operands | `References` refs to the data item |
+//! | `:HOSTVAR`, CICS `COMMAREA()/INTO()/FROM()` operands | `References` refs paragraph → the data item |
 //!
 //! **Lexical view.** Every construct is matched on a same-length copy of the source in which
 //! comment lines (indicator `*` or `/`), floating `*>` comments, the fixed-format sequence and
@@ -36,10 +36,15 @@
 //! tree and drops the labels the data-name query also matches; `wicked-estate-resolve` binds each
 //! role only to its own kind of target.
 //!
-//! **Every source is a real node** of this extraction: the program Module whose span holds the
-//! construct (nested programs pick the innermost), else the first program, else the copybook node,
-//! else the File node. Literal inference (dynamic calls, map names), labels and DD names are scoped
-//! to that program. A shared target is minted by the referencing file as a BOUNDARY record
+//! **Every source is a real node** of this extraction. Calls and data uses (the `Calls` and
+//! `References` refs above) start from the innermost paragraph or section holding the construct,
+//! as the tree-sitter extractor's PERFORM and data-name refs do. One call site is one caller:
+//! a call is never also stored from its program (that would count it twice). Lineage reaches a
+//! program's callee programs through the paragraphs the program runs itself (the extractor's
+//! program → paragraph `Calls` edges). Every other link starts from the program Module whose span
+//! holds the construct (nested programs pick the innermost), else the first program, else the
+//! copybook node, else the File node. Literal inference (dynamic calls,
+//! map names), labels and DD names are scoped to that program. A shared target is minted by the referencing file as a BOUNDARY record
 //! ([`Node::as_boundary`]) whose reason says what source would define it; the defining file's
 //! record wins in the store when it is indexed (see [`crate::contrib`]).
 //!
@@ -312,6 +317,179 @@ fn supplement_text(file: &SourceFile, ex: &mut Extraction) {
     p.assigns(&code_no_exec);
     p.dynamic_calls(&code_no_exec, ex);
     p.finish(ex);
+}
+
+/// The end of a PROCEDURE DIVISION: the next program's IDENTIFICATION DIVISION or an END PROGRAM.
+static RE_PROCEDURE_END: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:IDENTIFICATION|ID)\s+DIVISION\b|\bEND\s+PROGRAM\b")
+        .expect("RE_PROCEDURE_END")
+});
+
+/// The text the COBOL grammar parses: `text` with every `COPY …` statement inside a PROCEDURE
+/// DIVISION turned into `EXIT` plus spaces, its terminating period kept (same length; line breaks
+/// kept), or `None` when there is none. See [`copy_statement_end`] for where a COPY ends.
+///
+/// arborium-cobol cannot parse what follows such a COPY: `COPY CSSETATY REPLACING ==A== BY ==B==`
+/// is an error, and after `COPY 'CSSTRPFY' .` the next paragraph header is an error, so that
+/// paragraph gets no node. `EXIT .` parses and is followed by a header, and a statement still
+/// stands where the COPY was, so the paragraph and program spans keep covering it. A COPY yields
+/// no node or edge from the tree (this module reads COPY links from the source text), so nothing
+/// is lost; spans and names are still read from the original text at the same offsets, and the
+/// stub classifier re-reads that text, so a paragraph holding only a COPY is not an EXIT stub.
+pub(crate) fn grammar_view(text: &str) -> Option<String> {
+    let free = source_is_free_format(text);
+    let (_, code) = lexical_views(text, free);
+    // Pseudo-text is one COPY operand: spaces (line breaks kept) then `~` on its closing `=`, so
+    // it is one word that ends where the pseudo-text ends. EXEC blocks hold no COPY statement
+    // (`EXEC CICS ISSUE COPY` is not one).
+    let code = RE_PSEUDO_TEXT
+        .replace_all(&code, |c: &regex::Captures| {
+            let mut b = blank(&c[0]);
+            let end = b.len();
+            b.replace_range(end - 1..end, "~");
+            b
+        })
+        .into_owned();
+    let code = RE_EXEC_ANY
+        .replace_all(&code, |c: &regex::Captures| blank(&c[0]))
+        .into_owned();
+    // (COPY's first byte, the end of what is hidden, whether that end is its own period)
+    let mut ranges: Vec<(usize, usize, bool)> = Vec::new();
+    let mut at = 0;
+    while let Some(div) = RE_PROCEDURE_DIVISION.find_at(&code, at) {
+        let end = RE_PROCEDURE_END
+            .find_at(&code, div.end())
+            .map_or(code.len(), |m| m.start());
+        for c in RE_COPY.find_iter(&code[div.end()..end]) {
+            let from = div.end() + c.start();
+            // The match may start on the separator before COPY.
+            let from = from + code[from..].find(['C', 'c']).unwrap_or(0);
+            // Ranges are disjoint: a COPY inside the last one's REPLACING operands is not another.
+            if ranges.last().is_some_and(|&(_, stop, _)| from < stop) {
+                continue;
+            }
+            let named = div.end() + c.end();
+            let (stop, period) = match copy_statement_end(&code, named, end) {
+                Ok(p) => (p, true),
+                Err(clause_end) => (clause_end, false),
+            };
+            ranges.push((from, stop, period));
+        }
+        at = end.max(div.end());
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    let mut view = text.as_bytes().to_vec();
+    for (from, to, period) in ranges {
+        // `COPY` → `EXIT`; the rest up to (not including) the period → spaces, line breaks kept.
+        view[from..from + 4].copy_from_slice(b"EXIT");
+        for b in &mut view[from + 4..to] {
+            if *b != b'\n' && *b != b'\r' {
+                *b = b' ';
+            }
+        }
+        // A COPY with no period of its own (a compile error) hides its words through its last
+        // complete clause, and gets a period on that word's last byte (never a line break), so
+        // a header after it parses.
+        if !period {
+            view[to - 1] = b'.';
+        }
+    }
+    // Only ASCII bytes were written over whole statements' bytes, so this is valid UTF-8.
+    String::from_utf8(view).ok()
+}
+
+/// `Ok`: the byte of the period that ends the COPY statement whose member name ends at `named`.
+/// `Err`: it has none (a compile error); the end of its last complete clause (`named` at least).
+///
+/// The words after the member must be the statement's own clauses, in order:
+/// `[OF|IN library] [SUPPRESS] [REPLACING {[LEADING|TRAILING] operand BY operand}…]`, and the
+/// period may only follow a complete clause. A literal is one word in `code` (its contents are
+/// `~`), and so is pseudo-text (see [`grammar_view`]). Any other word (the next statement, or the
+/// next paragraph's header) means no period of its own. One forward pass with a fixed state, so
+/// the scan stops within the statement.
+fn copy_statement_end(code: &str, named: usize, end: usize) -> Result<usize, usize> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum At {
+        /// After the member name or a library: OF/IN, SUPPRESS, REPLACING or the period.
+        Head,
+        /// After OF/IN: the library name.
+        Library,
+        /// After REPLACING or LEADING/TRAILING: a first operand.
+        First,
+        /// After a first operand: BY.
+        By,
+        /// After BY: a second operand.
+        Second,
+        /// After a complete pair: another pair or the period.
+        Pair,
+    }
+    let mut at = At::Head;
+    let mut library = false;
+    let mut complete = named;
+    let bytes = code.as_bytes();
+    let sep = |b: u8| b.is_ascii_whitespace() || b == b',' || b == b';';
+    let mut i = named;
+    while i < end {
+        if sep(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < end && !sep(bytes[i]) {
+            i += 1;
+        }
+        // A period ends the statement when a separator or the end follows it.
+        let (word, period) = match code[start..i].strip_suffix('.') {
+            Some(w) => (w, Some(i - 1)),
+            None => (&code[start..i], None),
+        };
+        if !word.is_empty() {
+            let w = word.to_ascii_uppercase();
+            at = match (at, w.as_str()) {
+                (At::Head, "OF" | "IN") if !library => {
+                    library = true;
+                    At::Library
+                }
+                (At::Head, "SUPPRESS") => At::Head,
+                (At::Head, "REPLACING") => At::First,
+                (At::Library, w) if !is_copy_keyword(w) => At::Head,
+                (At::First | At::Pair, "LEADING" | "TRAILING") => At::First,
+                (At::First | At::Pair, w) if !is_copy_keyword(w) => At::By,
+                (At::By, "BY") => At::Second,
+                (At::Second, w) if !is_copy_keyword(w) => At::Pair,
+                _ => return Err(complete),
+            };
+            if matches!(at, At::Head | At::Pair) {
+                complete = start + word.len();
+            }
+        }
+        if let Some(p) = period {
+            return if matches!(at, At::Head | At::Pair) {
+                Ok(p)
+            } else {
+                Err(complete)
+            };
+        }
+    }
+    Err(complete)
+}
+
+/// The words of a COPY statement's own clauses.
+fn is_copy_keyword(w: &str) -> bool {
+    matches!(
+        w,
+        "OF" | "IN"
+            | "SUPPRESS"
+            | "REPLACING"
+            | "BY"
+            | "LEADING"
+            | "TRAILING"
+            | "COPY"
+            | "EXEC"
+            | "END-EXEC"
+    )
 }
 
 // ── lexical views ──────────────────────────────────────────────────────────────────────────────
@@ -948,6 +1126,7 @@ pub(crate) fn tag_roles(
                         "call_statement",
                         "perform_procedure",
                         "perform_statement_call_proc",
+                        "goto_statement",
                     ],
                     4,
                 );
@@ -1134,6 +1313,8 @@ type Prog = Option<usize>;
 struct Anchors {
     /// (symbol, PROGRAM-ID, start byte, end byte) of every program in the file.
     modules: Vec<(SymbolId, String, usize, usize)>,
+    /// (symbol, start byte, end byte) of every paragraph and section in the file.
+    units: Vec<(SymbolId, usize, usize)>,
     /// The source when no program holds the construct: the copybook node, else the File node.
     fallback: SymbolId,
     /// A copybook file's definition record + its `Contains` edges, taken by [`supplement`].
@@ -1156,6 +1337,15 @@ impl Anchors {
                     s.start_byte as usize,
                     s.end_byte as usize,
                 )
+            })
+            .collect();
+        let units = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Function)
+            .map(|n| {
+                let s = &n.location.span;
+                (n.symbol.clone(), s.start_byte as usize, s.end_byte as usize)
             })
             .collect();
         let copybook = if modules.is_empty() && !RE_PROGRAM_ID.is_match(code) {
@@ -1191,6 +1381,7 @@ impl Anchors {
         };
         Self {
             modules,
+            units,
             fallback: Symbol::file(&file.path).id(),
             copybook,
             member: None,
@@ -1206,6 +1397,16 @@ impl Anchors {
             .filter(|(_, (_, _, s, e))| *s <= byte && byte < *e)
             .min_by_key(|(_, (_, _, s, e))| e - s)
             .map(|(i, _)| i)
+    }
+
+    /// The source of a call or data use at `byte`: the innermost paragraph or section holding it
+    /// (the tree-sitter extractor's rule for PERFORM, CALL and data names), else [`Self::at`]'s.
+    fn unit(&self, byte: usize) -> SymbolId {
+        self.units
+            .iter()
+            .filter(|(_, s, e)| *s <= byte && byte < *e)
+            .min_by_key(|(_, s, e)| e - s)
+            .map_or_else(|| self.at(byte).0, |(sym, _, _)| sym.clone())
     }
 
     /// The PROGRAM-IDs of the programs that hold `byte`, innermost first.
@@ -1582,7 +1783,8 @@ impl Pass<'_> {
             let whole = c.get(0).unwrap();
             let body = c.get(1).unwrap();
             let prog = self.anchors.prog(whole.start());
-            let (from, _) = self.anchors.at(whole.start());
+            let (from, program_id) = self.anchors.at(whole.start());
+            let program_id = program_id.map(str::to_ascii_uppercase);
             let loc = self.loc(whole.start(), whole.end());
             let verb = body
                 .as_str()
@@ -1600,10 +1802,17 @@ impl Pass<'_> {
                             self.dynamic_ref_name(prog, &op.value)
                         };
                         if !raw.is_empty() {
-                            let mut r =
-                                UnresolvedRef::new(from.clone(), raw, EdgeKind::Calls, loc.clone());
-                            hint(&mut r, ROLE_KEY, ROLE_PROGRAM.into());
-                            self.out.refs.push(r);
+                            // From the paragraph or section it is in, else the program; never
+                            // from both (one call site, one caller). From the program itself, a
+                            // LINK or XCTL of the program is a self-edge: no ref.
+                            let unit = self.anchors.unit(whole.start());
+                            let own = op.literal && program_id.as_deref() == Some(raw.as_str());
+                            if !(unit == from && own) {
+                                let mut r =
+                                    UnresolvedRef::new(unit, raw, EdgeKind::Calls, loc.clone());
+                                hint(&mut r, ROLE_KEY, ROLE_PROGRAM.into());
+                                self.out.refs.push(r);
+                            }
                         }
                     }
                 }
@@ -1612,7 +1821,8 @@ impl Pass<'_> {
             }
             for key in ["COMMAREA", "INTO", "FROM"] {
                 if let Some(op) = opts.get(key).filter(|o| !o.literal).cloned() {
-                    self.reference(from.clone(), &op.value, loc.clone());
+                    let unit = self.anchors.unit(whole.start());
+                    self.reference(unit, &op.value, loc.clone());
                 }
             }
         }
@@ -1707,7 +1917,8 @@ impl Pass<'_> {
             let w = |i: usize| words.get(i).map_or("", String::as_str);
 
             for h in RE_SQL_HOSTVAR.captures_iter(&body) {
-                self.reference(from.clone(), &h[1], loc.clone());
+                let unit = self.anchors.unit(whole.start());
+                self.reference(unit, &h[1], loc.clone());
             }
             match w(0) {
                 "INCLUDE" => {
@@ -2288,6 +2499,15 @@ mod tests {
         ex
     }
 
+    fn paragraph_sym(ex: &Extraction, name: &str) -> SymbolId {
+        ex.nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Function && n.name == name)
+            .unwrap_or_else(|| panic!("paragraph {name}: {:?}", names(ex)))
+            .symbol
+            .clone()
+    }
+
     fn module_sym(ex: &Extraction, name: &str) -> SymbolId {
         ex.nodes
             .iter()
@@ -2347,17 +2567,16 @@ mod tests {
 ";
 
     #[test]
-    fn every_source_is_the_program_module_not_a_file_anchor() {
+    fn every_source_is_a_real_node_not_a_file_anchor() {
         // Fails on main: refs/edges came from `synthetic("cobol-pgm", path)`, never a node.
         let ex = run("cbl/ORDPGM.cbl", ORDPGM);
         let pgm = module_sym(&ex, "ORDPGM");
-        let link = ex
-            .refs
-            .iter()
-            .find(|r| r.raw_name == "SHIPPGM")
-            .expect("LINK ref");
-        assert_eq!(link.from, pgm);
-        assert_eq!(link.kind, EdgeKind::Calls);
+        let link: Vec<_> = ex.refs.iter().filter(|r| r.raw_name == "SHIPPGM").collect();
+        // A call starts from the paragraph that makes it, only (one site, one caller); a table
+        // read from the program.
+        let sources: BTreeSet<_> = link.iter().map(|r| r.from.clone()).collect();
+        assert_eq!(sources, BTreeSet::from([paragraph_sym(&ex, "MAIN-PARA")]));
+        assert!(link.iter().all(|r| r.kind == EdgeKind::Calls));
         let reads = edge_to(
             &ex,
             &edge_tags::other(edge_tags::READS),
@@ -2427,7 +2646,7 @@ mod tests {
     #[test]
     fn field_uses_become_reference_refs_but_not_paragraph_labels() {
         let ex = run("cbl/ORDPGM.cbl", ORDPGM);
-        let pgm = module_sym(&ex, "ORDPGM");
+        let para = paragraph_sym(&ex, "MAIN-PARA");
         let refs: Vec<_> = ex
             .refs
             .iter()
@@ -2445,7 +2664,8 @@ mod tests {
             ex.refs
                 .iter()
                 .filter(|r| r.kind == EdgeKind::References && r.raw_name == "ORD-ID")
-                .all(|r| r.from == pgm)
+                .all(|r| r.from == para),
+            "a data use starts from the paragraph that makes it (the MOVE and the SQL host var)"
         );
     }
 
@@ -2548,6 +2768,7 @@ mod tests {
             })
             .map(|r| r.raw_name.as_str())
             .collect();
+        // From MAIN-PARA only: one call site, one caller.
         assert_eq!(flag_names, vec!["cobol-dynamic-var:WS-FLAG"]);
     }
 
@@ -2631,8 +2852,9 @@ mod tests {
                 .filter(|r| *r == "cobol-dynamic-var:WS-PGM")
                 .count(),
             2,
-            "{c:?}"
+            "the CALL and the XCTL, each from MAIN-PARA only: {c:?}"
         );
+        assert_eq!(c.len(), 2, "{c:?}");
         let f = ex.nodes.iter().find(|n| n.name == "WS-PGM").unwrap();
         assert_eq!(f.metadata["dynamic_call"]["status"], "unresolved");
         assert!(
@@ -2698,8 +2920,23 @@ mod tests {
             .iter()
             .filter(|r| r.kind == EdgeKind::Calls)
             .map(|r| {
+                // Each call starts from its paragraph (or its program, before any paragraph); the
+                // pair names the program holding it.
                 let from = ex.nodes.iter().find(|n| n.symbol == r.from).unwrap();
-                (from.name.clone(), r.raw_name.clone())
+                assert!(
+                    matches!(from.kind, NodeKind::Function | NodeKind::Module),
+                    "{}",
+                    from.name
+                );
+                let at = r.location.span.start_byte;
+                let prog = ex
+                    .nodes
+                    .iter()
+                    .filter(|n| n.kind == NodeKind::Module)
+                    .filter(|n| n.location.span.start_byte <= at && at < n.location.span.end_byte)
+                    .min_by_key(|n| n.location.span.end_byte - n.location.span.start_byte)
+                    .unwrap();
+                (prog.name.clone(), r.raw_name.clone())
             })
             .collect();
         assert!(
@@ -3194,6 +3431,53 @@ mod tests {
     }
 
     #[test]
+    fn grammar_view_hides_a_copy_up_to_its_own_period_only() {
+        let line = |l: &str| format!("       {l}\n");
+        let head = "       PROCEDURE DIVISION.\n".to_string();
+        // Terminated, through OF / SUPPRESS / REPLACING: up to its period.
+        let text = head.clone()
+            + &line("COPY CSUTLDPY OF SYSLIB SUPPRESS REPLACING ==A== BY ==B== X BY Y.")
+            + &line("NEXT-PARA.");
+        let view = grammar_view(&text).unwrap();
+        assert_eq!(view.len(), text.len());
+        assert!(view.contains("EXIT"));
+        assert!(!view.contains("CSUTLDPY") && !view.contains("REPLACING"));
+        assert!(view.contains("NEXT-PARA."));
+        // No period of its own: only `COPY <member>`; the next header and statement keep theirs.
+        let text = head.clone()
+            + &line("COPY CSUTLDPY")
+            + &line("AFTER-PARA.")
+            + &line("    MOVE A TO B.");
+        let view = grammar_view(&text).unwrap();
+        assert!(
+            view.contains("AFTER-PARA.") && view.contains("MOVE A TO B."),
+            "{view}"
+        );
+        // Many unterminated COPYs: each hides only itself (linear, ranges disjoint).
+        let mut text = head;
+        for _ in 0..50 {
+            text += &line("COPY BOOK");
+            text += &line("    MOVE A TO B");
+        }
+        text += &line(".");
+        let view = grammar_view(&text).unwrap();
+        assert_eq!(view.matches("EXIT").count(), 50);
+        assert_eq!(view.matches("MOVE A TO B").count(), 50);
+        // Clauses out of order, or a repeated library, are not this COPY's: member only.
+        let text = "       PROCEDURE DIVISION.\n".to_string()
+            + &line(&format!("COPY BOOK{}", " OF".repeat(2000)))
+            + &line("NEXT-PARA.");
+        let view = grammar_view(&text).unwrap();
+        assert_eq!(view.len(), text.len());
+        assert!(view.contains("NEXT-PARA.") && view.contains(" OF OF"));
+        assert_eq!(
+            view.matches('\n').count(),
+            text.matches('\n').count(),
+            "line breaks are kept"
+        );
+    }
+
+    #[test]
     fn lexical_views_keep_offsets_and_mask_literal_contents() {
         let src = "000100 MOVE 'A*>B' TO X. *> note\n      * comment line\n       DISPLAY \"IT\"\"S\" 'é'.\n";
         let (clean, code) = lexical_views(src, false);
@@ -3346,13 +3630,29 @@ mod tests {
                 "{label}"
             );
         }
+        // A PERFORM or GO TO of a paragraph of its own division is a local call from the
+        // paragraph that makes it (wicked-estate#579), bound to the paragraph, never a data use.
+        let para = |name: &str| {
+            ex.nodes
+                .iter()
+                .find(|n| n.kind == NodeKind::Function && n.name == name)
+                .unwrap_or_else(|| panic!("{name}: {:?}", names(&ex)))
+                .symbol
+                .clone()
+        };
+        let main = para("MAIN-PARA");
         for label in ["CALC", "CHECK-PARA", "CHECK-EXIT"] {
-            let performs = refs_named(&ex, EdgeKind::Calls, label);
-            assert!(!performs.is_empty(), "PERFORM {label}: {:?}", calls(&ex));
+            let target = para(label);
             assert!(
-                performs
+                ex.local_edges
                     .iter()
-                    .all(|r| hint_str(r, ROLE_KEY) == Some(ROLE_LABEL))
+                    .any(|e| e.kind == EdgeKind::Calls && e.source == main && e.target == target),
+                "PERFORM {label}: {:?}",
+                ex.local_edges
+            );
+            assert!(
+                refs_named(&ex, EdgeKind::Calls, label).is_empty(),
+                "{label}"
             );
         }
         // Host variables and CICS operands are data uses too.
@@ -3410,12 +3710,39 @@ mod tests {
                 "           PERFORM CHECK-PARA IN CHECK-SECT.\n           GOBACK.\n       CHECK-SECT SECTION.\n       CHECK-PARA.\n           EXIT.\n",
             ),
         );
-        let performs = refs_named(&ex, EdgeKind::Calls, "CHECK-PARA");
-        assert_eq!(performs.len(), 1, "{:?}", calls(&ex));
-        assert_eq!(hint_str(performs[0], ROLE_KEY), Some(ROLE_LABEL));
-        assert_eq!(hint_list(performs[0], PROGRAMS_KEY), ["P"]);
+        // The paragraph is in this division: a local call bound to CHECK-PARA (#579).
         let para = ex.nodes.iter().find(|n| n.name == "CHECK-PARA").unwrap();
+        assert!(
+            ex.local_edges
+                .iter()
+                .any(|e| e.kind == EdgeKind::Calls && e.target == para.symbol),
+            "{:?}",
+            ex.local_edges
+        );
         assert_eq!(para.metadata[PROGRAM_KEY], serde_json::json!("P"));
+    }
+
+    /// A PERFORM or GO TO label that names no paragraph of its division stays a ref by name, with
+    /// the label role and its program.
+    #[test]
+    fn an_unresolved_perform_or_go_to_label_is_a_label_ref() {
+        let ex = run(
+            "cbl/P.cbl",
+            &program(
+                "       01 W PIC 9.\n",
+                "           PERFORM NO-SUCH-PARA IN CHECK-SECT\n           GO TO NOT-HERE.\n       CHECK-SECT SECTION.\n       CHECK-PARA.\n           EXIT.\n",
+            ),
+        );
+        for name in ["NO-SUCH-PARA", "NOT-HERE"] {
+            let r = refs_named(&ex, EdgeKind::Calls, name);
+            assert_eq!(r.len(), 1, "{name}: {:?}", calls(&ex));
+            assert_eq!(hint_str(r[0], ROLE_KEY), Some(ROLE_LABEL), "{name}");
+            assert_eq!(hint_list(r[0], PROGRAMS_KEY), ["P"], "{name}");
+            assert!(
+                refs_named(&ex, EdgeKind::References, name).is_empty(),
+                "{name}"
+            );
+        }
     }
 
     // ── wicked-estate#544: logical source ──────────────────────────────────────────────────
@@ -3446,12 +3773,20 @@ mod tests {
             "{s:?}"
         );
         assert_eq!((s.start_line, s.start_col), (1, 0));
+        // A call starts from the paragraph that makes it (wicked-estate#579).
+        let main_para = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Function && n.name == "MAIN-PARA")
+            .unwrap_or_else(|| panic!("{:?}", names(&ex)))
+            .symbol
+            .clone();
         for (name, line) in [("TAXPGM", 9), ("SUBPGM", 10)] {
             let r = refs_named(&ex, EdgeKind::Calls, name);
             assert_eq!(r.len(), 1, "{name}: {:?}", calls(&ex));
             assert_eq!(at(&text, &r[0].location.span), format!("'{name}'"));
             assert_eq!(r[0].location.span.start_line, line);
-            assert_eq!(r[0].from, module.symbol);
+            assert_eq!(r[0].from, main_para);
         }
         let para = ex.nodes.iter().find(|n| n.name == "MAIN-PARA").unwrap();
         assert_eq!(para.location.span.start_line, 8);
@@ -3470,7 +3805,14 @@ mod tests {
             card("CALL 'TAX"),
         );
         let ex = run("cbl/ORDPGM.cbl", &text);
-        let pgm = module_sym(&ex, "ORDPGM");
+        // Each call starts from the paragraph that makes it (wicked-estate#579).
+        let pgm = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Function && n.name == "MAIN-PARA")
+            .unwrap_or_else(|| panic!("{:?}", names(&ex)))
+            .symbol
+            .clone();
         for (name, from) in [("SHIPPGM", "'SHIP"), ("TAXPGM", "'TAX"), ("PAYPGM", "'PAY")] {
             let r = refs_named(&ex, EdgeKind::Calls, name);
             assert_eq!(r.len(), 1, "{name}: {:?}", calls(&ex));

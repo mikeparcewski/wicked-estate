@@ -3814,7 +3814,10 @@ mod tests {
 
     /// The COBOL extractor's own output for `tests/fixtures/cobol_roles` (pinned by
     /// `wicked-estate-extract`'s `role_fixture_extractions_are_this_extractors_output`), resolved by
-    /// the production name tiers plus the dynamic-call resolver.
+    /// the production name tiers plus the dynamic-call resolver, with the extractor's local calls
+    /// from paragraphs (a PERFORM or GO TO of its own division, wicked-estate#579). A paragraph
+    /// source is labelled with its program, the owner a row speaks of; a program's own local edges
+    /// to the paragraphs it runs are left out.
     fn cobol_role_edges(strip_hints: bool) -> Vec<(String, String, EdgeKind, NodeKind)> {
         let raw = include_str!("../tests/fixtures/cobol_roles/extractions.json");
         let all: Vec<wicked_estate_core::Extraction> = serde_json::from_str(raw).unwrap();
@@ -3837,18 +3840,38 @@ mod tests {
         )
         .unwrap()
         .edges;
+        let node = |id: &SymbolId| nodes.iter().find(|n| &n.symbol == id).unwrap();
         let label = |id: &SymbolId| {
-            let n = nodes.iter().find(|n| &n.symbol == id).unwrap();
+            let n = node(id);
             (format!("{}:{}", n.location.file, n.name), n.kind.clone())
         };
+        let source = |id: &SymbolId| {
+            let n = node(id);
+            match n
+                .metadata
+                .get(wicked_estate_core::refs::cobol_ref::OWNER_PROGRAM)
+                .and_then(|v| v.as_str())
+            {
+                Some(program) if n.kind == NodeKind::Function => {
+                    format!("{}:{program}", n.location.file)
+                }
+                _ => label(id).0,
+            }
+        };
+        let local = all
+            .iter()
+            .flat_map(|e| e.local_edges.iter())
+            .filter(|e| e.kind == EdgeKind::Calls && node(&e.source).kind == NodeKind::Function);
         let mut out: Vec<_> = edges
             .iter()
+            .chain(local)
             .map(|e| {
                 let (target, kind) = label(&e.target);
-                (label(&e.source).0, target, e.kind.clone(), kind)
+                (source(&e.source), target, e.kind.clone(), kind)
             })
             .collect();
         out.sort_by_key(|e| format!("{e:?}"));
+        out.dedup();
         out
     }
 
