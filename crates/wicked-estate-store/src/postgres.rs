@@ -3108,15 +3108,36 @@ mod name_prefix_plan_tests {
                 .bind(LEASE_KEY)
                 .execute(&pool),
         );
-        for (shape, p) in [("bounded", &bounded), ("open above", &open_above)] {
+        // The `Index Cond` of the scan on idx_nodes_name_folded: a bound the planner only
+        // applies as a `Filter` would still walk every name past the prefix.
+        let index_cond = |p: &str| -> String {
+            let mut lines = p
+                .lines()
+                .skip_while(|l| !l.contains("idx_nodes_name_folded"));
             assert!(
-                p.contains("idx_nodes_name_folded") && !p.contains("Seq Scan"),
-                "{shape}: {p}"
+                lines.next().is_some(),
+                "no scan on idx_nodes_name_folded: {p}"
             );
+            lines
+                .find(|l| l.trim_start().starts_with("Index Cond:"))
+                .unwrap_or_else(|| panic!("the folded-name scan has no Index Cond: {p}"))
+                .to_string()
+        };
+        for (shape, p) in [("bounded", &bounded), ("open above", &open_above)] {
+            assert!(!p.contains("Seq Scan"), "{shape}: {p}");
         }
+        let cond = index_cond(&bounded);
         assert!(
-            bounded.contains(">=") && bounded.contains(" < "),
+            cond.contains(">= 'alp'") && cond.contains("< 'alq'"),
             "both bounds are index conditions: {bounded}"
+        );
+        assert!(
+            !bounded.lines().any(|l| l.contains("Filter:")),
+            "no bound left to a filter: {bounded}"
+        );
+        assert!(
+            index_cond(&open_above).contains(">= 'alp'"),
+            "the lower bound is an index condition: {open_above}"
         );
     }
 }
