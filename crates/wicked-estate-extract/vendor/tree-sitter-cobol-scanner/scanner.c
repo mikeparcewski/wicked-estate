@@ -28,6 +28,9 @@
  *      upstream's recovery, one ERROR to the end, in linear time. Real COBOL recovers from a
  *      statement in a few scans and never gets there. The count lives in the scanner's payload,
  *      so it is per parser, and the extractor makes one parser per file.
+ *   5. A file that ends inside the sequence area (wicked-estate#634). The upstream loop over
+ *      columns 1-6 advanced until column 6 with no end-of-input check; at the end of the file
+ *      the column stops moving, so the scan never returned. It now stops at end of input too.
  *   6. The keyword matcher (wicked-estate#636). Upstream advanced and read every keyword's pointer,
  *      including keywords already ruled out, so a short one was read past its terminating NUL
  *      while a long one still matched. Only the keywords still matching are read now.
@@ -313,7 +316,8 @@ static bool wicked_cobol_scanner_scan(void *payload, TSLexer *lexer,
     }
 
     if(valid_symbols[LINE_PREFIX_COMMENT] && lexer->get_column(lexer) <= 5) {
-        while(lexer->get_column(lexer) <= 5) {
+        // WICKED PATCH 5: stop at end of input, where the column no longer advances.
+        while(lexer->get_column(lexer) <= 5 && lexer->lookahead != 0) {
             lexer->advance(lexer, true);
         }
         lexer->result_symbol = LINE_PREFIX_COMMENT;

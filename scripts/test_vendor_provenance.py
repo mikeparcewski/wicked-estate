@@ -202,7 +202,7 @@ UPSTREAM_DECLARATIONS = {
         "author": "Jan-Jaap Korpershoek",
     },
     "tree-sitter-cobol-scanner": {
-        # LICENSE at that commit. scanner.c carries five WICKED PATCHes and arborium's packaging
+        # LICENSE at that commit. scanner.c carries six WICKED PATCHes and arborium's packaging
         # edits (the arborium-cobol 2.18.0 crate declares MIT, author Amos Wenger; arborium's
         # LICENSE-MIT: "Copyright (c) 2024 Amos Wenger"), so no source file is pinned here.
         "repo": "https://github.com/zharinov/tree-sitter-cobol",
