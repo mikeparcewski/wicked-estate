@@ -1040,7 +1040,9 @@ impl RetrievalTool for Path {
         "The ordered hops from one symbol to another — how A reaches B, not merely that it \
          does. Each hop carries its edge kind, confidence, provenance and resolving tier, and \
          both endpoints are denormalized (name, file, line), so an agent can name the \
-         intermediate functions and open only those files. Use this instead of reconstructing \
+         intermediate functions and open only those files. `site` is where the hop happens \
+         ({file, line_1based, representative: true}: one site per relationship, a caller that \
+         calls three times keeps one), or null when the edge carries no location. Use this instead of reconstructing \
          a route from TraverseGraph's edge list. `from` and `to` accept a symbol name or a \
          SymbolId. `found: false` is a PROVEN absence only when `depth_bounded` and \
          `node_bounded` are both false and `unresolved_on_frontier` is 0 (a positive count \
@@ -1196,7 +1198,10 @@ impl RetrievalTool for Path {
         }
         let mut hops_json: Vec<Value> = Vec::with_capacity(result.hops.len());
         for e in &result.hops {
-            hops_json.push(edge_json(store, e, &mut node_cache)?);
+            let mut hop = edge_json(store, e, &mut node_cache)?;
+            // #357: the line where this hop happens, not only the two declarations.
+            hop["site"] = e.site_json();
+            hops_json.push(hop);
         }
 
         let mut content = json!({

@@ -4965,6 +4965,8 @@ fn path_json(from: &str, to: &str, r: &wicked_estate_core::PathResult) -> serde_
                 "confidence": e.confidence.get(),
                 "provenance": &e.provenance,
                 "resolved_by": e.resolved_by,
+                // #357: the line where this hop happens (the MCP Path hop's field).
+                "site": e.site_json(),
             })
         })
         .collect();
@@ -5037,6 +5039,15 @@ fn write_path_text(
                     e.confidence.get(),
                     e.resolved_by
                 )?;
+                // #357: where the hop happens. One representative site per relationship.
+                if let Some(site) = e.site() {
+                    writeln!(
+                        out,
+                        "      at {}:{}",
+                        site.file,
+                        u64::from(site.span.start_line) + 1
+                    )?;
+                }
             }
         }
     } else {

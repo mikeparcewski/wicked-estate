@@ -6,7 +6,7 @@
 //! `target == B` and walks their `source`s. This matches the hard-won
 //! `DEPENDENTS_BY = "target"` rule.
 
-use crate::node::{Location, Metadata};
+use crate::node::{Location, Metadata, Span};
 use crate::symbol::SymbolId;
 use serde::{Deserialize, Serialize};
 
@@ -308,6 +308,31 @@ pub struct Edge {
 }
 
 impl Edge {
+    /// Where this relationship occurs in source (#357): the edge's location when it carries a
+    /// real one, `None` when it has none (an edge an extra-edge rule or a link writes, or a ZERO
+    /// span). Edges are keyed `(source, target, kind)`, so this is ONE representative site: a
+    /// caller that calls its callee three times keeps one of the three.
+    pub fn site(&self) -> Option<&Location> {
+        self.location
+            .as_ref()
+            .filter(|l| !l.file.is_empty() && l.span != Span::ZERO)
+    }
+
+    /// The wire form of [`Edge::site`], shared by the MCP `Path` hops and the CLI `path --json`:
+    /// `{file, line_1based, representative: true}`, or `null` when the edge has no site.
+    /// `representative` is always `true`: it says the line is one site of the relationship, not
+    /// the only one.
+    pub fn site_json(&self) -> serde_json::Value {
+        match self.site() {
+            Some(l) => serde_json::json!({
+                "file": l.file,
+                "line_1based": u64::from(l.span.start_line) + 1,
+                "representative": true,
+            }),
+            None => serde_json::Value::Null,
+        }
+    }
+
     /// Construct an edge, deriving confidence + provenance from the resolution tier.
     pub fn new(
         source: SymbolId,
