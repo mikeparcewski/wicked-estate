@@ -5,7 +5,9 @@
 # usage: make_store_v0_35_10.sh <wicked-estate 0.35.10 binary> <out.db>
 # Needs sqlite3. Runs in a scratch directory with a scratch HOME; nothing outside it is touched.
 set -eu
-BIN=$1; OUT=$2
+# Both paths are resolved before the script changes directory, so relative ones work.
+BIN=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+OUT=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
 "$BIN" version | grep -qx 'wicked-estate 0.35.10' || { echo "need the 0.35.10 CLI" >&2; exit 1; }
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/home" "$W/repo/src"

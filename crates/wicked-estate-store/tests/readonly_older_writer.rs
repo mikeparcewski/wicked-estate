@@ -9,7 +9,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
-use wicked_estate_core::{Direction, EdgeKind, GraphRead, SymbolId, SymbolQuery, TraversalSpec};
+use wicked_estate_core::{
+    Direction, EdgeKind, GraphRead, SupportOwner, SymbolQuery, TraversalSpec,
+};
 use wicked_estate_store::SqliteStore;
 
 fn fixture_copy(dir: &Path) -> PathBuf {
@@ -27,16 +29,15 @@ fn object_names(db: &Path) -> BTreeSet<String> {
     let mut s = c
         .prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
         .unwrap();
-    let names = s
-        .query_map([], |r| r.get::<_, String>(0))
+    s.query_map([], |r| r.get::<_, String>(0))
         .unwrap()
         .map(Result::unwrap)
-        .collect();
-    names
+        .collect()
 }
 
 /// The fixture is the 0.35.10 shape: next to a graph this build creates, it lacks exactly the
-/// objects 0.35.11 added, and has nothing this build does not.
+/// objects 0.35.11 added, and its one extra object is the 0.35.x FTS shadow-table guard trigger,
+/// which this build's writer opens drop (#570) and its readers do not need.
 #[test]
 fn the_fixture_is_a_0_35_10_graph_601() {
     let tmp = tempfile::tempdir().unwrap();
@@ -46,7 +47,8 @@ fn the_fixture_is_a_0_35_10_graph_601() {
     let (old, fresh) = (object_names(&old), object_names(&fresh));
     let missing: Vec<&str> = fresh.difference(&old).map(String::as_str).collect();
     assert_eq!(missing, ["edge_files", "idx_edge_files_file"]);
-    assert!(old.is_subset(&fresh), "{:?}", old.difference(&fresh));
+    let extra: Vec<&str> = old.difference(&fresh).map(String::as_str).collect();
+    assert_eq!(extra, ["nodes_fts_rowid_guard"]);
 }
 
 /// The read-only currency check opens the 0.35.10 graph without writing a byte, and every read
@@ -99,7 +101,10 @@ fn a_graph_an_older_writer_left_opens_read_only_and_answers_601() {
         .traverse(&alpha.id, &TraversalSpec::blast_radius(3))
         .unwrap();
     let _ = store
-        .traverse_multi(&[alpha.id.clone()], &TraversalSpec::blast_radius(3))
+        .traverse_multi(
+            std::slice::from_ref(&alpha.id),
+            &TraversalSpec::blast_radius(3),
+        )
         .unwrap();
     assert_eq!(store.all_nodes().unwrap().len(), 3);
     assert_eq!(store.all_edges().unwrap().len(), 3);
@@ -120,9 +125,23 @@ fn a_graph_an_older_writer_left_opens_read_only_and_answers_601() {
     let _ = store.annotations_stale_since(0).unwrap();
     let _ = store.symbol_epoch(&alpha.id).unwrap();
     let _ = store.support_owners().unwrap();
+    let _ = store.capabilities();
+    assert_eq!(
+        store
+            .find_structural_symbols(&SymbolQuery::default())
+            .unwrap()
+            .len(),
+        3
+    );
+    for e in &out {
+        let _ = store.edge_supports(&e.source, &e.target, &e.kind).unwrap();
+    }
+    let _ = store
+        .support_generation(&SupportOwner::new("scip", "s1").unwrap())
+        .unwrap();
     let _ = store.unresolved_refs_for_name("gamma").unwrap();
     let _ = store
-        .count_unresolved_refs_from(&[SymbolId(alpha.id.0.clone())])
+        .count_unresolved_refs_from(std::slice::from_ref(&alpha.id))
         .unwrap();
     let stats = store.stats().unwrap();
     assert_eq!((stats.node_count, stats.edge_count), (3, 3));
