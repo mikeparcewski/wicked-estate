@@ -610,8 +610,7 @@ fn qualifier_match(n: &wicked_estate_core::Node, qualifiers: &[String]) -> Optio
 ///   copybook, and a paragraph of the same spelling never is.
 /// - **label** binds a COBOL paragraph or section, by the same tiers.
 /// - **program** binds the unique program `Module` (COBOL, HLASM, PL/I, C, C++), never a
-///   paragraph. Uniqueness comes first: two programs of that name are ambiguous even when one of
-///   them is the caller.
+///   paragraph: two programs of that name are ambiguous, even when one of them is the caller's.
 ///
 /// Ownership comes from the extractor: items and paragraphs carry `cobol_program` or
 /// `cobol_copybook`, refs carry `cobol_programs` or `cobol_copybook` and `cobol_copies`.
@@ -641,10 +640,10 @@ fn cobol_targets(
         })
         .collect();
     if role == PROGRAM {
-        let [only] = candidates.as_slice() else {
-            return None;
-        };
-        return (only.symbol != r.from).then_some((candidates, CobolTier::Elsewhere));
+        // A call starts from the paragraph that makes it, so a program's call of itself binds its
+        // own Module: a recursive call, not a self-edge. (The extractor drops one made before the
+        // first paragraph, where the program itself would be the source.)
+        return (candidates.len() == 1).then_some((candidates, CobolTier::Elsewhere));
     }
     candidates.retain(|n| n.symbol != r.from);
     // How each candidate meets a data use's qualifiers: `true` by its own groups, `false` only as
@@ -3818,7 +3817,10 @@ mod tests {
 
     /// The COBOL extractor's own output for `tests/fixtures/cobol_roles` (pinned by
     /// `wicked-estate-extract`'s `role_fixture_extractions_are_this_extractors_output`), resolved by
-    /// the production name tiers plus the dynamic-call resolver.
+    /// the production name tiers plus the dynamic-call resolver, with the extractor's local calls
+    /// from paragraphs (a PERFORM or GO TO of its own division, wicked-estate#579). A paragraph
+    /// source is labelled with its program, the owner a row speaks of; a program's own local edges
+    /// to the paragraphs it runs are left out.
     fn cobol_role_edges(strip_hints: bool) -> Vec<(String, String, EdgeKind, NodeKind)> {
         let raw = include_str!("../tests/fixtures/cobol_roles/extractions.json");
         let all: Vec<wicked_estate_core::Extraction> = serde_json::from_str(raw).unwrap();
@@ -3841,18 +3843,38 @@ mod tests {
         )
         .unwrap()
         .edges;
+        let node = |id: &SymbolId| nodes.iter().find(|n| &n.symbol == id).unwrap();
         let label = |id: &SymbolId| {
-            let n = nodes.iter().find(|n| &n.symbol == id).unwrap();
+            let n = node(id);
             (format!("{}:{}", n.location.file, n.name), n.kind.clone())
         };
+        let source = |id: &SymbolId| {
+            let n = node(id);
+            match n
+                .metadata
+                .get(wicked_estate_core::refs::cobol_ref::OWNER_PROGRAM)
+                .and_then(|v| v.as_str())
+            {
+                Some(program) if n.kind == NodeKind::Function => {
+                    format!("{}:{program}", n.location.file)
+                }
+                _ => label(id).0,
+            }
+        };
+        let local = all
+            .iter()
+            .flat_map(|e| e.local_edges.iter())
+            .filter(|e| e.kind == EdgeKind::Calls && node(&e.source).kind == NodeKind::Function);
         let mut out: Vec<_> = edges
             .iter()
+            .chain(local)
             .map(|e| {
                 let (target, kind) = label(&e.target);
-                (label(&e.source).0, target, e.kind.clone(), kind)
+                (source(&e.source), target, e.kind.clone(), kind)
             })
             .collect();
         out.sort_by_key(|e| format!("{e:?}"));
+        out.dedup();
         out
     }
 
@@ -4028,6 +4050,62 @@ mod tests {
                 "CUST-NAME"
             ),
             ["cbl/TWOPGM.cbl:CUST-NAME"]
+        );
+    }
+
+    /// A label binds a paragraph, never a data item of the same spelling. AMBPGM performs, from a
+    /// third section, a STEP-PARA that two sections define (a label ref by name) and has a
+    /// STEP-PARA data item. Since #580 the two paragraphs are two nodes (`STEP-PARA(FIRST-SECT).`,
+    /// `STEP-PARA(SECOND-SECT).`), so the unqualified name is ambiguous (COBOL requires it
+    /// qualified) and parks, as any label with two candidates does, rather than taking the
+    /// one data item of that spelling. Each paragraph is still reached as a Function: its
+    /// section falls into it (#585). DATEPGM performs paragraphs of a procedure copybook (not
+    /// nodes, as CSUTLDPY in CardDemo's COACTUPC) and COPYs a data item EDIT-DATE.
+    #[test]
+    fn cobol_a_label_binds_a_paragraph_never_a_field() {
+        let edges = cobol_role_edges(false);
+        let calls_to = |source: &str, name: &str| {
+            let mut t: Vec<(String, NodeKind)> = edges
+                .iter()
+                .filter(|(src, t, k, _)| {
+                    src == source && *k == EdgeKind::Calls && t.rsplit(':').next() == Some(name)
+                })
+                .map(|(_, t, _, n)| (t.clone(), n.clone()))
+                .collect();
+            t.dedup();
+            t
+        };
+        assert_eq!(
+            calls_to("cbl/AMBPGM.cbl:AMBPGM", "STEP-PARA"),
+            [("cbl/AMBPGM.cbl:STEP-PARA".to_string(), NodeKind::Function)],
+            "{edges:#?}"
+        );
+        for name in ["EDIT-DATE", "EDIT-DATE-EXIT"] {
+            assert!(
+                calls_to("cbl/DATEPGM.cbl:DATEPGM", name).is_empty(),
+                "{edges:#?}"
+            );
+        }
+        assert!(
+            edges
+                .iter()
+                .all(|(_, _, k, t)| *k != EdgeKind::Calls || *t != NodeKind::Field),
+            "{edges:#?}"
+        );
+    }
+
+    /// A program that CALLs itself from a paragraph binds its own Module (a recursive call).
+    #[test]
+    fn cobol_a_program_calling_itself_from_a_paragraph_binds_its_module() {
+        let edges = cobol_role_edges(false);
+        assert!(
+            edges.contains(&(
+                "cbl/SELFPGM.cbl:SELFPGM".to_string(),
+                "cbl/SELFPGM.cbl:SELFPGM".to_string(),
+                EdgeKind::Calls,
+                NodeKind::Module
+            )),
+            "{edges:#?}"
         );
     }
 

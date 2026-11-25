@@ -183,7 +183,8 @@ fn inspected_kind(kind: &str) -> bool {
 }
 
 /// Classify one definition. `start..end` is the byte range of the def's anchor node in `tree`.
-/// `None` when the language or kind is not inspected (no key is written).
+/// `None` when the language or kind is not inspected (no key is written). For many definitions of
+/// one file, [`classify_in`] with one [`FileFacts`] does the per-file work once.
 #[must_use]
 pub fn classify(
     lang: &str,
@@ -193,6 +194,49 @@ pub fn classify(
     start: usize,
     end: usize,
     src: &[u8],
+) -> Option<Behaviour> {
+    classify_in(
+        &mut FileFacts::default(),
+        lang,
+        path,
+        kind,
+        tree,
+        start,
+        end,
+        src,
+    )
+}
+
+/// What the classifier learns about one parsed file, computed on first use and shared by every
+/// definition of that file (#582: per-definition walks of a COBOL program's flat procedure
+/// division made indexing quadratic in its size). Make one per file with `default()` and pass it
+/// to [`classify_in`] with that file's tree and source. It borrows both for its lifetime, so
+/// neither can change under it; given another tree or source, it starts over rather than answer
+/// from the wrong file.
+#[derive(Default)]
+pub struct FileFacts<'t> {
+    cobol: Option<CobolTree<'t>>,
+    /// The source and whether it is not UTF-8 or carries a free-format directive: either way
+    /// every exit-only candidate stays real.
+    cobol_free_format: Option<(&'t [u8], bool)>,
+}
+
+#[cfg(test)]
+#[path = "behaviour_reference.rs"]
+mod reference;
+
+/// [`classify`] with per-file facts shared across a file's definitions.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn classify_in<'t>(
+    facts: &mut FileFacts<'t>,
+    lang: &str,
+    path: &str,
+    kind: &str,
+    tree: &'t tree_sitter::Tree,
+    start: usize,
+    end: usize,
+    src: &'t [u8],
 ) -> Option<Behaviour> {
     let family = match lang {
         "python" => Family::Python,
@@ -223,6 +267,36 @@ pub fn classify(
         Family::Rust => &["function_item", "struct_item"],
         Family::Cobol => crate::treesitter::COBOL_HEADERS,
     };
+    if let Family::Cobol = family {
+        let root = tree.root_node().id();
+        let cobol_tree = match &mut facts.cobol {
+            Some(t) if t.root_id == root => t,
+            slot => slot.insert(CobolTree::new(tree)),
+        };
+        let free_format = match facts.cobol_free_format {
+            Some((seen, free)) if std::ptr::eq(seen, src) => free,
+            _ => {
+                cobol_tick(src.len());
+                let free = std::str::from_utf8(src)
+                    .map_or(true, crate::cobol_links::source_is_free_format);
+                facts.cobol_free_format = Some((src, free));
+                free
+            }
+        };
+        let got = match cobol_tree.header_at(start, end) {
+            Some(header) => cobol(cobol_tree, header, src, free_format),
+            None => Behaviour::Real,
+        };
+        // The pre-#582 classifier is the oracle: every unit test that extracts COBOL checks it,
+        // except the counted-work test, which turns it off (it is quadratic).
+        #[cfg(test)]
+        if !COBOL_ORACLE_OFF.with(std::cell::Cell::get) {
+            let old = anchor(tree, start, end, def_kinds)
+                .map_or(Behaviour::Real, |n| reference::cobol(n, src));
+            assert_eq!(got, old, "#582 oracle at bytes {start}..{end}");
+        }
+        return Some(got);
+    }
     let Some(node) = anchor(tree, start, end, def_kinds) else {
         return Some(Behaviour::Real);
     };
@@ -230,7 +304,7 @@ pub fn classify(
         Family::Python => python(node, src),
         Family::Ts => ts(node, src),
         Family::Rust => rust(node, src),
-        Family::Cobol => cobol(node, src),
+        Family::Cobol => unreachable!("COBOL returns above"),
     })
 }
 
@@ -314,8 +388,13 @@ const COBOL_EXIT_WORDS: &[&str] = &[
 /// The scan ends before the next header, or at the line start of the next non-extra token after
 /// the enclosing division (EOF if absent), never before the division's last physical line ends.
 /// END DECLARATIVES ends the scan. Anything uncertain stays real.
-fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
-    let Some(end) = crate::treesitter::cobol_paragraph_end(header) else {
+///
+/// Navigation goes through `tree`'s arrays (#582): tree-sitter's `next_sibling` and `parent` cost
+/// the node's index among its siblings, which made a per-paragraph walk of a flat procedure
+/// division quadratic. `free_format` is the file's answer, decided once.
+fn cobol(tree: &mut CobolTree<'_>, h: u32, src: &[u8], free_format: bool) -> Behaviour {
+    let header = tree.node(h);
+    let Some(end) = tree.body_end(h) else {
         return Behaviour::Real;
     };
     if header.start_position().column >= COBOL_AREA_B_COLUMN || cobol_header_is_verb(header, src) {
@@ -323,10 +402,11 @@ fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
     }
     let mut statements = 0usize;
     let mut ended_by_header = false;
-    let mut next = header.next_sibling();
-    while let Some(n) = next {
-        next = n.next_sibling();
-        if crate::treesitter::COBOL_HEADERS.contains(&n.kind()) {
+    let mut next = tree.next(h);
+    while let Some(i) = next {
+        next = tree.next(i);
+        let n = tree.node(i);
+        if crate::treesitter::is_cobol_header(n) {
             // A header the grammar built from a verb (`COMMIT.`, `ROLLBACK.`) is a statement it
             // misread, in any column. Any other header ends the span, whatever column it starts in.
             if cobol_header_is_verb(n, src) {
@@ -354,29 +434,19 @@ fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
     // A declaratives paragraph's errors are only those inside its own `procedure_declaratives`
     // (a MISSING period on `END DECLARATIVES`, say); an ERROR or MISSING in the main procedure
     // code that follows a valid `END DECLARATIVES.` does not make it real.
-    let scan_root = header
-        .parent()
-        .filter(|p| p.kind() == "procedure_declaratives")
-        .unwrap_or_else(|| {
-            let mut root = header;
-            while let Some(p) = root.parent() {
-                root = p;
-            }
-            root
-        });
-    if !ended_by_header && error_after_division(scan_root, end) {
+    let scan_root = tree
+        .parent(h)
+        .filter(|&p| tree.node(p).kind() == "procedure_declaratives")
+        .unwrap_or(0);
+    if !ended_by_header && tree.error_after_division(scan_root, end) {
         return Behaviour::Real;
     }
     if statements > 0 {
-        let Ok(source) = std::str::from_utf8(src) else {
-            return Behaviour::Real;
-        };
         // The grammar reads fixed columns and silently drops code that starts in column 1 (free
         // format, continuations): read the paragraph's own source and keep it real unless every
-        // line of it is fixed-format shape and holds only exit-only statements.
-        if crate::cobol_links::source_is_free_format(source)
-            || !cobol_exit_only_source_ok(header, end, ended_by_header, src)
-        {
+        // line of it is fixed-format shape and holds only exit-only statements. Source that is
+        // not UTF-8 counts as free format.
+        if free_format || !cobol_exit_only_source_ok(tree, h, end, ended_by_header, src) {
             return Behaviour::Real;
         }
         Behaviour::Stub("exit_only")
@@ -409,15 +479,21 @@ fn cobol_header_is_verb(header: TsNode<'_>, src: &[u8]) -> bool {
 /// most 80 columns, column 72 blank). Remaining source holds only exit-only words, spaces and
 /// periods; any doubt keeps the paragraph real.
 fn cobol_exit_only_source_ok(
-    header: TsNode<'_>,
+    tree: &CobolTree<'_>,
+    h: u32,
     end: usize,
     ended_by_header: bool,
     src: &[u8],
 ) -> bool {
+    let header = tree.node(h);
     let line_start = |at: usize| {
-        src[..at.min(src.len())]
+        let at = at.min(src.len());
+        src[..at]
             .iter()
-            .rposition(|&b| b == b'\n')
+            .rposition(|&b| {
+                cobol_tick(1);
+                b == b'\n'
+            })
             .map_or(0, |i| i + 1)
     };
     let line_begin = line_start(header.start_byte());
@@ -431,24 +507,27 @@ fn cobol_exit_only_source_ok(
     } else {
         src[end..]
             .iter()
-            .position(|&b| b == b'\n')
+            .position(|&b| {
+                cobol_tick(1);
+                b == b'\n'
+            })
             .map_or(src.len(), |i| end + i)
     };
     let region_end = if ended_by_header {
         region_end
     } else {
-        let mut ancestor = header.parent();
+        let mut ancestor = tree.parent(h);
         let mut next_token = None;
         'ancestors: while let Some(node) = ancestor {
-            let mut next = node.next_sibling();
+            let mut next = tree.next(node);
             while let Some(sibling) = next {
-                if !sibling.is_extra() {
-                    next_token = Some(sibling.start_byte());
+                if !tree.node(sibling).is_extra() {
+                    next_token = Some(tree.node(sibling).start_byte());
                     break 'ancestors;
                 }
-                next = sibling.next_sibling();
+                next = tree.next(sibling);
             }
-            ancestor = node.parent();
+            ancestor = tree.parent(node);
         }
         region_end.max(next_token.map_or(src.len(), line_start))
     };
@@ -462,7 +541,10 @@ fn cobol_exit_only_source_ok(
         let boundary = line_start(end);
         let boundary_end = src[boundary..]
             .iter()
-            .position(|&b| b == b'\n')
+            .position(|&b| {
+                cobol_tick(1);
+                b == b'\n'
+            })
             .map_or(src.len(), |i| boundary + i);
         let prefix = String::from_utf8_lossy(&src[boundary..boundary_end]);
         if !prefix
@@ -474,6 +556,7 @@ fn cobol_exit_only_source_ok(
         }
     }
     let header_end_col = header.end_byte().min(src.len()) - line_begin;
+    cobol_tick(region_end - line_begin + 1);
     let region = String::from_utf8_lossy(&src[line_begin..region_end]);
     for (idx, raw) in region.split('\n').enumerate() {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
@@ -549,39 +632,228 @@ fn cobol_area_exit_only(area: &str) -> bool {
     word.is_empty() || COBOL_EXIT_WORDS.contains(&word.as_str())
 }
 
-/// Whether an ERROR or MISSING node lies at or after `division_end` within `scan_root`, before
-/// the next `program_definition`: error recovery closes the division early and parks the rest of
-/// the paragraph's statements there.
-fn error_after_division(scan_root: TsNode<'_>, division_end: usize) -> bool {
-    let root = scan_root;
-    let mut stop = usize::MAX;
-    let mut errors = Vec::new();
-    let mut cursor = root.walk();
-    let mut seen = 0usize;
-    'walk: loop {
-        let n = cursor.node();
-        seen += 1;
-        if seen > WALK_BUDGET * 64 {
-            return true;
-        }
-        if n.end_byte() >= division_end {
-            if n.kind() == "program_definition" && n.start_byte() >= division_end {
-                stop = stop.min(n.start_byte());
-            }
-            if (n.is_error() || n.is_missing()) && n.start_byte() >= division_end {
-                errors.push(n.start_byte());
+#[cfg(test)]
+thread_local! {
+    /// The COBOL classifier's steps on this thread (tests): a node built or scanned, a navigation
+    /// or lookup, a binary search, a sort's length, a source byte read. Per thread, so it counts
+    /// every tree and cache a test's calls build, rebuilt ones included. The #582 guards assert
+    /// it grows linearly with the file.
+    static COBOL_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Set by the counted-work test on its thread: `classify_in` skips the quadratic oracle.
+    static COBOL_ORACLE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Count `steps` of the COBOL classifier's work (tests only; a no-op in the product build).
+#[inline]
+fn cobol_tick(steps: usize) {
+    #[cfg(test)]
+    COBOL_WORK.with(|w| w.set(w.get() + steps));
+    #[cfg(not(test))]
+    let _ = steps;
+}
+
+/// No node: the root's parent, a last child's next sibling.
+const NO_NODE: u32 = u32::MAX;
+
+/// A COBOL file's syntax tree with O(1) navigation (#582), built by one cursor walk: each node's
+/// parent, next sibling and subtree, and the headers by byte range. Nodes are in preorder; node
+/// `0` is the root.
+struct CobolTree<'t> {
+    root_id: usize,
+    nodes: Vec<TsNode<'t>>,
+    parent: Vec<u32>,
+    /// `TsNode::next_sibling`'s answer: the first later sibling that ENDS after this node ends
+    /// (tree-sitter skips a zero-width sibling at the node's end, a MISSING period say).
+    next: Vec<u32>,
+    /// One past the last node of each node's subtree.
+    subtree_end: Vec<u32>,
+    /// `(start, end)` -> the innermost paragraph or section header with exactly that range.
+    headers: std::collections::HashMap<(usize, usize), u32>,
+    /// Per scan root, sorted: ERROR/MISSING starts, `program_definition` starts, and the end of
+    /// every non-root node's parent (the old walk's visit count, see `error_after_division`).
+    scans: std::collections::HashMap<u32, ScanFacts>,
+}
+
+#[derive(Default)]
+struct ScanFacts {
+    errors: Vec<usize>,
+    programs: Vec<usize>,
+    parent_ends: Vec<usize>,
+}
+
+impl<'t> CobolTree<'t> {
+    fn new(tree: &'t tree_sitter::Tree) -> Self {
+        let mut out = Self {
+            root_id: tree.root_node().id(),
+            nodes: Vec::new(),
+            parent: Vec::new(),
+            next: Vec::new(),
+            subtree_end: Vec::new(),
+            headers: std::collections::HashMap::new(),
+            scans: std::collections::HashMap::new(),
+        };
+        let mut cursor = tree.walk();
+        // Each open ancestor: (node, where its children still waiting for a next sibling start
+        // in `waiting`). Siblings end in order, so the ones a new child ends after are a prefix.
+        let mut open: Vec<(u32, usize)> = Vec::new();
+        let mut waiting: Vec<u32> = Vec::new();
+        loop {
+            let n = cursor.node();
+            let i = out.nodes.len() as u32;
+            let parent = match open.last() {
+                Some(&(p, from)) => {
+                    let done = waiting[from..]
+                        .iter()
+                        .take_while(|&&w| {
+                            cobol_tick(1);
+                            out.nodes[w as usize].end_byte() < n.end_byte()
+                        })
+                        .count();
+                    for w in waiting.drain(from..from + done) {
+                        out.next[w as usize] = i;
+                    }
+                    waiting.push(i);
+                    p
+                }
+                None => NO_NODE,
+            };
+            cobol_tick(1);
+            out.nodes.push(n);
+            out.parent.push(parent);
+            out.next.push(NO_NODE);
+            out.subtree_end.push(i + 1);
+            if crate::treesitter::COBOL_HEADERS.contains(&n.kind()) {
+                // Preorder: a deeper node with the same range comes later and wins, as `anchor`'s
+                // innermost-first walk would pick it.
+                out.headers.insert((n.start_byte(), n.end_byte()), i);
             }
             if cursor.goto_first_child() {
+                open.push((i, waiting.len()));
                 continue;
             }
-        }
-        while !cursor.goto_next_sibling() {
-            if !cursor.goto_parent() {
-                break 'walk;
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    return out;
+                }
+                if let Some((p, from)) = open.pop() {
+                    out.subtree_end[p as usize] = out.nodes.len() as u32;
+                    waiting.truncate(from);
+                }
             }
         }
     }
-    errors.into_iter().any(|e| e < stop)
+
+    fn node(&self, i: u32) -> TsNode<'t> {
+        cobol_tick(1);
+        self.nodes[i as usize]
+    }
+
+    fn parent(&self, i: u32) -> Option<u32> {
+        cobol_tick(1);
+        Some(self.parent[i as usize]).filter(|&p| p != NO_NODE)
+    }
+
+    fn next(&self, i: u32) -> Option<u32> {
+        cobol_tick(1);
+        Some(self.next[i as usize]).filter(|&n| n != NO_NODE)
+    }
+
+    /// The header the def at `start..end` anchors on, as [`anchor`] finds it.
+    fn header_at(&self, start: usize, end: usize) -> Option<u32> {
+        cobol_tick(1);
+        self.headers.get(&(start, end)).copied()
+    }
+
+    /// End byte of the statements right after a COBOL header: the next real header's start, of
+    /// either kind, among its following siblings, else its procedure parent's end; `None` when the
+    /// parent is not a procedure division or declaratives. A section's own statements stop at its
+    /// first paragraph.
+    fn body_end(&self, h: u32) -> Option<usize> {
+        let parent = self.parent(h)?;
+        if !crate::treesitter::COBOL_PROC_PARENTS.contains(&self.node(parent).kind()) {
+            return None;
+        }
+        let mut next = self.next(h);
+        while let Some(i) = next {
+            let sib = self.node(i);
+            if crate::treesitter::COBOL_HEADERS.contains(&sib.kind())
+                && crate::treesitter::is_cobol_header(sib)
+            {
+                return Some(sib.start_byte());
+            }
+            next = self.next(i);
+        }
+        Some(self.node(parent).end_byte())
+    }
+
+    /// How many nodes the old error walk from `scan_root` visited for `division_end` (tests).
+    #[cfg(test)]
+    fn visited_from(&mut self, scan_root: u32, division_end: usize) -> usize {
+        self.error_after_division(scan_root, division_end);
+        let ends = &self.scans[&scan_root].parent_ends;
+        1 + ends.len() - ends.partition_point(|&e| e < division_end)
+    }
+
+    /// Whether an ERROR or MISSING node lies at or after `division_end` within `scan_root`,
+    /// before the next `program_definition`: error recovery closes the division early and parks
+    /// the rest of the paragraph's statements there. The root's nodes are collected once; each
+    /// question is then three binary searches.
+    ///
+    /// Same answer as the old walk, budget included: it descended only into nodes ending at or
+    /// after `division_end` and answered `true` (keep it real) past `WALK_BUDGET * 64` visits. A
+    /// node's ancestors end no earlier than its parent, so it visited the root and every node
+    /// whose parent ends at or after `division_end`.
+    fn error_after_division(&mut self, scan_root: u32, division_end: usize) -> bool {
+        let (nodes, parent, subtree_end) = (&self.nodes, &self.parent, &self.subtree_end);
+        let facts = self.scans.entry(scan_root).or_insert_with(|| {
+            let mut facts = ScanFacts::default();
+            let range = scan_root..subtree_end[scan_root as usize];
+            cobol_tick(range.len());
+            for i in range {
+                let n = nodes[i as usize];
+                if n.kind() == "program_definition" {
+                    facts.programs.push(n.start_byte());
+                }
+                if n.is_error() || n.is_missing() {
+                    facts.errors.push(n.start_byte());
+                }
+                if i != scan_root {
+                    facts
+                        .parent_ends
+                        .push(nodes[parent[i as usize] as usize].end_byte());
+                }
+            }
+            let counted = |a: &usize, b: &usize| {
+                cobol_tick(1);
+                a.cmp(b)
+            };
+            facts.errors.sort_unstable_by(counted);
+            facts.programs.sort_unstable_by(counted);
+            facts.parent_ends.sort_unstable_by(counted);
+            facts
+        });
+        // The map lookup, then every comparison the searches make.
+        cobol_tick(1);
+        let before = |&e: &usize| {
+            cobol_tick(1);
+            e < division_end
+        };
+        if 1 + facts.parent_ends.len() - facts.parent_ends.partition_point(before)
+            > WALK_BUDGET * 64
+        {
+            return true;
+        }
+        let ScanFacts {
+            errors, programs, ..
+        } = facts;
+        let stop = programs
+            .get(programs.partition_point(before))
+            .copied()
+            .unwrap_or(usize::MAX);
+        errors
+            .get(errors.partition_point(before))
+            .is_some_and(|&e| e < stop)
+    }
 }
 
 /// The def's syntax node: the innermost node spanning exactly `start..end` whose kind is one of
@@ -1830,6 +2102,348 @@ mod tests {
             .into_iter()
             .map(|(k, b, r)| (k.rsplit('#').next().unwrap_or(&k).to_string(), (b, r)))
             .collect()
+    }
+
+    // ── #582: the array-based COBOL classifier ─────────────────────────────────────────────
+    // `classify_in` checks every COBOL answer against the pre-#582 classifier under cfg(test)
+    // (behaviour_reference.rs), so every COBOL test here, bar the counted-work one, is also an
+    // equivalence test. These add the shapes where the two navigations could differ, and the
+    // per-file cache.
+
+    fn parse_cobol(src: &str) -> tree_sitter::Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::treesitter::lang_cobol())
+            .expect("cobol grammar");
+        parser.parse(src, None).expect("parses")
+    }
+
+    /// Shapes where tree-sitter's navigation is not plain adjacency: MISSING periods (zero-width
+    /// siblings), declaratives, two programs in one file.
+    fn cobol_edge_sources() -> Vec<String> {
+        let head = [
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+        ];
+        let with = |body: &[&str]| -> String {
+            let lines: Vec<&str> = head.iter().copied().chain(body.iter().copied()).collect();
+            fixed(&lines)
+        };
+        vec![
+            with(&["A-PARA.", "    EXIT", "B-PARA.", "    EXIT."]),
+            with(&["A-PARA.", "    CONTINUE", "B-PARA.", "    EXIT"]),
+            with(&["A-PARA", "    EXIT.", "B-PARA.", "    GOBACK"]),
+            with(&[
+                "A-SECT SECTION.",
+                "A-PARA.",
+                "    EXIT",
+                "B-SECT SECTION.",
+                "B-PARA.",
+                "    EXIT.",
+            ]),
+            with(&[
+                "DECLARATIVES.",
+                "ERR-SECT SECTION.",
+                "    USE AFTER ERROR PROCEDURE ON INFILE.",
+                "ERR-PARA.",
+                "    EXIT.",
+                "END DECLARATIVES.",
+                "MAIN-SECT SECTION.",
+                "MAIN-PARA.",
+                "    EXIT.",
+            ]),
+            fixed(&[
+                "IDENTIFICATION DIVISION.",
+                "PROGRAM-ID. ONE.",
+                "PROCEDURE DIVISION.",
+                "A-PARA.",
+                "    PERFORM B-PARA.",
+                "B-PARA.",
+                "    EXIT.",
+                "END PROGRAM ONE.",
+                "IDENTIFICATION DIVISION.",
+                "PROGRAM-ID. TWO.",
+                "PROCEDURE DIVISION.",
+                "C-PARA.",
+                "    EXIT",
+                "END PROGRAM TWO.",
+            ]),
+        ]
+    }
+
+    /// The repo's own COBOL fixtures (real programs the index already reads) plus the edge shapes.
+    fn cobol_corpus() -> Vec<String> {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let mut out = cobol_edge_sources();
+        for dir in [
+            "wicked-estate-resolve/tests/fixtures/cobol_roles/cbl",
+            "wicked-estate/tests/fixtures/mainframe/cbl",
+            "wicked-estate/tests/fixtures/mainframe-grammarless/cbl",
+        ] {
+            let mut files: Vec<_> = std::fs::read_dir(format!("{root}/{dir}"))
+                .expect("fixture dir")
+                .map(|e| e.unwrap().path())
+                .collect();
+            files.sort();
+            out.extend(
+                files
+                    .iter()
+                    .map(|f| std::fs::read_to_string(f).expect("fixture")),
+            );
+        }
+        out
+    }
+
+    /// Parent and next sibling equal tree-sitter's on every node of the corpus. `next` also
+    /// follows `ts_node__next_sibling`'s rule of skipping a later sibling that ends at or before
+    /// the node's end. No shape found makes the patched grammar produce one: its MISSING nodes are
+    /// last children, and a statement with no period before a header recovers as ERROR.
+    #[test]
+    fn cobol_tree_navigation_matches_tree_sitter_582() {
+        let corpus = cobol_corpus();
+        assert!(corpus.len() >= 15 + 6, "{} sources", corpus.len());
+        for src in &corpus {
+            let tree = parse_cobol(src);
+            let ix = CobolTree::new(&tree);
+            for i in 0..ix.nodes.len() as u32 {
+                let n = ix.node(i);
+                let id = |o: Option<u32>| o.map(|j| ix.node(j).id());
+                assert_eq!(
+                    id(ix.parent(i)),
+                    n.parent().map(|p| p.id()),
+                    "parent of {n:?}"
+                );
+                assert_eq!(
+                    id(ix.next(i)),
+                    n.next_sibling().map(|s| s.id()),
+                    "next of {n:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cobol_edge_shapes_classify_as_before_582() {
+        // The oracle in classify_in fails the test on any difference.
+        for src in cobol_edge_sources() {
+            tags("src/PROG.cbl", "cobol", &src);
+        }
+        for src in cobol_corpus() {
+            tags("src/PROG.cbl", "cobol", &src);
+        }
+    }
+
+    /// The old error check gave up after `WALK_BUDGET * 64` visits and kept the paragraph real.
+    /// The arrays keep that answer: program ONE's last paragraph is EXIT only, and a second program
+    /// big enough to pass the budget keeps it real, while a small one leaves it a stub.
+    #[test]
+    fn cobol_error_check_keeps_the_old_walk_budget_582() {
+        let program = |rows: usize| -> String {
+            let mut lines = vec![
+                "IDENTIFICATION DIVISION.".to_string(),
+                "PROGRAM-ID. ONE.".to_string(),
+                "PROCEDURE DIVISION.".to_string(),
+                "A-PARA.".to_string(),
+                "    PERFORM B-PARA.".to_string(),
+                "B-PARA.".to_string(),
+                "    EXIT.".to_string(),
+                "END PROGRAM ONE.".to_string(),
+                "IDENTIFICATION DIVISION.".to_string(),
+                "PROGRAM-ID. TWO.".to_string(),
+                "PROCEDURE DIVISION.".to_string(),
+                "BIG-PARA.".to_string(),
+            ];
+            lines.extend(
+                std::iter::repeat_n("    DISPLAY A B C D E F G H I J K L M N.", rows)
+                    .map(str::to_string),
+            );
+            lines.push("END PROGRAM TWO.".to_string());
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            fixed(&lines)
+        };
+        let budget = WALK_BUDGET * 64;
+        let big = program(budget / 16);
+        // Precondition: the old walk from B-PARA passes the budget on the big file.
+        let tree = parse_cobol(&big);
+        let mut ix = CobolTree::new(&tree);
+        let b = (0..ix.nodes.len() as u32)
+            .find(|&i| {
+                crate::treesitter::COBOL_HEADERS.contains(&ix.node(i).kind())
+                    && text(ix.node(i), big.as_bytes()).contains("B-PARA")
+            })
+            .expect("B-PARA header");
+        let end = ix.body_end(b).expect("B-PARA body end");
+        assert!(
+            ix.visited_from(0, end) > budget,
+            "{}",
+            ix.visited_from(0, end)
+        );
+        expect(&cobol_tags_raw(&big), "B-PARA", "real", None);
+        expect(
+            &cobol_tags_raw(&program(10)),
+            "B-PARA",
+            "stub",
+            Some("exit_only"),
+        );
+    }
+
+    /// The classifier's counted work while the extractor indexes `src` (its own `FileFacts`
+    /// lifetime, as in the product), with the quadratic oracle off; and how many paragraphs came
+    /// out `exit_only`.
+    fn cobol_work(src: &str) -> (usize, usize) {
+        /// Turns the oracle back on when dropped, panics included.
+        struct OracleOff(bool);
+        impl Drop for OracleOff {
+            fn drop(&mut self) {
+                COBOL_ORACLE_OFF.with(|o| o.set(self.0));
+            }
+        }
+        let _off = OracleOff(COBOL_ORACLE_OFF.with(|o| o.replace(true)));
+        COBOL_WORK.with(|w| w.set(0));
+        let tags = tags("src/PROG.cbl", "cobol", src);
+        let work = COBOL_WORK.with(std::cell::Cell::get);
+        let stubs = tags
+            .iter()
+            .filter(|(_, b, r)| b == "stub" && r.as_deref() == Some("exit_only"))
+            .count();
+        (work, stubs)
+    }
+
+    /// Work at `n` and `4n` copies of a shape. Linear work at most quadruples; the fixed part only
+    /// lowers the ratio, and the sorts' and binary searches' log factor raises it a little
+    /// (4.15x and 4.20x today). So the bound is 4.4x. A quadratic part grows sixteenfold, so it
+    /// shows once it is more than about 2% of the work at `n`; each per-file cache removed, or a
+    /// binary search made linear, fails it. Counted steps, not wall-clock time (#604).
+    fn assert_linear_work(shape: &str, make: impl Fn(usize) -> String, n: usize) {
+        let (small, small_stubs) = cobol_work(&make(n));
+        let (big, big_stubs) = cobol_work(&make(4 * n));
+        eprintln!("{shape}: work {small} at {n}, {big} at {}", 4 * n);
+        assert_eq!(
+            (small_stubs, big_stubs),
+            (n, 4 * n),
+            "{shape}: every EXIT paragraph is a stub"
+        );
+        assert!(
+            big * 10 <= small * 44,
+            "{shape}: work {small} at {n} grew to {big} at {} ({:.2}x)",
+            4 * n,
+            big as f64 / small as f64
+        );
+    }
+
+    /// The shapes `tests/cobol_graph_completeness.rs` extracts at full size (#582): PERFORM ...
+    /// THRU ranges each ending in an EXIT paragraph, and many small programs in one file.
+    #[test]
+    fn cobol_classifier_work_is_linear_in_the_file_582() {
+        let exit_ranges = |n: usize| -> String {
+            let mut lines = vec![
+                "IDENTIFICATION DIVISION.".to_string(),
+                "PROGRAM-ID. EXITPGM.".to_string(),
+                "PROCEDURE DIVISION.".to_string(),
+            ];
+            for i in 0..n {
+                lines.push(format!("P{i}."));
+                lines.push(format!("    PERFORM Q{i} THRU Q{i}-EXIT."));
+                lines.push(format!("Q{i}."));
+                lines.push("    MOVE 'Y' TO WS-FLAG.".to_string());
+                lines.push(format!("Q{i}-EXIT."));
+                lines.push("    EXIT.".to_string());
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            fixed(&lines)
+        };
+        let programs = |n: usize| -> String {
+            let mut lines = Vec::new();
+            for i in 0..n {
+                lines.push("IDENTIFICATION DIVISION.".to_string());
+                lines.push(format!("PROGRAM-ID. PG{i}."));
+                lines.push("PROCEDURE DIVISION.".to_string());
+                lines.push("A-PARA.".to_string());
+                lines.push("    PERFORM B-PARA.".to_string());
+                lines.push("B-PARA.".to_string());
+                lines.push("    EXIT.".to_string());
+                lines.push(format!("END PROGRAM PG{i}."));
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            fixed(&lines)
+        };
+        assert_linear_work("exit ranges", exit_ranges, 400);
+        assert_linear_work("programs", programs, 200);
+    }
+
+    fn cobol_tags_raw(code: &str) -> std::collections::BTreeMap<String, (String, Option<String>)> {
+        tags("src/PROG.cbl", "cobol", code)
+            .into_iter()
+            .map(|(k, b, r)| (k.rsplit('#').next().unwrap_or(&k).to_string(), (b, r)))
+            .collect()
+    }
+
+    /// One FileFacts across two files answers each as a fresh classification does: the
+    /// free-format answer and the tree index follow the source and tree they are given.
+    #[test]
+    fn file_facts_follow_the_file_they_are_given_582() {
+        let fixed_src = fixed(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "A-PARA.",
+            "    EXIT.",
+        ]);
+        let free_src = format!(">>SOURCE FORMAT FREE\n{fixed_src}");
+        let (fixed_tree, free_tree) = (parse_cobol(&fixed_src), parse_cobol(&free_src));
+        let header = |tree: &tree_sitter::Tree| {
+            let ix = CobolTree::new(tree);
+            let h = (0..ix.nodes.len() as u32)
+                .find(|&i| ix.node(i).kind() == "paragraph_header")
+                .expect("a paragraph header");
+            (ix.node(h).start_byte(), ix.node(h).end_byte())
+        };
+        let ((fs, fe), (rs, re)) = (header(&fixed_tree), header(&free_tree));
+        let fresh_fixed = classify(
+            "cobol",
+            "P.cbl",
+            "function",
+            &fixed_tree,
+            fs,
+            fe,
+            fixed_src.as_bytes(),
+        );
+        let fresh_free = classify(
+            "cobol",
+            "P.cbl",
+            "function",
+            &free_tree,
+            rs,
+            re,
+            free_src.as_bytes(),
+        );
+        assert_eq!(fresh_fixed, Some(Behaviour::Stub("exit_only")));
+        assert_eq!(fresh_free, Some(Behaviour::Real));
+        let mut facts = FileFacts::default();
+        for _ in 0..2 {
+            let a = classify_in(
+                &mut facts,
+                "cobol",
+                "P.cbl",
+                "function",
+                &fixed_tree,
+                fs,
+                fe,
+                fixed_src.as_bytes(),
+            );
+            let b = classify_in(
+                &mut facts,
+                "cobol",
+                "P.cbl",
+                "function",
+                &free_tree,
+                rs,
+                re,
+                free_src.as_bytes(),
+            );
+            assert_eq!((a, b), (fresh_fixed, fresh_free));
+        }
     }
 
     fn expect(

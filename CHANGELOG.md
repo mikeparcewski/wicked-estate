@@ -7,6 +7,60 @@
 - **codegraph import (opt-in):** `index --codegraph <bundle-dir>` (and `watch`) hands extraction and resolution for TS/JS, Java, Kotlin, C#, Scala, Swift, VB.NET, C/C++ and PHP to the pinned codegraph 1.6.4 bundle and maps its facts onto estate's own ids. A ref binds the codegraph edge at the same site (`resolved_by = codegraph:<how>`), codegraph-only edges are added, and definitions estate's extraction lacks get estate-scheme ids. Codegraph runs on a redacted mirror in the graph's state dir (`<db>.codegraph/`), never on the repo's own files; a state dir inside the indexed root is refused unless it sits under `.wicked-estate/` (the default) or another directory the walk always skips, with no inherited environment and telemetry off. A file codegraph reports errors for (`size_exceeded`, `parse_error`, ...), lacks, or cannot match one to one keeps estate's own pipeline (`CODEGRAPH-SKIPPED: <path> <reason>`). A ref codegraph binds nothing for goes to estate's resolvers, which may bind it only into files codegraph does not answer for (a file that fell back, an unswitched language, a stylesheet or JSON import). They see every candidate, so a name is as unique, and candidates rank, as on estate's own pipeline; a winner in a codegraph file is dropped (estate#594). What stays unbound is parked as `codegraph:<name>` and never bound by name. Once the graph holds codegraph's facts, a failed run stops the index (`CODEGRAPH-FAILED:`, non-zero exit) and keeps the last good graph; only indexing without `--codegraph` hands the files back, and it first names the minted nodes that carry outside links (`CODEGRAPH-OFF:`). A first run that fails falls back for every file (`CODEGRAPH-FALLBACK:`). `--codegraph-languages` narrows the switch. Only the darwin-arm64 bundle is pinned so far.
 - **codegraph gate store (test builds only, estate#595):** the `codegraph-fixture` cargo feature lets `index --codegraph` read codegraph's facts from the recorded SQL that `WICKED_ESTATE_CODEGRAPH_RECORDED` names, and every such run prints `CODEGRAPH-FIXTURE:`. `scripts/codegraph-fixture-store.py store` writes the gate store from `tests/fixtures/codegraph/coverage`: real codegraph 1.6.4 output with one file per handed-over language, every edge kind that release emits for them, a `size_exceeded` file and a stylesheet import. No release build enables the feature, and the install smoke test fails a shipped binary that carries it.
 
+### Changed
+
+- **COBOL control flow is read from the grammar** (#585). A paragraph or section whose statements do not end its run (GOBACK, STOP RUN, an unconditional GO TO) now `Calls` the next one, tagged `cobol_fall_through`. A program `Calls` only the paragraph where it starts, not every paragraph no statement names, so a paragraph that control never reaches has no caller. `GO TO … DEPENDING ON` targets and DECLARATIVES handlers (called from the I/O statements on their files) are tagged `cobol_conditional`. Re-index COBOL sources to get the new edges.
+
+### Fixed
+
+- COBOL: the behaviour classifier no longer makes indexing a large program, or a file of many programs, quadratic in its size. It does its per-file work once per file instead of once per definition: one tree walk, the free-format check, and the error scan (#582)
+
+## [0.36.0] — 2026-11-25
+
+Minor release on the train-14 cut d5d42e30, carrying 10 PRs since 0.35.11: #600, #602, #603, #604, #607, #606, #599, #609, #608, #605. It is a minor version because `ViaEdge` is now `#[non_exhaustive]` (#575), a semver break for a 0.x crate.
+
+### Added
+
+- `wicked-estate convert` returns one document as Markdown, or a typed refusal (#602)
+
+### Changed
+
+- **COBOL: a paragraph name that repeats in two sections of one program now gives each paragraph its own node (#580).** Such paragraphs get a section-qualified id, `…#PARA(SECTION).`. Before, they shared one node, so both bodies' calls and data uses landed on it, and `PERFORM PARA OF SECTION` between them was dropped as a self-jump. `PERFORM PARA OF SECTION` now binds to the named one. Ids of paragraphs whose names are unique in their program do not change. Re-index note: when a second paragraph of the same name is added in another section, the earlier paragraph's id changes too (unless it sits before any section), so annotations or pins on that earlier id need re-pointing after the next index.
+- `wicked_estate_core::ViaEdge` is `#[non_exhaustive]` (#575, from #559), so a later field is not a semver break. Code outside the crate can no longer build one with a struct literal; it reads the fields as before.
+
+### Fixed
+
+- COBOL: recovery that takes over a parse ends linearly and is reported (#600; #583, #578)
+- Every `path` hop carries its call site (#603; #357)
+- `convert`: the child deadline, and typed refusals for output and secret files; #501's timed test made deterministic (#604, #556 round-2 follow-ups)
+- `convert` and extract: every lexical frame is counted, and the mask is applied before `deadline=` (#607, #604 round-2 follow-ups)
+- `changed-since` maps git's paths onto the graph's stored paths (#606; #352)
+- `changed-since`: a graph used from another worktree, a clone or a moved checkout still maps (#609, #606 round-2 follow-up)
+- Store: an O(log n) open-time FTS check on a verified store (#599; closes #589)
+- Store: the read-only currency check does not require objects that only writes touch, so a graph an older writer left opens read-only (#605; #601)
+
+## [0.35.11] — 2026-11-24
+
+Patch release on the train-13 cut da841662, carrying 12 PRs since 0.35.10: #549, #566, #567, #569, #568, #561, #572, #586, #588, #571, #573, #579.
+
+### Changed
+
+- State the edge set rank, hotspots and communities count (Calls + Imports only) (#566)
+- Semantics carry-over without node scans or a second lookup; SQLite restore uses a cached statement (#567)
+- Provenance rows and NOTICE attribution for all 12 vendored grammars (#569)
+- Pin the x86_64 macOS floor and check it on the shipped binaries (#568)
+
+### Fixed
+
+- **Documents are converted in a supervised child, and skipped documents stay visible (#442, #457, #443).** `wicked-estate` and `wicked-estate-mcp` now convert each PDF/Office/ODF/RTF/EPUB document in a child process of the same binary, with a 1 GiB memory budget and a 120 s deadline. A crafted PDF (for example an absurd predictor `/Columns` that made lopdf allocate ~8 GiB at load) is skipped with a reason instead of killing the indexer or the MCP server, and a converter crash ends only the child. Skipped documents are recorded per repo: `index` prints every recorded `DOC-SKIPPED` line on each run, `stats --json` gains `skipped_documents {count, files}`, and freshness diagnostics name them, including on unchanged runs. Behaviour change: `DOC-SKIPPED` lines repeat on every index run until the document converts or is removed. (#549)
+- The release workflow's version bump rewrites only `[workspace.package]` and the internal wicked-estate-* path pins, leaving third-party pins such as `zip` untouched (estate#479) (#561)
+- Scope-bound replace_source; bounded link diagnostics and live-member relink (#558, #559) (#572)
+- Refs carry their role; free-format and continued literals parse (#545, #544) (#586)
+- Name-prefix lookups search only the prefix's range (#588)
+- No trigger on the FTS shadow table; defensive SQLite clients read the store (#571)
+- An edge two files assert survives the removal of either (edge contributions, #543) (#573)
+- Parse to EOF, PERFORM THRU and GO TO calls, paragraph-scoped edges (#579)
+
 ## [0.35.10] — 2026-11-22
 
 Patch release on estate main d8c342e7 (0.35.9 plus #564), carrying 1 PR since 0.35.9: #564. There is no GitHub Release for 0.35.9: its publish run could not draft one (the crates.io wait failed on the vendored grammar crates, #563). The 0.35.9 crates are on crates.io; the prebuilt binaries ship in the 0.35.10 GitHub Release.

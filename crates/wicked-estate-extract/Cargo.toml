@@ -71,7 +71,9 @@ regex = "1"
 # Registrable-domain (eTLD+1) lookup for the secret-redaction URL rule (DES-S7 §5 C2).
 psl = "2"
 # arborium grammar family (ABI-15, tree-sitter 0.25, uniform `language()` API) — W2.1 toward 73.
-arborium-cobol = "2.18.0"
+# Exact pin: `vendor/tree-sitter-cobol-scanner` replaces this crate's external scanner and relies on
+# its external-token order. Re-check that scanner against the new grammar before a bump.
+arborium-cobol = "=2.18.0"
 arborium-ada = "2.18"
 arborium-awk = "2.18"
 arborium-clojure = "2.18"
@@ -190,6 +192,11 @@ roxmltree  = { workspace = true, optional = true }
 calamine = { workspace = true, optional = true }
 # Not used directly: a version floor for calamine's zip (see the workspace Cargo.toml).
 zip = { workspace = true, optional = true }
+
+# O_NONBLOCK for the document open (src/doc_convert.rs): a path swapped for a FIFO must not block
+# the open before the conversion deadline starts (#556). Already in Cargo.lock; no new download.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [build-dependencies]
 # Compiles the vendored APEXlang grammar (vendor/tree-sitter-apexlang); see build.rs.
