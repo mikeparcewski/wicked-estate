@@ -3584,21 +3584,28 @@ fn main() -> Result<()> {
         //   wicked-estate changed-since <git-sha> [--json] [--db ...]
         "changed-since" => {
             let sha = args.required(0);
-            let output = std::process::Command::new("git")
-                .args(["diff", "--name-only", &format!("{sha}..HEAD")])
-                .output()
-                .context("git diff failed — is this a git repository?")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("git diff failed: {stderr}");
-            }
-            let changed_files: Vec<String> = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
+            let git = |git_args: &[&str]| -> Result<Vec<u8>> {
+                let output = std::process::Command::new("git")
+                    .args(git_args)
+                    .output()
+                    .context("git failed — is this a git repository?")?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    anyhow::bail!("git {} failed: {stderr}", git_args[0]);
+                }
+                Ok(output.stdout)
+            };
+            // `-z`: the paths raw, never C-quoted (a non-ASCII name would not match).
+            // `--no-relative`: top-level paths even under `diff.relative`, which the mapping needs.
+            let range = format!("{sha}..HEAD");
+            let git_paths: Vec<String> =
+                git(&["diff", "--name-only", "-z", "--no-relative", &range])?
+                    .split(|b| *b == 0)
+                    .map(|p| String::from_utf8_lossy(p).into_owned())
+                    .filter(|p| !p.is_empty())
+                    .collect();
             let json_out = args.switch("json");
-            if changed_files.is_empty() {
+            if git_paths.is_empty() {
                 if json_out {
                     println!("[]");
                 } else {
@@ -3610,6 +3617,31 @@ fn main() -> Result<()> {
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "changed-since")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
+            // (#352) git names paths from the repository's top level; the graph stores them from
+            // the indexed root, under `<label>/` in a labelled graph.
+            let toplevel = git(&["rev-parse", "--show-toplevel"])?;
+            // Only git's line terminator goes: whitespace can end a directory name.
+            let toplevel = String::from_utf8_lossy(&toplevel);
+            let toplevel = wicked_estate::repo_scope::git_line(&toplevel);
+            let (changed_files, outside) = wicked_estate::freshness::stored_paths_for_git(
+                &store,
+                &db,
+                Path::new(&toplevel),
+                &git_paths,
+            );
+            // Said on stderr in --json mode, so stdout stays the one array a caller parses.
+            let outside_line = (!outside.is_empty()).then(|| {
+                format!(
+                    "{} changed file(s) outside the indexed root(s), not in this graph: {}",
+                    outside.len(),
+                    outside
+                        .iter()
+                        .take(10)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            });
             let mut all_nodes: Vec<wicked_estate_core::Node> = Vec::new();
             for file in &changed_files {
                 let nodes = store.nodes_in_file(file).map_err(to_any)?;
@@ -3628,6 +3660,9 @@ fn main() -> Result<()> {
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&j)?);
+                if let Some(line) = outside_line {
+                    eprintln!("{line}");
+                }
             } else {
                 println!(
                     "{} symbol(s) in {} changed file(s) since {sha}:",
@@ -3639,6 +3674,9 @@ fn main() -> Result<()> {
                     for n in all_nodes.iter().filter(|n| n.location.file == *file) {
                         println!("    {:?} {}", n.kind, n.name);
                     }
+                }
+                if let Some(line) = outside_line {
+                    println!("{line}");
                 }
             }
         }
