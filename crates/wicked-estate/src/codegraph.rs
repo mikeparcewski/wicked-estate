@@ -1733,6 +1733,9 @@ fn codegraph_edge(
 }
 
 #[cfg(test)]
+mod coverage_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use wicked_estate_core::GraphRead;
