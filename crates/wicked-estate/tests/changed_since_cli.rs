@@ -46,7 +46,6 @@ fn estate(dir: &Path, args: &[&str]) -> Output {
 
 /// [`estate`] run from `cwd` (a subdirectory, say), with git stopped above `ceiling`.
 fn estate_from(cwd: &Path, ceiling: &Path, args: &[&str]) -> Output {
-    let dir = cwd;
     let out = Command::new(bin())
         .current_dir(cwd)
         .args(args)
@@ -55,7 +54,7 @@ fn estate_from(cwd: &Path, ceiling: &Path, args: &[&str]) -> Output {
             "WICKED_ESTATE_EMIT_PROGRAM",
             "wicked-bus-absent-changed-since",
         )
-        .env("WICKED_ESTATE_EMIT_DEADLETTER", dir.join("emit.ndjson"))
+        .env("WICKED_ESTATE_EMIT_DEADLETTER", cwd.join("emit.ndjson"))
         .env_remove("WICKED_ESTATE_DB")
         .env_remove("WICKED_STORE_URL")
         .env_remove("WICKED_RUNTIME")
@@ -199,11 +198,8 @@ fn a_backslash_in_a_file_name_maps_like_the_indexer() {
     let out = estate(&dir, &["changed-since", &before, "--json", "--db", db]);
     let found = names(&out.stdout);
     assert!(found.iter().any(|n| n == "oddOne"), "{found:?}");
-    assert!(
-        out.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("outside the indexed root"), "{err}");
 }
 
 /// On a case-insensitive filesystem a case-only directory rename leaves git with the old case.

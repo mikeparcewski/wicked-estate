@@ -3567,11 +3567,14 @@ fn main() -> Result<()> {
                 Ok(output.stdout)
             };
             // `-z`: the paths raw, never C-quoted (a non-ASCII name would not match).
-            let git_paths: Vec<String> = git(&["diff", "--name-only", "-z", &format!("{sha}..HEAD")])?
-                .split(|b| *b == 0)
-                .map(|p| String::from_utf8_lossy(p).into_owned())
-                .filter(|p| !p.is_empty())
-                .collect();
+            // `--no-relative`: top-level paths even under `diff.relative`, which the mapping needs.
+            let range = format!("{sha}..HEAD");
+            let git_paths: Vec<String> =
+                git(&["diff", "--name-only", "-z", "--no-relative", &range])?
+                    .split(|b| *b == 0)
+                    .map(|p| String::from_utf8_lossy(p).into_owned())
+                    .filter(|p| !p.is_empty())
+                    .collect();
             let json_out = args.switch("json");
             if git_paths.is_empty() {
                 if json_out {
@@ -3588,7 +3591,9 @@ fn main() -> Result<()> {
             // (#352) git names paths from the repository's top level; the graph stores them from
             // the indexed root, under `<label>/` in a labelled graph.
             let toplevel = git(&["rev-parse", "--show-toplevel"])?;
-            let toplevel = String::from_utf8_lossy(&toplevel).trim().to_string();
+            // Only git's line terminator goes: whitespace can end a directory name.
+            let toplevel = String::from_utf8_lossy(&toplevel);
+            let toplevel = wicked_estate::repo_scope::git_line(&toplevel);
             let (changed_files, outside) = wicked_estate::freshness::stored_paths_for_git(
                 &store,
                 &db,
@@ -3600,7 +3605,12 @@ fn main() -> Result<()> {
                 format!(
                     "{} changed file(s) outside the indexed root(s), not in this graph: {}",
                     outside.len(),
-                    outside.iter().take(10).cloned().collect::<Vec<_>>().join(", ")
+                    outside
+                        .iter()
+                        .take(10)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             });
             let mut all_nodes: Vec<wicked_estate_core::Node> = Vec::new();

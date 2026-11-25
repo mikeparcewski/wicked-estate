@@ -155,10 +155,17 @@ fn roots(store: &dyn GraphStoreMutExt, db: &str) -> Vec<Root> {
 }
 
 /// Paths git names (relative to the top level of the repository at `toplevel`) as the graph stores
-/// them (#352): relative to each indexed root that contains the file, under `<label>/` in a
-/// labelled graph. Returns `(stored, outside)`: `outside` are the git paths under no indexed root.
-/// A graph that recorded no root (written before roots were recorded) gets git's paths verbatim,
-/// the one spelling it can be checked against.
+/// them (#352): relative to each indexed root that contains the file, with `\\` as `/` (the
+/// indexer's own spelling), under `<label>/` in a labelled graph. Returns `(stored, outside)`:
+/// `outside` are the git paths under no indexed root. A graph that recorded no root (written
+/// before roots were recorded) gets git's paths verbatim, the one spelling it can be checked
+/// against.
+///
+/// Tried in order, first match wins: the roots as recorded (canonical since 0.21.1; resolving
+/// one again would follow a symlink made since and read another directory's rows); the
+/// filesystem's spelling of the path (after a case-only rename on a case-insensitive filesystem
+/// git keeps the old case); then the roots canonicalized (a root recorded relative, before
+/// 0.21.1, resolves against the db's directory, which may be spelled through a symlink).
 pub fn stored_paths_for_git(
     store: &dyn GraphStoreMutExt,
     db: &str,
@@ -169,38 +176,58 @@ pub fn stored_paths_for_git(
     if roots.is_empty() {
         return (git_paths.to_vec(), Vec::new());
     }
-    let canonical = |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let canonical =
+        |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let top = canonical(toplevel);
-    let roots: Vec<(Option<String>, PathBuf)> = roots
-        .into_iter()
-        .map(|r| (r.label, canonical(&r.path)))
+    let recorded: Vec<(Option<String>, PathBuf)> =
+        roots.into_iter().map(|r| (r.label, r.path)).collect();
+    let resolved: Vec<(Option<String>, PathBuf)> = recorded
+        .iter()
+        .map(|(label, path)| (label.clone(), canonical(path)))
         .collect();
+    let place =
+        |roots: &[(Option<String>, PathBuf)], abs: &std::path::Path, stored: &mut Vec<String>| {
+            let mut placed = false;
+            for (label, root) in roots {
+                let Ok(rel) = abs.strip_prefix(root) else {
+                    continue;
+                };
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                stored.push(match label {
+                    Some(label) => format!("{label}/{rel}"),
+                    None => rel,
+                });
+                placed = true;
+            }
+            placed
+        };
     let (mut stored, mut outside) = (Vec::new(), Vec::new());
     for git_path in git_paths {
-        // A deleted file cannot be canonicalized; its parent directory is what git and the
-        // root share, so join from the canonical top level instead.
+        // A deleted file cannot be canonicalized; join from the canonical top level instead.
         let abs = top.join(git_path);
-        let mut placed = false;
-        for (label, root) in &roots {
-            let Ok(rel) = abs.strip_prefix(root) else {
-                continue;
-            };
-            let rel: Vec<String> = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect();
-            let rel = rel.join("/");
-            stored.push(match label {
-                Some(label) => format!("{label}/{rel}"),
-                None => rel,
-            });
-            placed = true;
-        }
+        let on_disk = filesystem_spelling(&abs).filter(|fs| *fs != abs);
+        let placed = place(&recorded, &abs, &mut stored)
+            || on_disk
+                .as_deref()
+                .is_some_and(|fs| place(&recorded, fs, &mut stored))
+            || place(&resolved, &abs, &mut stored)
+            || on_disk
+                .as_deref()
+                .is_some_and(|fs| place(&resolved, fs, &mut stored));
         if !placed {
             outside.push(git_path.clone());
         }
     }
     (stored, outside)
+}
+
+/// `abs` as the filesystem spells it: its deepest existing ancestor canonicalized, the rest (a
+/// deleted file, say) kept as given.
+fn filesystem_spelling(abs: &std::path::Path) -> Option<PathBuf> {
+    abs.ancestors().find_map(|dir| {
+        let rest = abs.strip_prefix(dir).ok()?;
+        Some(dunce::canonicalize(dir).ok()?.join(rest))
+    })
 }
 
 /// Existing run markers remain non-empty while indexing or after an interrupted run.
