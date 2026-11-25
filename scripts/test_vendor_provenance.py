@@ -253,7 +253,10 @@ def undeclared_licenses(text, declared):
 
 
 def offers_a_choice(text):
-    return re.search(rf"\b(?:{LICENSE_NAMES})(?:-[\w.]+)?\s+OR\s", text) is not None
+    """A choice between two named licenses in one clause, however spelt ("MIT OR ISC",
+    "`MIT` OR `ISC`", "MIT License OR ISC License"). The MIT body's own "OR"s name no license."""
+    return re.search(rf"\b(?:{LICENSE_NAMES})\b[^.;|\n]{{0,40}}?\bOR\b[^.;|\n]{{0,40}}?\b(?:{LICENSE_NAMES})\b",
+                     text) is not None
 
 
 def cargo_packages(rel, package):
@@ -263,9 +266,13 @@ def cargo_packages(rel, package):
     patterns, shipped = (include, False) if include is not None else (package.get("exclude", []), True)
     for pattern in patterns:
         negated = pattern.startswith("!")
-        pattern = pattern.lstrip("!")
+        pattern = pattern[1:] if negated else pattern
+        if pattern.endswith("/"):
+            continue  # matches directories only; `rel` is a file
         anchored = pattern.startswith("/")
-        pattern = pattern.strip("/")
+        pattern = pattern.lstrip("/")
+        while pattern.startswith("**/"):
+            pattern, anchored = pattern[3:], False  # at any depth
         name = rel if anchored or "/" in pattern else rel.rsplit("/", 1)[-1]
         if fnmatchcase(name, pattern):
             shipped = (not negated) if include is not None else negated
@@ -480,7 +487,7 @@ class UpstreamDeclarationTests(unittest.TestCase):
             cells = rows[at].split("|")
             cells[4] = cells[4].replace("014cdb29f12dfa6a689bbe8a80ee1c5f0bf15be1", "0" * 40)
             rows[at] = "|".join(cells)
-            rows = [r.replace("| MIT AND ISC. ", "| MIT OR ISC. ") for r in rows]
+            rows = [r.replace("| MIT AND ISC. ", "| `MIT` OR `ISC`. ") for r in rows]
             prov.write_text("\n".join(rows) + "\n")
             lic = vendor / "tree-sitter-vba" / "LICENSE"
             lic.write_text(lic.read_text().replace("It declares\nthe MIT License", "It declares\nApache-2.0"))
@@ -518,6 +525,11 @@ class UpstreamDeclarationTests(unittest.TestCase):
             # With no include, exclude decides, by pattern.
             ('exclude = ["/LIC*"]', ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
             ('exclude = ["src/LICENSE"]', []),
+            # gitignore spellings: "**/" is any depth, a trailing "/" matches directories only.
+            (include.replace('"src/**/*"]', '"src/**/*", "!**/LICENSE"]'), ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
+            (include.replace('"LICENSE", ', '"LICENSE/", '), ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
+            (include.replace('"src/**/*"]', '"src/**/*", "!LICENSE/"]'), []),
+            (include.replace('"src/**/*"]', '"src/**/*", "!LICENSE", "**/LICENSE"]'), []),
         )
         for manifest, expected in cases:
             with tempfile.TemporaryDirectory() as tmp:
