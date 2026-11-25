@@ -308,6 +308,33 @@ pub struct Edge {
 }
 
 impl Edge {
+    /// Where this relationship occurs in source (#357): the edge's location when it carries a
+    /// real one, `None` when it has none (an edge an extra-edge rule or a link writes, or an
+    /// empty span). Empty means zero bytes wide: `Span::ZERO`, the unknown-site sentinel, and also
+    /// that sentinel moved into host coordinates for an embedded region (embedded.rs `shift`),
+    /// which keeps it zero-width at the region's start. Edges are keyed `(source, target, kind)`,
+    /// so this is ONE representative site: a caller that calls its callee three times keeps one.
+    pub fn site(&self) -> Option<&Location> {
+        self.location
+            .as_ref()
+            .filter(|l| !l.file.is_empty() && l.span.start_byte != l.span.end_byte)
+    }
+
+    /// The wire form of [`Edge::site`], shared by the MCP `Path` hops and the CLI `path --json`:
+    /// `{file, line_1based, representative: true}`, or `null` when the edge has no site.
+    /// `representative` is always `true`: it says the line is one site of the relationship, not
+    /// the only one.
+    pub fn site_json(&self) -> serde_json::Value {
+        match self.site() {
+            Some(l) => serde_json::json!({
+                "file": l.file,
+                "line_1based": u64::from(l.span.start_line) + 1,
+                "representative": true,
+            }),
+            None => serde_json::Value::Null,
+        }
+    }
+
     /// Construct an edge, deriving confidence + provenance from the resolution tier.
     pub fn new(
         source: SymbolId,
@@ -536,6 +563,54 @@ mod tests {
             back.kind,
             EdgeKind::Other("satisfied_by".into()),
             "SatisfiedBy is a first-class variant, not the Other escape hatch"
+        );
+    }
+    /// #357: an empty span is no site. `Span::ZERO` is the unknown-site sentinel; an embedded
+    /// region moves it into host coordinates (wicked-estate-extract embedded.rs `shift`: every
+    /// field plus the region's start), which keeps it zero bytes wide at the region's start.
+    #[test]
+    fn an_empty_span_is_no_site_357() {
+        use crate::node::Span;
+        let base = Span {
+            start_byte: 120,
+            end_byte: 480,
+            start_line: 7,
+            start_col: 4,
+            end_line: 19,
+            end_col: 0,
+        };
+        let moved_zero = Span {
+            start_byte: base.start_byte,
+            end_byte: base.start_byte,
+            start_line: base.start_line,
+            start_col: base.start_col,
+            end_line: base.start_line,
+            end_col: base.start_col,
+        };
+        let real = Span {
+            start_byte: 200,
+            end_byte: 214,
+            start_line: 9,
+            start_col: 8,
+            end_line: 9,
+            end_col: 22,
+        };
+        let edge = |span: Span| {
+            let mut e = Edge::new(
+                SymbolId::from("a"),
+                SymbolId::from("b"),
+                EdgeKind::Calls,
+                ResolutionTier::Parsed,
+                "test",
+            );
+            e.location = Some(Location::new("src/page.vue", span));
+            e
+        };
+        assert!(edge(Span::ZERO).site_json().is_null());
+        assert!(edge(moved_zero).site_json().is_null());
+        assert_eq!(
+            edge(real).site_json(),
+            serde_json::json!({"file": "src/page.vue", "line_1based": 10, "representative": true})
         );
     }
 }

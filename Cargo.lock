@@ -10501,6 +10501,7 @@ dependencies = [
  "cc",
  "google-cloud-asset-v1",
  "google-cloud-auth",
+ "libc",
  "libloading",
  "psl",
  "quick-xml 0.40.1",

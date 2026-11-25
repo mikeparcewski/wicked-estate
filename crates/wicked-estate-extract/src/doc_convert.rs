@@ -11,7 +11,9 @@
 //! Bounds: input is capped at [`MAX_INPUT_BYTES`] before it is read ([`read_capped`]), and
 //! converted text at [`MAX_TEXT_BYTES`]. The shipped binaries convert in a supervised child with
 //! a [`MAX_CONVERT_MEMORY_BYTES`] live heap budget and a [`CONVERT_DEADLINE`] wall-clock limit.
-//! Recoverable allocation refusals become memory skips; a crash or abort stays inside that child.
+//! Every allocation the budget refuses becomes a memory skip, whether the converter recovers or the
+//! refusal aborts the child (the budget marks its first refusal on the child's stderr, so the
+//! parent tells a budget abort from a crash); any other crash or abort stays inside that child.
 //! A timed-out child is killed and reaped. At most one child per indexer worker converts at once.
 //! Library callers that do not enable isolation convert in-process with unwind containment only.
 //! Skip reasons are fixed strings; document text and source paths never reach a child diagnostic.
@@ -42,6 +44,24 @@ pub const CHILD_ARG: &str = "__doc-convert";
 const MEMORY_REASON: &str = "over the 1 GiB conversion memory budget";
 const DEADLINE_REASON: &str = "took longer than the 120 s conversion limit";
 const UNAVAILABLE_REASON: &str = "isolated converter unavailable";
+/// Child-mode argument after the format hint: mask the Markdown before replying (#556).
+const MASK_ARG: &str = "mask";
+/// Child-mode argument prefix, `deadline=<ms>`: the child's own wall-clock limit (#556 R2). The
+/// parent enforces the same limit, but a caller that kills the parent leaves the child with no
+/// one to kill it; the child's watchdog ends it at this deadline anyway. Absent or unparsable
+/// means [`CONVERT_DEADLINE`], so a child is never unbounded.
+const DEADLINE_ARG: &str = "deadline=";
+/// Set by whichever of the child's main thread and its watchdog replies first; the other never
+/// writes, so the parent reads exactly one reply.
+static CHILD_REPLIED: AtomicBool = AtomicBool::new(false);
+/// How long past its deadline the child waits for a reply already being written to finish.
+const REPLY_GRACE: Duration = Duration::from_secs(5);
+/// Written once to the child's stderr when the budget first refuses an allocation. An infallible
+/// allocation the budget refuses aborts the child before it can reply; this line is how the parent
+/// still reports the budget, not a crash.
+const BUDGET_MARK: &[u8] = b"wicked-estate: conversion memory budget refused an allocation\n";
+/// Child stderr the parent reads; the rest is discarded.
+const CHILD_STDERR_BYTES: u64 = 4096;
 const UNREADABLE_REASONS: &[&str] = &[
     "cannot open",
     "not a regular file",
@@ -95,7 +115,9 @@ impl BudgetAlloc {
                 .checked_add(delta)
                 .filter(|&next| delta <= 0 || next <= limit as isize)
             else {
-                self.refused.store(true, Ordering::Relaxed);
+                if !self.refused.swap(true, Ordering::Relaxed) {
+                    note_budget_refusal();
+                }
                 return false;
             };
             match self
@@ -107,6 +129,29 @@ impl BudgetAlloc {
             }
         }
     }
+}
+
+/// Write [`BUDGET_MARK`] to stderr from inside the allocator: one raw write on the stderr
+/// descriptor, with no lock, buffer or allocation.
+fn note_budget_refusal() {
+    #[cfg(unix)]
+    let stderr = {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: stderr's descriptor is open for the process's life; ManuallyDrop never closes it.
+        std::mem::ManuallyDrop::new(unsafe {
+            std::fs::File::from_raw_fd(std::io::stderr().as_raw_fd())
+        })
+    };
+    #[cfg(windows)]
+    let stderr = {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        // SAFETY: the process's stderr handle stays open; ManuallyDrop never closes it.
+        std::mem::ManuallyDrop::new(unsafe {
+            std::fs::File::from_raw_handle(std::io::stderr().as_raw_handle())
+        })
+    };
+    #[cfg(any(unix, windows))]
+    let _ = (&*stderr).write(BUDGET_MARK);
 }
 
 impl Default for BudgetAlloc {
@@ -184,26 +229,73 @@ pub fn run_child_if_requested(alloc: &'static BudgetAlloc) -> Option<i32> {
     if args.next().as_deref() != Some(std::ffi::OsStr::new(CHILD_ARG)) {
         return None;
     }
-    alloc.arm(MAX_CONVERT_MEMORY_BYTES);
+    // The parent reads stderr only for the budget mark; a caught panic's message is noise.
+    std::panic::set_hook(Box::new(|_| {}));
     let hint = args.next().unwrap_or_default();
     let ext = format_hint(hint.to_str().unwrap_or(""));
+    let (mut mask, mut deadline) = (false, CONVERT_DEADLINE);
+    for arg in args {
+        match arg.to_str() {
+            Some(MASK_ARG) => mask = true,
+            Some(a) => {
+                if let Some(ms) = a.strip_prefix(DEADLINE_ARG).and_then(|v| v.parse().ok()) {
+                    deadline = Duration::from_millis(ms).min(CONVERT_DEADLINE);
+                }
+            }
+            None => {}
+        }
+    }
+    // Started before the budget is armed, so its own allocation is never refused.
+    let watchdog = std::thread::Builder::new().spawn(move || {
+        std::thread::sleep(deadline);
+        if reply_once(&Err(Skipped::Unreadable(DEADLINE_REASON))) {
+            std::process::exit(0);
+        }
+        // The main thread's reply began first. A reader that drains it lets the process end at
+        // once; one that holds the pipe open without reading must not keep the child alive. A
+        // nonzero exit, so a reader that then sees a cut reply treats it as a failure.
+        std::thread::sleep(REPLY_GRACE);
+        std::process::exit(1);
+    });
+    if watchdog.is_err() {
+        // Without its watchdog the child would be bounded only by a parent that may be gone.
+        reply_once(&Err(Skipped::Panicked));
+        return Some(0);
+    }
+    alloc.arm(MAX_CONVERT_MEMORY_BYTES);
     let mut bytes = Vec::new();
     let mut reply = match std::io::stdin()
         .take(MAX_INPUT_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
     {
         Ok(_) if bytes.len() > MAX_INPUT_BYTES => Err(Skipped::TooLarge(bytes.len() as u64)),
-        Ok(_) => convert_in_process(ext, &bytes),
+        Ok(_) => {
+            convert_in_process(ext, &bytes).map(|md| if mask { mask_markdown(&md) } else { md })
+        }
         Err(_) => Err(Skipped::Unreadable("cannot read")),
     };
     if alloc.refused() {
         reply = Err(Skipped::Unreadable(MEMORY_REASON));
     }
-    // The caller exits right after; flush explicitly so the reply is never left in a buffer.
-    let mut out = std::io::stdout().lock();
-    let _ = out.write_all(encode_reply(&reply).as_bytes());
-    let _ = out.flush();
+    if !reply_once(&reply) {
+        // The watchdog is replying and exits the process when it is done.
+        loop {
+            std::thread::park();
+        }
+    }
     Some(0)
+}
+
+/// Write the child's one reply, unless the other writer (main thread or watchdog) already has.
+/// The caller exits right after; flush explicitly so the reply is never left in a buffer.
+fn reply_once(reply: &Result<String, Skipped>) -> bool {
+    if CHILD_REPLIED.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(encode_reply(reply).as_bytes());
+    let _ = out.flush();
+    true
 }
 
 fn format_hint(ext: &str) -> &str {
@@ -239,9 +331,10 @@ fn decode_reply(bytes: &[u8]) -> Result<String, Skipped> {
     };
     let (kind, arg) = skip.split_once('\t').unwrap_or((skip, ""));
     Err(match kind {
+        // Page numbers and ranges only ("pages 2-3, 5 of 6 need OCR"): no path or text survives.
         "ocr" => Skipped::NeedsOcr(
             arg.chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == ' ')
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | ','))
                 .take(64)
                 .collect(),
         ),
@@ -264,14 +357,21 @@ fn supervise(mut cmd: Command, bytes: &[u8], deadline: Duration) -> Result<Strin
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| Skipped::Unreadable(UNAVAILABLE_REASON))?;
     let mut stdin = child.stdin.take().ok_or(Skipped::Panicked)?;
     let stdout = child.stdout.take().ok_or(Skipped::Panicked)?;
+    let stderr = child.stderr.take().ok_or(Skipped::Panicked)?;
     // Scoped threads borrow the input (up to 32 MiB) instead of copying it.
-    let (status, output) = std::thread::scope(|scope| {
+    let (status, output, errors) = std::thread::scope(|scope| {
         let writer = scope.spawn(move || stdin.write_all(bytes));
+        // Capped, then the pipe is dropped: a child writing more gets EPIPE, never a full pipe.
+        let errors = scope.spawn(move || {
+            let mut errors = Vec::new();
+            let _ = stderr.take(CHILD_STDERR_BYTES).read_to_end(&mut errors);
+            errors
+        });
         let reader = scope.spawn(move || {
             let mut output = Vec::new();
             stdout
@@ -300,11 +400,16 @@ fn supervise(mut cmd: Command, bytes: &[u8], deadline: Duration) -> Result<Strin
         };
         // Killing and reaping our child closes both pipe ends, so blocked I/O can finish too.
         let _ = writer.join();
-        (status, reader.join())
+        (status, reader.join(), errors.join().unwrap_or_default())
     });
     let output = output.map_err(|_| Skipped::Panicked)?;
     if !status?.success() {
-        return Err(Skipped::Panicked);
+        let budget = errors.windows(BUDGET_MARK.len()).any(|w| w == BUDGET_MARK);
+        return Err(if budget {
+            Skipped::Unreadable(MEMORY_REASON)
+        } else {
+            Skipped::Panicked
+        });
     }
     decode_reply(&output.map_err(|_| Skipped::Panicked)?)
 }
@@ -359,26 +464,84 @@ impl fmt::Display for Skipped {
     }
 }
 
+impl Skipped {
+    /// A stable, machine-readable name for this refusal, for callers that branch on it
+    /// (`wicked-estate convert` exits with a code per kind, wicked-estate#556). The library owns
+    /// the reason strings, so it owns this mapping too.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Skipped::NeedsOcr(_) => "needs_ocr",
+            Skipped::TooLarge(_) => "too_large",
+            Skipped::Encrypted => "encrypted",
+            Skipped::Panicked => "failed",
+            Skipped::Unreadable(reason) => match *reason {
+                "unrecognized format" | "unsupported content" => "unsupported",
+                "missing part" | "malformed document" => "malformed",
+                "no text" => "empty",
+                "cannot open" | "not a regular file" | "cannot read" => "unreadable",
+                DEADLINE_REASON => "deadline",
+                MEMORY_REASON
+                | "over a converter safety limit"
+                | "converted text is over the 1 MiB limit" => "over_budget",
+                _ => "failed",
+            },
+        }
+    }
+}
+
 /// Read `path`, refusing past [`MAX_INPUT_BYTES`] without reading the rest (the size is checked
 /// before the read, and the read itself is capped, so a file that grows meanwhile is still bounded).
-/// Only a regular file is opened: a FIFO or device named `x.pdf` is refused without blocking.
+/// Only a regular file is read: a FIFO or device named `x.pdf` is refused without blocking, also
+/// when the path is swapped for one after the check (the open does not block, and the opened
+/// descriptor's own type and size are checked again).
 pub fn read_capped(path: &std::path::Path) -> Result<Vec<u8>, Skipped> {
+    read_capped_at(path, MAX_INPUT_BYTES)
+}
+
+/// [`read_capped`] with a lower cap: `max` is clamped to [`MAX_INPUT_BYTES`].
+pub fn read_capped_at(path: &std::path::Path, max: usize) -> Result<Vec<u8>, Skipped> {
+    let max = max.min(MAX_INPUT_BYTES);
     let meta = std::fs::metadata(path).map_err(|_| Skipped::Unreadable("cannot open"))?;
     if !meta.is_file() {
         return Err(Skipped::Unreadable("not a regular file"));
     }
-    if meta.len() > MAX_INPUT_BYTES as u64 {
+    if meta.len() > max as u64 {
         return Err(Skipped::TooLarge(meta.len()));
     }
-    let file = std::fs::File::open(path).map_err(|_| Skipped::Unreadable("cannot open"))?;
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
-    file.take(MAX_INPUT_BYTES as u64 + 1)
+    let (file, len) = open_regular(path)?;
+    if len > max as u64 {
+        return Err(Skipped::TooLarge(len));
+    }
+    let mut bytes = Vec::with_capacity(len as usize);
+    file.take(max as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| Skipped::Unreadable("cannot read"))?;
-    if bytes.len() > MAX_INPUT_BYTES {
+    if bytes.len() > max {
         return Err(Skipped::TooLarge(bytes.len() as u64));
     }
     Ok(bytes)
+}
+
+/// Open `path` for reading without blocking (a FIFO with no writer would block a plain open), and
+/// accept it only if the descriptor itself is a regular file. Returns the file and its length.
+fn open_regular(path: &std::path::Path) -> Result<(std::fs::File, u64), Skipped> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = opts
+        .open(path)
+        .map_err(|_| Skipped::Unreadable("cannot open"))?;
+    let meta = file
+        .metadata()
+        .map_err(|_| Skipped::Unreadable("cannot open"))?;
+    if !meta.is_file() {
+        return Err(Skipped::Unreadable("not a regular file"));
+    }
+    Ok((file, meta.len()))
 }
 
 /// Largest converted text kept, in bytes (1 MiB, the index's own text limit). Both callers get it.
@@ -390,6 +553,40 @@ pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 /// any text); nothing else is changed. It is NOT redacted here: callers redact it with the markdown
 /// rules, like any `.md` file.
 pub fn to_markdown(path: &str, bytes: &[u8]) -> Result<String, Skipped> {
+    to_markdown_within(path, bytes, CONVERT_DEADLINE)
+}
+
+/// [`to_markdown`] with a shorter wall-clock limit for the isolated child: `deadline` is clamped
+/// to [`CONVERT_DEADLINE`]. Without isolation ([`isolate_conversions`] not called) there is no
+/// child to time out, so the limit does not apply.
+pub fn to_markdown_within(path: &str, bytes: &[u8], deadline: Duration) -> Result<String, Skipped> {
+    convert_bounded(path, bytes, deadline, false)
+}
+
+/// [`to_markdown_within`], masked with [`mask_markdown`] INSIDE the isolated child, so masking runs
+/// under the same deadline and memory budget as the conversion (`wicked-estate convert`, #556).
+pub fn to_masked_markdown_within(
+    path: &str,
+    bytes: &[u8],
+    deadline: Duration,
+) -> Result<String, Skipped> {
+    convert_bounded(path, bytes, deadline, true)
+}
+
+/// The masking `knowledge.ingest` gives a converted document: the Markdown source rules (as the
+/// index masks a `.md` file), then the free-text rules every knowledge node gets (known token
+/// shapes and secret-named assignments, estate#406). Same length as the input.
+pub fn mask_markdown(md: &str) -> String {
+    let md = crate::redact::redact_source("convert.md", md);
+    wicked_estate_core::redact::redact_free_text(&md).into_owned()
+}
+
+fn convert_bounded(
+    path: &str,
+    bytes: &[u8],
+    deadline: Duration,
+    mask: bool,
+) -> Result<String, Skipped> {
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(Skipped::TooLarge(bytes.len() as u64));
     }
@@ -398,11 +595,24 @@ pub fn to_markdown(path: &str, bytes: &[u8]) -> Result<String, Skipped> {
         let exe = exe
             .as_ref()
             .map_err(|_| Skipped::Unreadable(UNAVAILABLE_REASON))?;
-        let mut cmd = Command::new(exe);
-        cmd.arg(CHILD_ARG).arg(format_hint(ext));
-        return supervise(cmd, bytes, CONVERT_DEADLINE);
+        let deadline = deadline.min(CONVERT_DEADLINE);
+        return supervise(child_command(exe, ext, mask, deadline), bytes, deadline);
     }
-    convert_in_process(ext, bytes)
+    let md = convert_in_process(ext, bytes)?;
+    Ok(if mask { mask_markdown(&md) } else { md })
+}
+
+/// The isolated child's command line: the format hint, its own deadline, and the mask flag.
+fn child_command(exe: &std::path::Path, ext: &str, mask: bool, deadline: Duration) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.arg(CHILD_ARG).arg(format_hint(ext));
+    // `mask` stays the third argument: a child built before `deadline=` reads only that one, and
+    // must never return unmasked Markdown (#604 R2 F2).
+    if mask {
+        cmd.arg(MASK_ARG);
+    }
+    cmd.arg(format!("{DEADLINE_ARG}{}", deadline.as_millis()));
+    cmd
 }
 
 fn convert_in_process(ext: &str, bytes: &[u8]) -> Result<String, Skipped> {
@@ -419,25 +629,7 @@ fn convert_in_process(ext: &str, bytes: &[u8]) -> Result<String, Skipped> {
     let Some(converted) = converted else {
         return Err(Skipped::Unreadable("unrecognized format"));
     };
-    let md = match converted {
-        Ok(md) => md,
-        Err(e) => {
-            return Err(match e {
-                anydoc::ConvertError::NeedsOcr { .. } => {
-                    // "page 2 of 5 needs OCR" / "all 3 pages need OCR": page numbers only.
-                    Skipped::NeedsOcr(e.to_string())
-                }
-                anydoc::ConvertError::Encrypted => Skipped::Encrypted,
-                anydoc::ConvertError::ResourceLimit { .. } => {
-                    Skipped::Unreadable("over a converter safety limit")
-                }
-                anydoc::ConvertError::Unsupported(_) => Skipped::Unreadable("unsupported content"),
-                anydoc::ConvertError::MissingPart { .. } => Skipped::Unreadable("missing part"),
-                anydoc::ConvertError::Io(_) => Skipped::Unreadable("cannot read"),
-                _ => Skipped::Unreadable("malformed document"),
-            });
-        }
-    };
+    let md = converted.map_err(skipped_for)?;
     if md.trim().is_empty() {
         return Err(Skipped::Unreadable("no text"));
     }
@@ -447,6 +639,25 @@ fn convert_in_process(ext: &str, bytes: &[u8]) -> Result<String, Skipped> {
         ));
     }
     Ok(unescape_delimiters(&md))
+}
+
+/// The refusal for a converter error. The converter works on bytes already in memory, so its
+/// `Io` errors are reads of streams inside the document (OLE streams, PDF objects): a corrupt
+/// document, `malformed`, not a file that could not be read (#556 R2).
+fn skipped_for(e: anydoc::ConvertError) -> Skipped {
+    match e {
+        anydoc::ConvertError::NeedsOcr { .. } => {
+            // "page 2 of 5 needs OCR" / "all 3 pages need OCR": page numbers only.
+            Skipped::NeedsOcr(e.to_string())
+        }
+        anydoc::ConvertError::Encrypted => Skipped::Encrypted,
+        anydoc::ConvertError::ResourceLimit { .. } => {
+            Skipped::Unreadable("over a converter safety limit")
+        }
+        anydoc::ConvertError::Unsupported(_) => Skipped::Unreadable("unsupported content"),
+        anydoc::ConvertError::MissingPart { .. } => Skipped::Unreadable("missing part"),
+        _ => Skipped::Unreadable("malformed document"),
+    }
 }
 
 /// `\_` `\*` `\~` and `` \` `` -> the bare character. Only the inline delimiters an escape can split
@@ -610,7 +821,7 @@ mod tests {
         assert!(
             pages
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b' ')
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'-' | b','))
         );
         assert!(pages.starts_with("page tmpprivatepdf"));
     }
@@ -908,6 +1119,179 @@ mod tests {
     fn skip_reasons_never_carry_document_text() {
         let err = to_markdown("x.docx", b"PK\x03\x04 SECRETPAYLOAD").expect_err("garbage");
         assert!(!err.to_string().contains("SECRETPAYLOAD"), "{err}");
+    }
+
+    /// #556 R2 F1: the child is told its deadline, so it can end itself if its parent is gone.
+    #[test]
+    fn the_child_is_given_its_own_deadline_556() {
+        let cmd = child_command(
+            std::path::Path::new("wicked-estate"),
+            "docx",
+            true,
+            Duration::from_millis(250),
+        );
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        // `mask` comes before `deadline=`: a child from before the deadline reads only the third
+        // argument as `mask`, and must still mask (#604 R2 F2).
+        assert_eq!(args, [CHILD_ARG, "docx", MASK_ARG, "deadline=250"]);
+    }
+
+    /// #556 R2 F4: the converter reads bytes already in memory, so its I/O error is a corrupt
+    /// document, not a file that could not be read.
+    #[test]
+    fn an_in_document_read_error_is_malformed_556() {
+        let e = anydoc::ConvertError::Io(std::io::ErrorKind::UnexpectedEof.into());
+        assert_eq!(skipped_for(e).kind(), "malformed");
+    }
+
+    #[test]
+    fn every_refusal_has_a_kind_556() {
+        // Every reason the child may send back names a kind; only the missing converter is a
+        // plain failure, like a panic.
+        for &reason in UNREADABLE_REASONS {
+            let kind = Skipped::Unreadable(reason).kind();
+            assert_eq!(
+                kind == "failed",
+                reason == UNAVAILABLE_REASON,
+                "{reason:?} -> {kind}"
+            );
+        }
+        assert_eq!(Skipped::Unreadable(DEADLINE_REASON).kind(), "deadline");
+        assert_eq!(Skipped::Unreadable(MEMORY_REASON).kind(), "over_budget");
+        assert_eq!(Skipped::Unreadable("no text").kind(), "empty");
+        assert_eq!(
+            Skipped::NeedsOcr("all 1 pages need OCR".into()).kind(),
+            "needs_ocr"
+        );
+        assert_eq!(Skipped::TooLarge(9).kind(), "too_large");
+        assert_eq!(Skipped::Encrypted.kind(), "encrypted");
+        assert_eq!(Skipped::Panicked.kind(), "failed");
+    }
+
+    #[test]
+    fn a_lower_read_cap_refuses_before_reading_556() {
+        // The fixture itself: read_capped_at only reads it.
+        let path = std::path::PathBuf::from(format!(
+            "{}/tests/fixtures/docs/spec.docx",
+            env!("CARGO_MANIFEST_DIR")
+        ));
+        let len = fixture("spec.docx").len();
+        assert_eq!(
+            read_capped_at(&path, len - 1),
+            Err(Skipped::TooLarge(len as u64))
+        );
+        assert_eq!(read_capped_at(&path, len).unwrap().len(), len);
+    }
+
+    #[test]
+    fn ocr_page_ranges_survive_the_wire_556() {
+        for pages in ["pages 2-3 of 4 need OCR", "pages 1, 3-4 of 6 need OCR"] {
+            let reply = Err(Skipped::NeedsOcr(pages.to_string()));
+            assert_eq!(decode_reply(encode_reply(&reply).as_bytes()), reply);
+        }
+    }
+
+    /// An infallible allocation the budget refuses aborts the child before it replies; the mark it
+    /// left on stderr makes that the budget, while an abort with no mark stays a crash.
+    #[cfg(unix)]
+    #[test]
+    fn a_budget_abort_is_the_budget_and_a_bare_abort_a_crash_556() {
+        let mark = std::str::from_utf8(BUDGET_MARK).unwrap().trim_end();
+        let mut budget = std::process::Command::new("sh");
+        budget.args([
+            "-c",
+            &format!("cat >/dev/null; echo '{mark}' >&2; kill -6 $$"),
+        ]);
+        assert_eq!(
+            supervise(budget, b"x", Duration::from_secs(10)),
+            Err(Skipped::Unreadable(MEMORY_REASON))
+        );
+        let mut crash = std::process::Command::new("sh");
+        crash.args([
+            "-c",
+            "cat >/dev/null; echo 'thread panicked' >&2; kill -6 $$",
+        ]);
+        assert_eq!(
+            supervise(crash, b"x", Duration::from_secs(10)),
+            Err(Skipped::Panicked)
+        );
+    }
+
+    /// The path check can race a swap to a FIFO; the open itself must neither block nor accept it.
+    #[test]
+    fn the_opened_descriptor_must_be_a_regular_file_556() {
+        #[cfg(unix)]
+        {
+            let dir = tempdir_for("open-regular");
+            let fifo = dir.join("pipe.pdf");
+            let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+            if made.is_ok_and(|s| s.success()) {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let path = fifo.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(open_regular(&path).map(|(_, len)| len));
+                });
+                let opened = rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("opening a FIFO blocked");
+                assert_eq!(opened, Err(Skipped::Unreadable("not a regular file")));
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// The size check comes before the open: an unreadable file over the cap is too large, not
+    /// unreadable. And a cap above the converter's own is clamped to it (a sparse file one byte
+    /// over [`MAX_INPUT_BYTES`] takes no disk).
+    #[test]
+    fn the_cap_is_checked_before_opening_and_clamped_556() {
+        let dir = tempdir_for("cap");
+        let big = dir.join("big.pdf");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(MAX_INPUT_BYTES as u64 + 1).unwrap();
+        drop(f);
+        assert_eq!(
+            read_capped_at(&big, usize::MAX),
+            Err(Skipped::TooLarge(MAX_INPUT_BYTES as u64 + 1))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = dir.join("locked.docx");
+            std::fs::write(&locked, b"0123456789").unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert_eq!(read_capped_at(&locked, 4), Err(Skipped::TooLarge(10)));
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `convert` masks as `knowledge.ingest` does: the Markdown rules, then the free-text rules.
+    #[test]
+    fn mask_markdown_masks_secret_assignments_like_knowledge_556() {
+        // ggignore: made-up secret values for the masking test
+        let md = "DB_PASSWORD=hunter2-example\n\npassword: marmoset\n\nAuthorization: Bearer innocentlookingsecret\n\nAPI_KEY=\"shortsecret\"\n";
+        let masked = mask_markdown(md);
+        assert_eq!(masked.len(), md.len());
+        for secret in [
+            "hunter2-example",
+            "marmoset",
+            "innocentlookingsecret",
+            "shortsecret",
+        ] {
+            assert!(!masked.contains(secret), "{secret}: {masked}");
+        }
+        let knowledge = wicked_estate_core::redact::redact_free_text(
+            &crate::redact::redact_source("doc.pdf.md", md),
+        )
+        .into_owned();
+        assert_eq!(masked, knowledge);
+    }
+
+    fn tempdir_for(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("doc-convert-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]

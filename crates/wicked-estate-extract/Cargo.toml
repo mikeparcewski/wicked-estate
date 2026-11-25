@@ -193,6 +193,11 @@ calamine = { workspace = true, optional = true }
 # Not used directly: a version floor for calamine's zip (see the workspace Cargo.toml).
 zip = { workspace = true, optional = true }
 
+# O_NONBLOCK for the document open (src/doc_convert.rs): a path swapped for a FIFO must not block
+# the open before the conversion deadline starts (#556). Already in Cargo.lock; no new download.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 # Compiles the vendored APEXlang grammar (vendor/tree-sitter-apexlang); see build.rs.
 cc = "1"
