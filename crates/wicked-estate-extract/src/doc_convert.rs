@@ -1108,6 +1108,7 @@ mod tests {
 
     /// An infallible allocation the budget refuses aborts the child before it replies; the mark it
     /// left on stderr makes that the budget, while an abort with no mark stays a crash.
+    #[cfg(unix)]
     #[test]
     fn a_budget_abort_is_the_budget_and_a_bare_abort_a_crash_556() {
         let mark = std::str::from_utf8(BUDGET_MARK).unwrap().trim_end();
