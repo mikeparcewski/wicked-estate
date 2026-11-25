@@ -2292,11 +2292,17 @@ mod tests {
     /// lifetime, as in the product), with the quadratic oracle off; and how many paragraphs came
     /// out `exit_only`.
     fn cobol_work(src: &str) -> (usize, usize) {
-        COBOL_ORACLE_OFF.with(|o| o.set(true));
+        /// Turns the oracle back on when dropped, panics included.
+        struct OracleOff(bool);
+        impl Drop for OracleOff {
+            fn drop(&mut self) {
+                COBOL_ORACLE_OFF.with(|o| o.set(self.0));
+            }
+        }
+        let _off = OracleOff(COBOL_ORACLE_OFF.with(|o| o.replace(true)));
         COBOL_WORK.with(|w| w.set(0));
         let tags = tags("src/PROG.cbl", "cobol", src);
         let work = COBOL_WORK.with(std::cell::Cell::get);
-        COBOL_ORACLE_OFF.with(|o| o.set(false));
         let stubs = tags
             .iter()
             .filter(|(_, b, r)| b == "stub" && r.as_deref() == Some("exit_only"))
@@ -2306,8 +2312,9 @@ mod tests {
 
     /// Work at `n` and `4n` copies of a shape. Linear work at most quadruples; the fixed part only
     /// lowers the ratio, and the sorts' and binary searches' log factor raises it a little
-    /// (4.15x and 4.20x today). So the bound is 4.4x. A quadratic part, even a small one next to
-    /// the linear work, grows sixteenfold and shows. Counted steps, not wall-clock time (#604).
+    /// (4.15x and 4.20x today). So the bound is 4.4x. A quadratic part grows sixteenfold, so it
+    /// shows once it is more than about 2% of the work at `n`; each per-file cache removed, or a
+    /// binary search made linear, fails it. Counted steps, not wall-clock time (#604).
     fn assert_linear_work(shape: &str, make: impl Fn(usize) -> String, n: usize) {
         let (small, small_stubs) = cobol_work(&make(n));
         let (big, big_stubs) = cobol_work(&make(4 * n));
