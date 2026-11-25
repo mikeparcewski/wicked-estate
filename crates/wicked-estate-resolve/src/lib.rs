@@ -4049,10 +4049,13 @@ mod tests {
         );
     }
 
-    /// A label binds a paragraph, never a data item of the same spelling. AMBPGM performs a
-    /// STEP-PARA that two sections define (a label ref by name) and has a STEP-PARA data item;
-    /// DATEPGM performs paragraphs of a procedure copybook (not nodes, as CSUTLDPY in CardDemo's
-    /// COACTUPC) and COPYs a data item EDIT-DATE.
+    /// A label binds a paragraph, never a data item of the same spelling. AMBPGM performs, from a
+    /// third section, a STEP-PARA that two sections define (a label ref by name) and has a
+    /// STEP-PARA data item. Since #580 the two paragraphs are two nodes (`STEP-PARA(FIRST-SECT).`,
+    /// `STEP-PARA(SECOND-SECT).`), so the unqualified name is ambiguous (COBOL requires it
+    /// qualified) and parks, as any label with two candidates does, rather than taking the
+    /// one data item of that spelling. DATEPGM performs paragraphs of a procedure copybook (not
+    /// nodes, as CSUTLDPY in CardDemo's COACTUPC) and COPYs a data item EDIT-DATE.
     #[test]
     fn cobol_a_label_binds_a_paragraph_never_a_field() {
         let edges = cobol_role_edges(false);
@@ -4067,9 +4070,8 @@ mod tests {
             t.dedup();
             t
         };
-        assert_eq!(
-            calls_to("cbl/AMBPGM.cbl:AMBPGM", "STEP-PARA"),
-            [("cbl/AMBPGM.cbl:STEP-PARA".to_string(), NodeKind::Function)],
+        assert!(
+            calls_to("cbl/AMBPGM.cbl:AMBPGM", "STEP-PARA").is_empty(),
             "{edges:#?}"
         );
         for name in ["EDIT-DATE", "EDIT-DATE-EXIT"] {
