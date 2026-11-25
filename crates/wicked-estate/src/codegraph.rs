@@ -751,6 +751,9 @@ thread_local! {
     /// `"FAIL"` makes the run fail.
     pub(crate) static TEST_DATABASE_SQL: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+    /// The last run's `not imported` count on this thread, for tests.
+    pub(crate) static LAST_DROPPED: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 // ── prepare ─────────────────────────────────────────────────────────────────────────────────
@@ -1415,6 +1418,7 @@ impl Prepared {
             .pending_dropped
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let mut accounted: HashSet<usize> = HashSet::new();
         let key_of = |r: &UnresolvedRef| {
             (
                 r.location.file.clone(),
@@ -1456,6 +1460,9 @@ impl Prepared {
             for i in hits {
                 let e = &self.snap.edges[i];
                 let Some(target) = ids.ids.get(&e.target) else {
+                    // Accounted here, through the fall-through: never again as a
+                    // codegraph-only fact (round 1 codex P3).
+                    accounted.insert(i);
                     site_dropped += 1;
                     continue;
                 };
@@ -1484,7 +1491,7 @@ impl Prepared {
         }
         // Codegraph-only edges sourced in files extracted this run.
         for (i, e) in self.snap.edges.iter().enumerate() {
-            if consumed.contains(&i) {
+            if consumed.contains(&i) || accounted.contains(&i) {
                 continue;
             }
             let Some(kind) = map_edge_kind(&e.kind) else {
@@ -1563,6 +1570,7 @@ impl Prepared {
 
     /// Count the facts [`Self::resolve`] could not import for refs the fall-through left
     /// unbound (`still`), and forget the rest: a ref estate's resolvers bound lost nothing.
+    /// Called once after each [`Self::resolve`] (`resolve_with_codegraph`).
     pub(crate) fn settle_dropped(&self, still: &[UnresolvedRef]) {
         let mut pending = self
             .pending_dropped
@@ -1574,12 +1582,13 @@ impl Prepared {
 }
 
 /// The site a ref was written at, as [`Prepared::settle_dropped`] matches it.
-type DroppedKey = (String, String, String, u32, u32, u32);
+type DroppedKey = (String, String, EdgeKind, String, u32, u32, u32);
 
 fn dropped_key(r: &UnresolvedRef) -> DroppedKey {
     (
         r.from.0.clone(),
         r.raw_name.clone(),
+        r.kind.clone(),
         r.location.file.clone(),
         r.location.span.start_line,
         r.location.span.start_byte,
@@ -2106,9 +2115,7 @@ mod tests {
         let calls = edges(&store, EdgeKind::Calls);
         let from_get = calls_from(&calls, GET);
         assert!(
-            !from_get
-                .iter()
-                .any(|(_, t, _)| t == LIB_HELPER || t == DECOY_HELPER),
+            !from_get.iter().any(|(_, t, _)| t.ends_with("/helper().")),
             "an ambiguous name binds nothing: {from_get:?}"
         );
         let parked = store
@@ -2148,6 +2155,111 @@ mod tests {
         assert_eq!(settle(&mut pending, &[at(2)]), 1);
         assert!(pending.is_empty(), "settled once");
         assert_eq!(settle(&mut pending, &[at(2)]), 0);
+    }
+
+    #[test]
+    fn a_fall_through_site_binds_what_estate_main_binds_outside_codegraph_files_594() {
+        // Round 1 codex P2, answered: src/svc.ts (codegraph's) imports `helper` from the
+        // fallen-back ./lib/util and gains a class whose own method is `helper`; its
+        // `this.helper(s)` has no codegraph site. Every resolver sees every candidate; a pick in
+        // a codegraph file (the same-file method) is dropped, and the other resolvers' picks stand
+        // exactly as estate's own pipeline makes them. Never an edge estate main lacks.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+        std::fs::write(
+            root.join("src/svc.ts"),
+            format!(
+                "{}export class Helped {{ helper(s: string): string {{ return s; }} run(s: string): string {{ return this.helper(s); }} }}\n",
+                svc.replace("'@lib/util'", "'./lib/util'")
+            ),
+        )
+        .unwrap();
+        let run = "ts-typescript . . . src/svc/Helped#run().";
+        let from_run = |cfg: Option<&CodegraphConfig>, db: &str| {
+            let mut store = SqliteStore::open(tmp.path().join(db)).unwrap();
+            index(&mut store, &root, cfg, Some(&lib_util_fell_back_sql()));
+            let calls = edges(&store, EdgeKind::Calls);
+            let mut targets: Vec<String> = calls_from(&calls, run)
+                .iter()
+                .map(|(_, t, _)| t.clone())
+                .collect();
+            targets.sort();
+            targets.dedup();
+            targets
+        };
+        let estate_main = from_run(None, "main.db");
+        let cfg = config(tmp.path());
+        let hybrid = from_run(Some(&cfg), "g.db");
+        assert!(
+            estate_main.iter().any(|t| t.ends_with("Helped#helper().")),
+            "estate's own pipeline binds the same-file method: {estate_main:?}"
+        );
+        assert!(
+            !hybrid.iter().any(|t| t.ends_with("Helped#helper().")),
+            "no edge into the codegraph file: {hybrid:?}"
+        );
+        let outside_main: Vec<&String> = estate_main
+            .iter()
+            .filter(|t| !t.contains(" src/svc/"))
+            .collect();
+        assert_eq!(
+            hybrid.iter().collect::<Vec<_>>(),
+            outside_main,
+            "the fall-through keeps exactly estate main's picks outside codegraph's files"
+        );
+    }
+
+    #[test]
+    fn the_not_imported_count_leaves_out_a_fact_the_fall_through_binds() {
+        // Round 1 codex P3: with src/lib/util.ts fallen back but codegraph's facts into it kept,
+        // three facts have a target with no estate node: svc.ts's import of the file (edge 23)
+        // and get()'s call to `helper` (edge 31), each at an estate ref's site, and the
+        // specifier-level import of `helper` (edge 24), which no estate ref covers. With a
+        // relative import the fall-through binds the two refs, so only edge 24 counts; with the
+        // alias import neither binds, and each of the three counts once, never twice.
+        let fell_back_keeping_facts = format!(
+            "{FIXTURE_SQL}\nUPDATE files SET errors = '[{{\"message\":\"too big\",\"severity\":\"error\",\"code\":\"size_exceeded\"}}]', node_count = 0 WHERE path = 'src/lib/util.ts';"
+        );
+        let count = |sql: &str, relative: bool| {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = fixture_copy(tmp.path());
+            if relative {
+                let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+                std::fs::write(
+                    root.join("src/svc.ts"),
+                    svc.replace("'@lib/util'", "'./lib/util'"),
+                )
+                .unwrap();
+            }
+            let cfg = config(tmp.path());
+            let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+            LAST_DROPPED.with(|c| c.set(None));
+            index(&mut store, &root, Some(&cfg), Some(sql));
+            let calls = edges(&store, EdgeKind::Calls);
+            let bound = calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t == LIB_HELPER);
+            (
+                LAST_DROPPED.with(|c| c.get()).expect("a codegraph run"),
+                bound,
+            )
+        };
+        let (base, _) = count(FIXTURE_SQL, false);
+        let (relative, relative_bound) = count(&fell_back_keeping_facts, true);
+        let (alias, alias_bound) = count(&fell_back_keeping_facts, false);
+        assert!(relative_bound, "the relative import binds helper");
+        assert!(!alias_bound, "the alias leaves helper ambiguous");
+        assert_eq!(
+            relative,
+            base + 1,
+            "only edge 24 counts: {relative} over {base}"
+        );
+        assert_eq!(
+            alias,
+            base + 3,
+            "each unbound fact counts once: {alias} over {base}"
+        );
     }
 
     #[test]

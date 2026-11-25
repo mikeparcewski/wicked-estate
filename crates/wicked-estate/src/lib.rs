@@ -495,8 +495,9 @@ fn resolve_with_codegraph(
     // lose every edge into it), a file in an unswitched language, a stylesheet or a JSON file.
     // Inside codegraph's files its verdict stands, so whatever stays unbound parks. The
     // resolvers see the whole index (estate#594), so a name is as unique, and candidates rank,
-    // as on estate's own pipeline; a winner in a codegraph file is then dropped and its ref
-    // parks, never handed to a runner-up.
+    // as on estate's own pipeline. Each resolver's pick that lands in a codegraph file is
+    // dropped; the picks of the others stand, as estate's own pipeline keeps every resolver's
+    // edge (`resolve_all_with_coverage`), and a ref with no pick left parks.
     let outside: Vec<OutsideCodegraph<'_>> = resolvers
         .iter()
         .map(|inner| OutsideCodegraph {
@@ -3477,6 +3478,8 @@ fn index_path_inner(
     match &codegraph_state {
         Some(cg) => {
             let dropped = *cg.dropped_edges.lock().unwrap_or_else(|e| e.into_inner());
+            #[cfg(test)]
+            codegraph::LAST_DROPPED.with(|c| c.set(Some(dropped)));
             if dropped > 0 {
                 eprintln!(
                     "CODEGRAPH: {dropped} fact(s) not imported (an endpoint has no estate node)"
