@@ -44,6 +44,8 @@
 //!   wicked-estate dead-code              [--json] [--db ...]
 //!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
 //!   wicked-estate graph-view [--limit N] [--include-tests] [--include-trivial] [--ignore <pat>] [--db ...]
+//!   wicked-estate convert <file>         [--max-bytes N] [--deadline-ms N]
+//!                                     one document to Markdown on stdout; stores nothing (#556)
 //!
 //! RetrievalTool-backed commands (see `tool_bridge::COMMANDS`; strict flags, `--help` per command):
 //!   wicked-estate traverse <symbol>      [--depth N] [--direction D] [--edge-kinds a,b] [--max-nodes N] [--json] [--db ...]
@@ -53,6 +55,7 @@
 //!                                     [--framework S] [--scope S] [--projects a,b] [--limit N] [--json] [--db ...]
 
 mod cli_flags;
+mod convert;
 mod cutoff;
 mod emit;
 mod scip_auto;
@@ -833,7 +836,20 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
     doc_convert::isolate_conversions();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `std::env::args` panics on an argument that is not UTF-8; refuse it instead (#556).
+    let args: Vec<String> = match std::env::args_os()
+        .skip(1)
+        .map(std::ffi::OsString::into_string)
+        .collect::<Result<_, _>>()
+    {
+        Ok(args) => args,
+        Err(_)
+            if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("convert")) =>
+        {
+            std::process::exit(convert::refuse_non_utf8_operand())
+        }
+        Err(bad) => anyhow::bail!("an argument is not valid UTF-8: {}", bad.to_string_lossy()),
+    };
     let (cmd, rest) = match args.split_first() {
         Some((c, r)) => (c.as_str(), r),
         None => ("help", &[][..]),
@@ -847,6 +863,19 @@ fn main() -> Result<()> {
         cli_flags::parse("version", rest, "").map_err(anyhow::Error::msg)?;
         println!("wicked-estate {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+    // (#556) One document to Markdown on stdout. Before the store resolves: it opens no graph,
+    // so a team runtime or a missing store never stands between a caller and a conversion, or
+    // its help.
+    if cmd == "convert" {
+        match cli_flags::parse("convert", rest, "").map_err(anyhow::Error::msg)? {
+            cli_flags::Parsed::Args(a) => std::process::exit(convert::run(&a)?),
+            _ => {
+                println!("usage:");
+                convert::print_usage();
+                return Ok(());
+            }
+        }
     }
 
     // The DEFAULT spec resolves through the WICKED_RUNTIME profile seam
@@ -4439,6 +4468,7 @@ fn main() -> Result<()> {
             println!(
                 "    Evidence-envelope freshness read: \"what needs re-verification?\". A date is 00:00:00 UTC. Never-verified rows (last_verified=0) are always stale."
             );
+            convert::print_usage();
             println!(
                 "  wicked-estate fingerprint <name>   [--db ...]  # stable hex fingerprint for symbol"
             );

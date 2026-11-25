@@ -618,6 +618,31 @@ pub const COMMANDS: &[Command] = &[
         name: "version",
         spec: owns(&[], &[]),
     },
+    // Dispatched before the store spec resolves (#556): it opens no graph. Each limit can only
+    // lower the converter's own (32 MiB, 120 s).
+    Command {
+        name: "convert",
+        spec: owns(
+            &[req("file")],
+            &[
+                Flag::new(
+                    "max-bytes",
+                    Ty::UInt {
+                        min: 1,
+                        max: wicked_estate_extract::doc_convert::MAX_INPUT_BYTES as u64,
+                    },
+                ),
+                Flag::new(
+                    "deadline-ms",
+                    Ty::UInt {
+                        min: 1,
+                        max: wicked_estate_extract::doc_convert::CONVERT_DEADLINE.as_millis()
+                            as u64,
+                    },
+                ),
+            ],
+        ),
+    },
     Command {
         name: "plugins",
         spec: owns(
@@ -1349,6 +1374,12 @@ mod tests {
             "the early `version` dispatch no longer checks its row"
         );
         arms.push("version");
+        // So is `convert`, which opens no graph (#556).
+        assert!(
+            main.contains(r#"cli_flags::parse("convert", rest, "")"#),
+            "the early `convert` dispatch no longer checks its row"
+        );
+        arms.push("convert");
         for arm in &arms {
             assert!(
                 lookup(arm).is_some() || crate::tool_bridge::lookup(arm).is_some(),
