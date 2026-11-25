@@ -88,6 +88,9 @@ struct Root {
     recorded: String,
     /// The commit the root was indexed at.
     indexed: Option<String>,
+    /// The root's position in its git work tree at index time, when recorded (a labelled repo's
+    /// `subpath`; an unlabelled graph's `indexed_subpath`).
+    subpath: Option<String>,
 }
 
 /// Commit-level freshness of every root, computed fresh (no cache). The bespoke CLI arms use this
@@ -129,6 +132,10 @@ fn record(report: &mut StalenessReport, root: &Root, n: Option<u64>) {
     }
 }
 
+/// Meta key: an unlabelled graph's root position in its git work tree at index time, as JSON
+/// (`"svc"`, `""` for the top level, `null` when git could not answer).
+pub const INDEXED_SUBPATH_KEY: &str = "indexed_subpath";
+
 /// Every indexed root: the repo registry of a multi-repo graph, else the single `indexed_root`.
 fn roots(store: &dyn GraphStoreMutExt, db: &str) -> Vec<Root> {
     let repos = repo_scope::registry(store);
@@ -140,6 +147,7 @@ fn roots(store: &dyn GraphStoreMutExt, db: &str) -> Vec<Root> {
                 recorded: rec.root,
                 label: Some(rec.label),
                 indexed: rec.info.commit,
+                subpath: rec.subpath,
             })
             .collect();
     }
@@ -151,40 +159,77 @@ fn roots(store: &dyn GraphStoreMutExt, db: &str) -> Vec<Root> {
         path,
         label: None,
         indexed: store.repo_info().ok().flatten().and_then(|i| i.commit),
+        subpath: store
+            .meta_get_key(INDEXED_SUBPATH_KEY)
+            .and_then(|v| serde_json::from_str::<Option<String>>(&v).ok().flatten()),
     }]
 }
 
 /// Paths git names (relative to the top level of the repository at `toplevel`) as the graph stores
 /// them (#352): relative to each indexed root that contains the file, with `\\` as `/` (the
-/// indexer's own spelling), under `<label>/` in a labelled graph. Returns `(stored, outside)`:
-/// `outside` are the git paths under no indexed root. A graph that recorded no root (written
+/// indexer's own spelling), under `<label>/` in a labelled graph, in [`GitPaths::stored`];
+/// [`GitPaths::outside`] are the git paths under no root. A graph that recorded no root (written
 /// before roots were recorded) gets git's paths verbatim, the one spelling it can be checked
 /// against.
 ///
 /// Tried in order, first match wins: the roots as recorded (canonical since 0.21.1; resolving
 /// one again would follow a symlink made since and read another directory's rows); the
-/// filesystem's spelling of the path (after a case-only rename on a case-insensitive filesystem
-/// git keeps the old case); then the roots canonicalized (a root recorded relative, before
-/// 0.21.1, resolves against the db's directory, which may be spelled through a symlink).
+/// filesystem's spelling of the path (after a case-only rename of the root's own directory on a
+/// case-insensitive filesystem git keeps the old case); then the roots canonicalized (a root
+/// recorded relative, before 0.21.1, resolves against the db's directory, which may be spelled
+/// through a symlink).
+///
+/// A root that is another checkout of this repository (a linked worktree, nested or not, or a
+/// moved checkout) is first rebased onto this checkout at its position in the work tree (see
+/// [`relocated_root`]), so its paths keep the root's scope and label and a file outside it is
+/// still called outside. A root that cannot be placed is named in [`GitPaths::unplaced`].
 pub fn stored_paths_for_git(
     store: &dyn GraphStoreMutExt,
     db: &str,
     toplevel: &std::path::Path,
     git_paths: &[String],
-) -> (Vec<String>, Vec<String>) {
+) -> GitPaths {
     let roots = roots(store, db);
     if roots.is_empty() {
-        return (git_paths.to_vec(), Vec::new());
+        return GitPaths {
+            stored: git_paths.to_vec(),
+            ..GitPaths::default()
+        };
     }
     let canonical =
         |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let top = canonical(toplevel);
-    let recorded: Vec<(Option<String>, PathBuf)> =
-        roots.into_iter().map(|r| (r.label, r.path)).collect();
-    let resolved: Vec<(Option<String>, PathBuf)> = recorded
+    let tops: Vec<Option<PathBuf>> = roots
         .iter()
-        .map(|(label, path)| (label.clone(), canonical(path)))
+        .map(|root| {
+            git(&root.path, &["rev-parse", "--show-toplevel"])
+                .map(|out| canonical(std::path::Path::new(repo_scope::git_line(&out))))
+        })
         .collect();
+    // This checkout is one of the graph's roots: a root of another repository is not this
+    // checkout's (the other repos of a multi-repo graph).
+    let here = tops.iter().any(|t| t.as_deref() == Some(top.as_path()));
+    let top_git_dir = std::cell::OnceCell::new();
+    let (mut recorded, mut resolved, mut unplaced) = (Vec::new(), Vec::new(), Vec::new());
+    for (root, own_top) in roots.into_iter().zip(tops) {
+        let same_git_dir = |own: &std::path::Path| {
+            let common = repo_scope::git_common_dir(own);
+            common.is_some()
+                && &common == top_git_dir.get_or_init(|| repo_scope::git_common_dir(&top))
+        };
+        let relocation = relocated_root(&root, own_top.as_deref(), &top, same_git_dir, here);
+        match relocation {
+            Relocation::InPlace => {
+                resolved.push((root.label.clone(), canonical(&root.path)));
+                recorded.push((root.label, root.path));
+            }
+            Relocation::Rebased(rebased) => {
+                resolved.push((root.label.clone(), canonical(&rebased)));
+                recorded.push((root.label, rebased));
+            }
+            Relocation::Unverified => unplaced.push(root.recorded),
+        }
+    }
     let place =
         |roots: &[(Option<String>, PathBuf)], abs: &std::path::Path, stored: &mut Vec<String>| {
             let mut placed = false;
@@ -218,7 +263,94 @@ pub fn stored_paths_for_git(
             outside.push(git_path.clone());
         }
     }
-    (stored, outside)
+    GitPaths {
+        stored,
+        outside,
+        unplaced,
+    }
+}
+
+/// [`stored_paths_for_git`]'s answer.
+#[derive(Debug, Default)]
+pub struct GitPaths {
+    /// The paths as the graph stores them.
+    pub stored: Vec<String>,
+    /// git paths under no root this checkout reaches.
+    pub outside: Vec<String>,
+    /// Recorded roots that could not be placed in this checkout (shared history with the indexed
+    /// commit could not be established, or the root's position is unknown): none of their files
+    /// is read.
+    pub unplaced: Vec<String>,
+}
+
+/// Where a recorded root sits for the checkout running the command.
+enum Relocation {
+    /// The root is this checkout's (or outside any work tree): use it where it is.
+    InPlace,
+    /// The root is another checkout of this repository: here, at the same position.
+    Rebased(PathBuf),
+    /// This checkout cannot be shown to be the root's repository, or the root's position is
+    /// unknown.
+    Unverified,
+}
+
+/// Where `root` sits for the checkout whose top level is `top`. A root whose own work tree is this
+/// one stays where it is. Any other is another checkout of this repository (a linked worktree,
+/// nested in this one or holding it, a clone, or a moved checkout) or another repository. A
+/// checkout of this repository is rebased onto `top` at the root's position in its work tree: the
+/// position recorded at index time, else (an older graph) the one git gives for the root, which
+/// must still exist.
+///
+/// Evidence of one repository: the root's work tree shares this one's git directory (a linked
+/// worktree), or, when this checkout is none of the graph's roots (`here` is false), the commit
+/// the root was indexed at shares history with this checkout's HEAD (`git merge-base`; a clone or
+/// a moved checkout). An unrelated repository, even one holding that commit in a side ref, has no
+/// merge base with HEAD. When this checkout is one of the roots, the roots of other repositories
+/// stay where they are. Otherwise a root without that evidence, or without a known position,
+/// cannot be placed: [`Relocation::Unverified`]. A root outside any work tree with no recorded
+/// position (one indexed above its repositories) stays where it is.
+fn relocated_root(
+    root: &Root,
+    own_top: Option<&std::path::Path>,
+    top: &std::path::Path,
+    same_git_dir: impl Fn(&std::path::Path) -> bool,
+    here: bool,
+) -> Relocation {
+    if own_top == Some(top) {
+        return Relocation::InPlace;
+    }
+    if own_top.is_none() && root.subpath.is_none() && root.path.exists() {
+        return Relocation::InPlace;
+    }
+    let position = || match (&root.subpath, own_top) {
+        (Some(sub), _) => Some(PathBuf::from(sub)),
+        (None, Some(own)) => dunce::canonicalize(&root.path).ok().and_then(|path| {
+            path.strip_prefix(own)
+                .ok()
+                .map(std::path::Path::to_path_buf)
+        }),
+        (None, None) => None,
+    };
+    let rebased = |position: Option<PathBuf>| {
+        position.map_or(Relocation::Unverified, |p| Relocation::Rebased(top.join(p)))
+    };
+    if own_top.is_some_and(same_git_dir) {
+        return rebased(position());
+    }
+    if here {
+        return Relocation::InPlace;
+    }
+    let shared_history = root
+        .indexed
+        .as_deref()
+        .filter(|sha| !sha.is_empty())
+        .and_then(|sha| git(top, &["merge-base", sha, "HEAD"]))
+        .is_some_and(|base| !base.trim().is_empty());
+    if shared_history {
+        rebased(position())
+    } else {
+        Relocation::Unverified
+    }
 }
 
 /// `abs` as the filesystem spells it: its deepest existing ancestor canonicalized, the rest (a
@@ -1616,6 +1748,7 @@ mod tests {
             path: PathBuf::from(p),
             recorded: p.to_string(),
             indexed: None,
+            subpath: None,
         };
         let multi = [
             root(Some("ledger"), "/r/ledger"),

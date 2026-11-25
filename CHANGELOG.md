@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **COBOL: a paragraph name that repeats in two sections of one program now gives each paragraph its own node (#580).** Such paragraphs get a section-qualified id, `…#PARA(SECTION).`. Before, they shared one node, so both bodies' calls and data uses landed on it, and `PERFORM PARA OF SECTION` between them was dropped as a self-jump. `PERFORM PARA OF SECTION` now binds to the named one. Ids of paragraphs whose names are unique in their program do not change. Re-index note: when a second paragraph of the same name is added in another section, the earlier paragraph's id changes too (unless it sits before any section), so annotations or pins on that earlier id need re-pointing after the next index.
+
 ## [0.35.11] — 2026-11-24
 
 Patch release on the train-13 cut da841662, carrying 12 PRs since 0.35.10: #549, #566, #567, #569, #568, #561, #572, #586, #588, #571, #573, #579.
