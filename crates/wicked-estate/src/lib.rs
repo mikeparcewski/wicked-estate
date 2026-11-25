@@ -607,10 +607,42 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Switching codegraph off re-extracts the files it answered with estate's pipeline, which
-/// drops the nodes codegraph minted there. Say so before it happens, and name the minted ids
-/// something outside codegraph's own facts links to (a knowledge or memory edge, an
-/// annotation): those links dangle once the node is gone.
+/// The xedge.db the MCP server opens (wicked-estate-mcp `main.rs`, `xedge_path`):
+/// `WICKED_XEDGE_DB`, else `xedge.db` under `WICKED_HOME`, else under `$HOME/.wicked`, else under
+/// `.wicked`.
+fn xedge_db_path(var: impl Fn(&str) -> Option<String>) -> String {
+    var("WICKED_XEDGE_DB").unwrap_or_else(|| {
+        let home = var("WICKED_HOME").unwrap_or_else(|| {
+            var("HOME")
+                .map(|h| format!("{h}/.wicked"))
+                .unwrap_or_else(|| ".wicked".to_string())
+        });
+        format!("{home}/xedge.db")
+    })
+}
+
+#[cfg(not(test))]
+fn xedge_db_for_run() -> Option<String> {
+    Some(xedge_db_path(|k| std::env::var(k).ok()))
+}
+
+#[cfg(test)]
+fn xedge_db_for_run() -> Option<String> {
+    TEST_XEDGE_DB.with(|t| t.borrow().clone())
+}
+
+/// Whether xedge.db holds a link on the estate id `id`, either way round.
+fn xedge_linked(xedges: &wicked_estate_overlay::XedgeReader, id: &str) -> Result<bool> {
+    let engine = wicked_estate_overlay::ESTATE_ENGINE;
+    Ok(!xedges.in_edges(engine, id, &[])?.is_empty()
+        || !xedges.out_edges(engine, id, &[])?.is_empty())
+}
+
+/// A run that stops codegraph answering for a file (switched off, the file fell back, or its
+/// language narrowed out) re-extracts it with estate's pipeline, which drops the nodes codegraph
+/// minted there. Say so before it happens, and name the minted ids something outside codegraph's
+/// own facts links to: a graph edge (an annotation), or a knowledge or memory link in xedge.db.
+/// Those links dangle once the node is gone. xedge.db is read only if it exists, never written.
 fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String>) -> Result<()> {
     let minted: Vec<Node> = store
         .all_nodes()?
@@ -623,12 +655,36 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
     if minted.is_empty() {
         return Ok(());
     }
+    let (mut xedges, mut xedge_note) = match xedge_db_for_run() {
+        Some(path) if Path::new(&path).is_file() => {
+            match wicked_estate_overlay::XedgeReader::open_read_only(&path) {
+                Ok(reader) => (Some(reader), format!("xedges read from {path}")),
+                Err(e) => (
+                    None,
+                    format!("xedge.db at {path} unreadable ({e}), not counted"),
+                ),
+            }
+        }
+        Some(path) => (None, format!("no xedge.db at {path}")),
+        None => (None, "no xedge.db".to_string()),
+    };
     let mut linked = Vec::new();
     for n in &minted {
-        let outside = store
+        let mut outside = store
             .neighbors(&n.symbol, wicked_estate_core::Direction::Dependents)?
             .iter()
             .any(|e| e.kind != EdgeKind::Contains && !e.resolved_by.starts_with("codegraph:"));
+        if !outside {
+            if let Some(reader) = &xedges {
+                match xedge_linked(reader, &n.symbol.0) {
+                    Ok(hit) => outside = hit,
+                    Err(e) => {
+                        xedge_note = format!("{xedge_note}, unreadable ({e}), not counted");
+                        xedges = None;
+                    }
+                }
+            }
+        }
         if outside {
             linked.push(n.symbol.0.clone());
         }
@@ -642,10 +698,11 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
         })
     });
     eprintln!(
-        "CODEGRAPH-OFF: {} node(s) codegraph minted in {} file(s) leave the graph; {} carry links from outside codegraph's facts, which will dangle{}",
+        "CODEGRAPH-OFF: {} node(s) codegraph minted in {} file(s) leave the graph; {} carry links from outside codegraph's facts (graph edges, or knowledge and memory links; {}), which will dangle{}",
         minted.len(),
         files.len(),
         linked.len(),
+        xedge_note,
         if linked.is_empty() {
             String::new()
         } else {
@@ -2470,8 +2527,23 @@ fn index_path_inner(
             })
             .map(|(path, _)| path.clone()),
     );
-    if codegraph_cfg.is_none() && !codegraph_forced.is_empty() {
-        report_minted_going_away(store, &codegraph_forced)?;
+    // Files whose minted nodes this run deletes: the last run answered them and this one does
+    // not (codegraph off or failed, the file fell back, or its language was narrowed out). One
+    // report covers every such path (estate#597).
+    let leaving: HashSet<String> = stored_fingerprints
+        .iter()
+        .filter(|(path, fp)| {
+            fp.starts_with("ok|")
+                && work_by_rel.contains_key(*path)
+                && !matches!(
+                    codegraph_state.as_ref().and_then(|cg| cg.verdict(path)),
+                    Some(codegraph::Verdict::Ok)
+                )
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    if !leaving.is_empty() {
+        report_minted_going_away(store, &leaving)?;
     }
     changed_seed.extend(codegraph_forced.iter().cloned());
 

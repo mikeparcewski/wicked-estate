@@ -2128,6 +2128,25 @@ mod tests {
         assert!(report.minted >= 1, "{report:?}");
         assert_eq!(report.linked, vec![MINTED_POINT.to_string()], "{report:?}");
         assert_eq!(std::fs::read(&xedge).unwrap(), before, "xedge.db unchanged");
+        // Outside tests the run reads the xedge.db the MCP server opens.
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                vars.iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let resolve = |vars| crate::xedge_db_path(env(vars));
+        assert_eq!(
+            resolve(&[("WICKED_XEDGE_DB", "/x/a.db"), ("WICKED_HOME", "/w")]),
+            "/x/a.db"
+        );
+        assert_eq!(
+            resolve(&[("WICKED_HOME", "/w"), ("HOME", "/h")]),
+            "/w/xedge.db"
+        );
+        assert_eq!(resolve(&[("HOME", "/h")]), "/h/.wicked/xedge.db");
+        assert_eq!(resolve(&[]), ".wicked/xedge.db");
     }
 
     #[test]

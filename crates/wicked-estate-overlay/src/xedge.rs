@@ -243,6 +243,20 @@ pub struct XedgeReader {
 }
 
 impl XedgeReader {
+    /// Read an existing `xedge.db` without writing it: no schema, no `meta` row, no journal
+    /// switch, and a missing file is an error rather than created. For a caller that only reads
+    /// the links, such as the indexer's `CODEGRAPH-OFF` report (estate#597).
+    pub fn open_read_only(path: &str) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(map_err)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
     /// Cross-edges whose TARGET endpoint is `(engine, id)` and whose `rel` is in `rels`
     /// (empty `rels` = ANY rel). These are the *dependents* of `(engine, id)` across the store
     /// boundary — the about-arm's `in_edges("estate", code_id, ["about"])` read (DEC-X9).

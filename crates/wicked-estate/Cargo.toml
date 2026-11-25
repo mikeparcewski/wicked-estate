@@ -29,6 +29,9 @@ wicked-estate-resolve = { path = "../wicked-estate-resolve", version = "0.36.0" 
 wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.36.0" }
 wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.36.0" }
 wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.36.0" }
+# CODEGRAPH-OFF reads xedge.db (knowledge and memory links) read-only (estate#597). The release
+# build already links it through wicked-estate-mcp, so no feature set changes.
+wicked-estate-overlay = { path = "../wicked-estate-overlay", version = "0.36.0" }
 anyhow.workspace = true
 async-trait = "0.1.92"
 dirs = "6"
@@ -79,5 +82,3 @@ zstd = "0.13"
 # unification turns on this crate's `serve` (+ store `pool`) for the test build. Both only ADD
 # items (`open_async_store`, the `pool` module); no synchronous CLI path changes under them.
 wicked-estate-mcp = { path = "../wicked-estate-mcp" }
-# estate#597 tests write a scratch xedge.db that the CODEGRAPH-OFF report reads.
-wicked-estate-overlay = { path = "../wicked-estate-overlay" }
