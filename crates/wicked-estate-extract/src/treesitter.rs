@@ -383,7 +383,7 @@ fn cobol_largest_error(tree: &tree_sitter::Tree) -> Option<Span> {
     }
 }
 
-fn lang_cobol() -> tree_sitter::Language {
+pub(crate) fn lang_cobol() -> tree_sitter::Language {
     static PATCHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let ptr = *PATCHED.get_or_init(|| {
         let base: tree_sitter::Language = arborium_cobol::language().into();
@@ -1627,7 +1627,7 @@ fn push_children<'t>(stack: &mut Vec<tree_sitter::Node<'t>>, node: tree_sitter::
 }
 
 /// Parents whose children are the flat COBOL paragraph/section headers and statements.
-const COBOL_PROC_PARENTS: &[&str] = &["procedure_division", "procedure_declaratives"];
+pub(crate) const COBOL_PROC_PARENTS: &[&str] = &["procedure_division", "procedure_declaratives"];
 /// The node kinds that start a COBOL paragraph or section.
 pub(crate) const COBOL_HEADERS: &[&str] = &["paragraph_header", "section_header"];
 
@@ -1653,13 +1653,6 @@ fn cobol_paragraph_end(header: tree_sitter::Node) -> Option<usize> {
     } else {
         cobol_next_header_start(header, COBOL_HEADERS)
     }
-}
-
-/// End byte of the statements right after a COBOL header: the next header's start, of either
-/// kind, in the same parent, else that parent's end; `None` as [`cobol_paragraph_end`]. The
-/// behaviour classifier's boundary: a section's own statements stop at its first paragraph.
-pub(crate) fn cobol_body_end(header: tree_sitter::Node) -> Option<usize> {
-    cobol_next_header_start(header, COBOL_HEADERS)
 }
 
 fn cobol_next_header_start(header: tree_sitter::Node, ends: &[&str]) -> Option<usize> {
@@ -6012,6 +6005,9 @@ impl TreeSitterExtractor {
                 }
             }
 
+            // One per file: the classifier's per-file facts are computed once and shared by every
+            // definition (#582: per-definition walks were quadratic on large COBOL programs).
+            let mut behaviour_facts = crate::behaviour::FileFacts::default();
             for (p, identity) in pending.iter().zip(&identities) {
                 // Non-emitting anchors contribute containment only.
                 let Some((_, symbol)) = identity else {
@@ -6036,7 +6032,8 @@ impl TreeSitterExtractor {
                 }
                 // Is this unit real behaviour, or a stub, a data shape or test support? Read by
                 // wicked-core's requirements denominator (core#1375, #1235).
-                if let Some(b) = crate::behaviour::classify(
+                if let Some(b) = crate::behaviour::classify_in(
+                    &mut behaviour_facts,
                     &self.lang_name,
                     &file.path,
                     &p.kind,

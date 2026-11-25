@@ -6,6 +6,10 @@
 
 - **COBOL control flow is read from the grammar** (#585). A paragraph or section whose statements do not end its run (GOBACK, STOP RUN, an unconditional GO TO) now `Calls` the next one, tagged `cobol_fall_through`. A program `Calls` only the paragraph where it starts, not every paragraph no statement names, so a paragraph that control never reaches has no caller. `GO TO … DEPENDING ON` targets and DECLARATIVES handlers (called from the I/O statements on their files) are tagged `cobol_conditional`. Re-index COBOL sources to get the new edges.
 
+### Fixed
+
+- COBOL: the behaviour classifier no longer makes indexing a large program, or a file of many programs, quadratic in its size. It does its per-file work once per file instead of once per definition: one tree walk, the free-format check, and the error scan (#582)
+
 ## [0.36.0] — 2026-11-25
 
 Minor release on the train-14 cut d5d42e30, carrying 10 PRs since 0.35.11: #600, #602, #603, #604, #607, #606, #599, #609, #608, #605. It is a minor version because `ViaEdge` is now `#[non_exhaustive]` (#575), a semver break for a 0.x crate.
