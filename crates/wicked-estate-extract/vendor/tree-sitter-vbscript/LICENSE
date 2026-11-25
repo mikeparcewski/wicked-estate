@@ -1,7 +1,8 @@
 tree-sitter-vbscript: vendored from https://github.com/JJK96/tree-sitter-vbscript
 at commit 6d9548eab0514e0572a616fd58d5997a93b37415.
-The vendored src/grammar.json, src/parser.c and src/node-types.json are
-byte-identical to that commit's.
+The vendored src/grammar.json is byte-identical to that commit's;
+src/parser.c, src/node-types.json and the src/tree_sitter/ headers are generated from it by the
+pinned tree-sitter CLI (0.25.10, scripts/regen-vendored-parsers.py), and CI checks that.
 
 Upstream ships no LICENSE file and states no copyright notice. Its
 declarations conflict: package.json says ISC and names its author as

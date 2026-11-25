@@ -103,11 +103,12 @@ VBScript tree-sitter grammar
   Path:      crates/wicked-estate-extract/vendor/tree-sitter-vbscript/
   Crate:     wicked-estate-tree-sitter-vbscript
   Origin:    Vendored from https://github.com/JJK96/tree-sitter-vbscript;
-             its src/ (grammar.json, parser.c, node-types.json and the
-             tree_sitter/ headers) is byte-identical to upstream commit
+             its src/grammar.json is byte-identical to upstream commit
              6d9548eab0514e0572a616fd58d5997a93b37415.
-             Cargo.toml, README.md, bindings/rust/ and LICENSE are this
-             repository's.
+             parser.c, node-types.json and the tree_sitter/ headers are
+             generated from it by the pinned tree-sitter CLI.
+             Cargo.toml, README.md, tree-sitter.json, bindings/rust/ and
+             LICENSE are this repository's.
   License:   MIT License and ISC License (SPDX: MIT AND ISC). Upstream's
              declarations conflict: package.json says ISC and names its
              author as "Jan-Jaap Korpershoek", while Cargo.toml and

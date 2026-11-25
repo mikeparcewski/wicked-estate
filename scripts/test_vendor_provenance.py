@@ -131,11 +131,6 @@ UPSTREAM_DECLARATIONS = {
         "commit": "6d9548eab0514e0572a616fd58d5997a93b37415",
         "files": {
             "src/grammar.json": "5ea3c12e9fb2e433229523de62928c5186b10087",
-            "src/node-types.json": "f19438497a64026d6452ac4f98302315ff94b6f0",
-            "src/parser.c": "b4d8d08cd50a95c30dcfc6a771059f076e2de831",
-            "src/tree_sitter/alloc.h": "1f4466d75c40b6e62728b2de94c82c6398e42151",
-            "src/tree_sitter/array.h": "15a3b233bbb8760a5d87089b259fe0122da75c8a",
-            "src/tree_sitter/parser.h": "17f0e94bfcf4d8a54615c24fe61820a18e4d1411",
         },
         "license_blob": None,
         "licenses": ("MIT", "ISC"),
