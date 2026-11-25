@@ -10398,6 +10398,7 @@ dependencies = [
  "wicked-estate-extract",
  "wicked-estate-mcp",
  "wicked-estate-observe",
+ "wicked-estate-overlay",
  "wicked-estate-rank",
  "wicked-estate-resolve",
  "wicked-estate-retrieve",

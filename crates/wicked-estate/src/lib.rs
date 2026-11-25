@@ -589,6 +589,24 @@ fn resolve_backfill(
     Ok(resolution)
 }
 
+/// What the last `CODEGRAPH-OFF` report on this thread said, for tests.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MintedReport {
+    pub minted: usize,
+    pub files: usize,
+    pub linked: Vec<String>,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LAST_MINTED_REPORT: std::cell::RefCell<Option<MintedReport>> =
+        const { std::cell::RefCell::new(None) };
+    /// The xedge.db a test run reads; `None` reads none (tests never read a real home).
+    pub(crate) static TEST_XEDGE_DB: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Switching codegraph off re-extracts the files it answered with estate's pipeline, which
 /// drops the nodes codegraph minted there. Say so before it happens, and name the minted ids
 /// something outside codegraph's own facts links to (a knowledge or memory edge, an
@@ -615,6 +633,14 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
             linked.push(n.symbol.0.clone());
         }
     }
+    #[cfg(test)]
+    LAST_MINTED_REPORT.with(|r| {
+        *r.borrow_mut() = Some(MintedReport {
+            minted: minted.len(),
+            files: files.len(),
+            linked: linked.clone(),
+        })
+    });
     eprintln!(
         "CODEGRAPH-OFF: {} node(s) codegraph minted in {} file(s) leave the graph; {} carry links from outside codegraph's facts, which will dangle{}",
         minted.len(),
