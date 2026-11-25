@@ -4054,7 +4054,8 @@ mod tests {
     /// STEP-PARA data item. Since #580 the two paragraphs are two nodes (`STEP-PARA(FIRST-SECT).`,
     /// `STEP-PARA(SECOND-SECT).`), so the unqualified name is ambiguous (COBOL requires it
     /// qualified) and parks, as any label with two candidates does, rather than taking the
-    /// one data item of that spelling. DATEPGM performs paragraphs of a procedure copybook (not
+    /// one data item of that spelling. Each paragraph is still reached as a Function: its
+    /// section falls into it (#585). DATEPGM performs paragraphs of a procedure copybook (not
     /// nodes, as CSUTLDPY in CardDemo's COACTUPC) and COPYs a data item EDIT-DATE.
     #[test]
     fn cobol_a_label_binds_a_paragraph_never_a_field() {
@@ -4070,8 +4071,9 @@ mod tests {
             t.dedup();
             t
         };
-        assert!(
-            calls_to("cbl/AMBPGM.cbl:AMBPGM", "STEP-PARA").is_empty(),
+        assert_eq!(
+            calls_to("cbl/AMBPGM.cbl:AMBPGM", "STEP-PARA"),
+            [("cbl/AMBPGM.cbl:STEP-PARA".to_string(), NodeKind::Function)],
             "{edges:#?}"
         );
         for name in ["EDIT-DATE", "EDIT-DATE-EXIT"] {
