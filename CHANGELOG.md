@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- COBOL: indexing a large program, or a file of many programs, takes time linear in its size, not quadratic. The behaviour classifier does its per-file work once per file: one tree walk, the free-format check, and the error scan (#582)
+- COBOL: the behaviour classifier no longer makes indexing a large program, or a file of many programs, quadratic in its size. It does its per-file work once per file instead of once per definition: one tree walk, the free-format check, and the error scan (#582)
 
 ## [0.36.0] — 2026-11-25
 

@@ -1786,7 +1786,7 @@ fn behaviour_of<'a>(ex: &'a Extraction, name: &str) -> Vec<&'a str> {
 
 #[test]
 fn many_exit_paragraphs_classify_582() {
-    // 6,000 PERFORM ... THRU ranges, each ending in an EXIT paragraph (about 24k lines). Each
+    // 6,000 PERFORM ... THRU ranges, each ending in an EXIT paragraph (about 36k lines). Each
     // exit-only paragraph re-read the whole file (UTF-8 and free-format checks) and walked its
     // siblings with tree-sitter's O(index) `next_sibling`: about 16 s for 25k lines in a debug
     // build, growing with the square of the size.

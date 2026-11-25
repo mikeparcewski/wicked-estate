@@ -1,6 +1,7 @@
 //! The COBOL classifier as it was before wicked-estate#582 (TsNode walks), kept as the test
 //! oracle: under `cfg(test)`, `classify_in` checks every COBOL answer against it, so every unit
-//! test that extracts COBOL also proves the array-based classifier gives the same answer.
+//! test that extracts COBOL also proves the array-based classifier gives the same answer. The one
+//! exception is the counted-work test, which turns the oracle off on its thread (it is quadratic).
 
 use super::{
     Behaviour, COBOL_AREA_B_COLUMN, WALK_BUDGET, cobol_area_exit_only, cobol_header_is_verb,
