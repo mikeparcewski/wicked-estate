@@ -1642,6 +1642,13 @@ fn index_path_inner(
     // ([`indexed_root_path`]). In a multi-repo graph this is the LAST root indexed; each repo's
     // own root is in its `repo:<label>:root`.
     store.meta_set_key("indexed_root", &canonical_root(root));
+    // The root's position in its git work tree, so a later `changed-since` from another worktree
+    // or a moved checkout of the repository can place it (#606 round 2). `null`: git could not
+    // answer.
+    store.meta_set_key(
+        crate::freshness::INDEXED_SUBPATH_KEY,
+        &serde_json::to_string(&repo_scope::git_subpath(root)).unwrap_or_default(),
+    );
     // #201: WHEN this graph was built, so "which commit, built when" is one read (`stats --json`).
     store.meta_set_key("indexed_at", &rfc3339_now());
     // Read the previously-stored binary version BEFORE overwriting it so we can detect a
