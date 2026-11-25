@@ -121,11 +121,16 @@ fn a_conversion_past_its_deadline_is_killed() {
 }
 
 #[test]
-fn an_unknown_format_is_unsupported() {
+fn an_unknown_format_is_unsupported_and_a_broken_one_malformed() {
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("notes.docx");
+    // No signature and no document extension: nothing names a format.
+    let path = tmp.path().join("notes.bin");
     std::fs::write(&path, b"plain words, not a document").unwrap();
     assert_refused(&convert(&path, &[]), "unsupported", 4);
+    // The extension names Word, and the bytes are not a Word document.
+    let path = tmp.path().join("notes.docx");
+    std::fs::write(&path, b"plain words, not a document").unwrap();
+    assert_refused(&convert(&path, &[]), "malformed", 11);
 }
 
 #[test]
@@ -192,4 +197,10 @@ fn limits_are_checked_before_any_work() {
             stderr(&out)
         );
     }
+}
+
+/// A PDF under a user password (fixture: `make_locked_pdf.py` beside it) is refused as encrypted.
+#[test]
+fn a_password_protected_pdf_is_encrypted() {
+    assert_refused(&convert(&fixture("locked.pdf"), &[]), "encrypted", 5);
 }
