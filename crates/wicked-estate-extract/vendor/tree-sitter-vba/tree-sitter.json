@@ -1,0 +1,18 @@
+{
+  "grammars": [
+    {
+      "name": "vba",
+      "camelcase": "Vba",
+      "scope": "source.vba",
+      "path": "."
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "VBA grammar for tree-sitter, vendored from upstream (regeneration config, wicked-estate)",
+    "links": {
+      "repository": "https://github.com/tmepple/tree-sitter-vba"
+    }
+  }
+}

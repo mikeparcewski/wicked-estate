@@ -1,7 +1,8 @@
 tree-sitter-vba: vendored from https://github.com/tmepple/tree-sitter-vba
 at commit c691f237b2a703732d4b6a1f01d5b4f73f94d41e.
-The vendored src/grammar.json, src/parser.c and src/node-types.json are
-byte-identical to that commit's.
+The vendored src/grammar.json is byte-identical to that commit's;
+src/parser.c, src/node-types.json and the src/tree_sitter/ headers are generated from it by the
+pinned tree-sitter CLI (0.25.10, scripts/regen-vendored-parsers.py), and CI checks that.
 
 Upstream ships no LICENSE file and states no copyright notice. It declares
 the MIT License in package.json, Cargo.toml and tree-sitter.json, and

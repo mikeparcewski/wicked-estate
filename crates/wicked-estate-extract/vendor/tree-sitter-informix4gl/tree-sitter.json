@@ -1,0 +1,21 @@
+{
+  "grammars": [
+    {
+      "name": "informix4gl",
+      "camelcase": "Informix4Gl",
+      "scope": "source.informix4gl",
+      "path": ".",
+      "file-types": [
+        "4gl"
+      ]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Informix 4GL symbols+calls grammar for tree-sitter (wicked-estate)",
+    "links": {
+      "repository": "https://github.com/mikeparcewski/wicked-estate"
+    }
+  }
+}

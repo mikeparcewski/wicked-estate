@@ -1,0 +1,18 @@
+{
+  "grammars": [
+    {
+      "name": "vb6",
+      "camelcase": "Vb6",
+      "scope": "source.vb6",
+      "path": "."
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Visual Basic 6 grammar for tree-sitter, vendored from upstream (regeneration config, wicked-estate)",
+    "links": {
+      "repository": "https://github.com/joannefan/tree-sitter-vb6"
+    }
+  }
+}
