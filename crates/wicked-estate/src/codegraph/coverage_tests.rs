@@ -19,8 +19,9 @@ fn coverage_sql() -> String {
         .unwrap_or_else(|e| panic!("the gate fixture {}: {e}", path.display()))
 }
 
-/// `src/ts/big.ts`, past codegraph's 1 MiB source cap. The bytes are exactly what regen.sh writes
-/// (the python one-liner there); the recorded files row's size pins the two to each other.
+/// `src/ts/big.ts`, past codegraph's 1 MiB source cap: the bytes
+/// `scripts/codegraph-fixture-store.py grow` writes for regen.sh and the gate store. The recorded
+/// files row's size pins the two to each other.
 pub(crate) fn big_file() -> String {
     let line = "// codegraph caps a source file at 1 MiB; this one is bigger.\n";
     let n = (1024 * 1024) / line.len() + 1;

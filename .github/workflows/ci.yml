@@ -96,6 +96,17 @@ jobs:
         run: |
           cargo test -p wicked-estate --features codegraph-fixture --lib codegraph::
           cargo test -p wicked-estate --features codegraph-fixture --test codegraph_recorded_cli
+      # The gate store (#584 HOLD gate b): the coverage fixture indexed with `--codegraph` by this
+      # exact head, the recorded codegraph database standing in for the run.
+      - name: build the codegraph gate store
+        run: |
+          cargo build -p wicked-estate --features codegraph-fixture --bin wicked-estate
+          python3 scripts/codegraph-fixture-store.py store target/debug/wicked-estate "$RUNNER_TEMP/codegraph-gate"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: codegraph-gate-store
+          path: ${{ runner.temp }}/codegraph-gate/codegraph-gate.db
+          retention-days: 14
 
   # ── #360: the same gate on macOS and Windows, plus the install smoke test of release binaries.
   #    Grammar plugins load .so/.dylib/.dll, SQLite and 11 grammars are compiled from C, several
