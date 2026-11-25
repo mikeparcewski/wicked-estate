@@ -1,0 +1,25 @@
+{
+  "grammars": [
+    {
+      "name": "powerscript",
+      "camelcase": "Powerscript",
+      "scope": "source.powerscript",
+      "path": ".",
+      "file-types": [
+        "sru",
+        "srw",
+        "srf",
+        "sra",
+        "srm"
+      ]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "PowerBuilder PowerScript symbols+calls grammar for tree-sitter (wicked-estate)",
+    "links": {
+      "repository": "https://github.com/mikeparcewski/wicked-estate"
+    }
+  }
+}

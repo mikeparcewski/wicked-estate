@@ -40,10 +40,10 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: clippy (-D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # estate#311: the committed APEXlang parser is exactly what its grammar.js generates.
-      - name: APEXlang grammar regenerates byte-identical
-        working-directory: crates/wicked-estate-extract/vendor/tree-sitter-apexlang
-        run: npx --yes tree-sitter-cli@0.25.10 generate && git diff --exit-code -- .
+      # estate#311, #322: every committed parser is exactly what the pinned tree-sitter CLI generates
+      # from its grammar.json (in-house trees: from our grammar.js first). Upstream grammar.js never runs.
+      - name: vendored parsers regenerate byte-identical (tree-sitter-cli pinned)
+        run: python3 scripts/regen-vendored-parsers.py && git diff --exit-code -- crates/wicked-estate-extract/vendor
       # estate#310: the pinned APEXlang corpus (Oracle, UPL-1.0) is fetched, not vendored; every
       # file is checked against oracle/apexlang/corpus.tsv. The extract + index tests below parse and
       # resolve all of it (APEXLANG_CORPUS_REQUIRED turns a missing corpus into a failure).

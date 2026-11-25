@@ -1,0 +1,24 @@
+{
+  "grammars": [
+    {
+      "name": "cfml",
+      "camelcase": "Cfml",
+      "scope": "text.cfml",
+      "path": "cfml"
+    },
+    {
+      "name": "cfscript",
+      "camelcase": "Cfscript",
+      "scope": "source.cfscript",
+      "path": "cfscript"
+    }
+  ],
+  "metadata": {
+    "version": "0.26.17",
+    "license": "MIT",
+    "description": "ColdFusion CFML and CFScript grammars for tree-sitter, vendored from upstream (regeneration config, wicked-estate)",
+    "links": {
+      "repository": "https://github.com/cfmleditor/tree-sitter-cfml"
+    }
+  }
+}

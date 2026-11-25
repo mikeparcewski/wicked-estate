@@ -57,8 +57,11 @@ def provenance_problems(vendor, notice):
 # The intake record (#322): what each tree's upstream declares, read at the upstream commit whose
 # files the vendored ones match by git blob. A copyright line is listed only when upstream states
 # one; we never supply a line upstream does not state. Add an entry when you vendor upstream code.
-#   files:        the vendored files that are byte-identical to that commit (git blob sha); the
-#                 rest of the tree (Cargo.toml, README.md, bindings/rust/, a LICENSE we wrote) is
+#   files:        the vendored inputs that are byte-identical to that commit (git blob sha):
+#                 grammar.json, and any grammar.js, scanner or shared header. parser.c,
+#                 node-types.json and src/tree_sitter/ are the pinned CLI's output from
+#                 grammar.json, which CI regenerates (scripts/regen-vendored-parsers.py). The rest
+#                 (Cargo.toml, README.md, tree-sitter.json, bindings/rust/, a LICENSE we wrote) is
 #                 this repository's packaging or a documented patch
 #   license_blob: upstream's own LICENSE, vendored unchanged; None when upstream ships none
 #   licenses:     the declared license names, as NOTICE and the row spell them
@@ -73,21 +76,11 @@ UPSTREAM_DECLARATIONS = {
         "files": {
             "cfml/grammar.js": "df8dab9f30af00ce3836e5e64243d8e5523de90b",
             "cfml/src/grammar.json": "a1ca24d4363fc37eca53938fbc8c7fc638e6adac",
-            "cfml/src/node-types.json": "5163d06532e59ec7eb04c09de8dd2068e66168ca",
-            "cfml/src/parser.c": "3dfc93f3e9a9a60779e4b6043ad414cf2e1c2262",
             "cfml/src/scanner.c": "74cd1565e362b3d39a10792fdfc20e0689b0587e",
             "cfml/src/tag.c": "36788ffa85f346445c8d79fb3eedd0cab5202233",
-            "cfml/src/tree_sitter/alloc.h": "1abdd1201578605b8d05a3001f01ebc0d58826d9",
-            "cfml/src/tree_sitter/array.h": "56fc8cd470996ded64a5452be25e26dbd2aa682a",
-            "cfml/src/tree_sitter/parser.h": "858107deb9e4a1ffcd2ed5e6ffe98a5fcab3e1f6",
             "cfscript/grammar.js": "a4502bba82fd2eaf445f4cb37c78a0dd87f3135c",
             "cfscript/src/grammar.json": "4993b623333585e0237e1958dab4c4883f171571",
-            "cfscript/src/node-types.json": "15ed603f8bc6794cf02e2834b014ae833d4efac8",
-            "cfscript/src/parser.c": "c1e853b81024b7c20541ac72bcb42e531cdb207c",
             "cfscript/src/scanner.c": "1ad53fe82763c4bf4ea0eff5e046dcafe1b897ee",
-            "cfscript/src/tree_sitter/alloc.h": "1abdd1201578605b8d05a3001f01ebc0d58826d9",
-            "cfscript/src/tree_sitter/array.h": "56fc8cd470996ded64a5452be25e26dbd2aa682a",
-            "cfscript/src/tree_sitter/parser.h": "858107deb9e4a1ffcd2ed5e6ffe98a5fcab3e1f6",
             "common/scanner.h": "2e938459c2000aae38b0a4d20caf2f7b1eb2b879",
             "common/tag.h": "d441dc4fc5f21b35db1d279be38e2e19ec8b6ab7",
         },
@@ -106,11 +99,6 @@ UPSTREAM_DECLARATIONS = {
         "commit": "1ee443353ce49f12e39a8e627b557c59e348b729",
         "files": {
             "src/grammar.json": "25414d73cd35ca6c6e451ab37cbc85c450ca122b",
-            "src/node-types.json": "cf33cd9efa62bf898e90c024b3bd2a7121243b06",
-            "src/parser.c": "0eb2591bd62ec5e7191f416801ef075a6da8188d",
-            "src/tree_sitter/alloc.h": "1abdd1201578605b8d05a3001f01ebc0d58826d9",
-            "src/tree_sitter/array.h": "a17a574f04e0c20c38463149640badc5126063f8",
-            "src/tree_sitter/parser.h": "858107deb9e4a1ffcd2ed5e6ffe98a5fcab3e1f6",
         },
         "license_blob": None,
         "licenses": ("MIT",),
@@ -127,11 +115,6 @@ UPSTREAM_DECLARATIONS = {
         "commit": "c691f237b2a703732d4b6a1f01d5b4f73f94d41e",
         "files": {
             "src/grammar.json": "bda4515758c394bf567075b79b89f23bda8466b3",
-            "src/node-types.json": "abc4087f379ac56d594aab22f0c5d7b7754e5b24",
-            "src/parser.c": "7e4b74c8f5d1bdbb5fe417d6259a54a3e721b376",
-            "src/tree_sitter/alloc.h": "1abdd1201578605b8d05a3001f01ebc0d58826d9",
-            "src/tree_sitter/array.h": "56fc8cd470996ded64a5452be25e26dbd2aa682a",
-            "src/tree_sitter/parser.h": "858107deb9e4a1ffcd2ed5e6ffe98a5fcab3e1f6",
         },
         "license_blob": None,
         "licenses": ("MIT",),
@@ -444,14 +427,14 @@ class UpstreamDeclarationTests(unittest.TestCase):
     def test_a_changed_upstream_file_or_license_is_caught(self):
         with tempfile.TemporaryDirectory() as tmp:
             vendor = self.copy(tmp)
-            parser = vendor / "tree-sitter-vb6" / "src" / "parser.c"
-            parser.write_bytes(parser.read_bytes() + b"\n")
+            grammar = vendor / "tree-sitter-vb6" / "src" / "grammar.json"
+            grammar.write_bytes(grammar.read_bytes() + b"\n")
             lic = vendor / "tree-sitter-cfml" / "LICENSE"
             lic.write_text(lic.read_text().replace("MERCHANTABILITY", "MERCHANTIBILITY"))
             self.assertEqual(declaration_problems(vendor, self.notice),
                              ["tree-sitter-cfml: LICENSE is not upstream's blob aaf7a85db9f6e80c1ade3484da50e719087fe4a8",
-                              "tree-sitter-vb6: src/parser.c is not upstream's blob "
-                              + UPSTREAM_DECLARATIONS["tree-sitter-vb6"]["files"]["src/parser.c"]])
+                              "tree-sitter-vb6: src/grammar.json is not upstream's blob "
+                              + UPSTREAM_DECLARATIONS["tree-sitter-vb6"]["files"]["src/grammar.json"]])
 
     def test_a_crate_that_drops_its_license_is_caught(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -459,8 +442,8 @@ class UpstreamDeclarationTests(unittest.TestCase):
             cargo = vendor / "tree-sitter-vba" / "Cargo.toml"
             # Valid TOML a line-based regex would misread: no spaces, a multi-line array.
             cargo.write_text(cargo.read_text().replace(
-                'include = ["LICENSE", "README.md", "bindings/rust/*.rs", "src/**/*"]',
-                'include=[\n  "README.md",\n  "bindings/rust/*.rs",\n  "src/**/*",\n]'))
+                'include = ["LICENSE", "README.md", "bindings/rust/*.rs", "src/**/*", "tree-sitter.json"]',
+                'include=[\n  "README.md",\n  "bindings/rust/*.rs",\n  "src/**/*",\n  "tree-sitter.json",\n]'))
             vbs = vendor / "tree-sitter-vbscript" / "Cargo.toml"
             vbs.write_text(vbs.read_text().replace('license = "MIT AND ISC"', "license = 'MIT AND ISC'"))
             self.assertEqual(declaration_problems(vendor, self.notice),
@@ -516,20 +499,20 @@ class UpstreamDeclarationTests(unittest.TestCase):
                                  [f"tree-sitter-vba: LICENSE copyright lines ({line!r},) != upstream's ()"], line)
 
     def test_cargo_include_and_exclude_follow_cargo_precedence(self):
-        include = 'include = ["LICENSE", "README.md", "bindings/rust/*.rs", "src/**/*"]'
+        include = 'include = ["LICENSE", "README.md", "bindings/rust/*.rs", "src/**/*", "tree-sitter.json"]'
         cases = (
             # A later negation drops LICENSE from the package.
-            (include.replace('"src/**/*"]', '"src/**/*", "!LICENSE"]'), ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
+            (include.replace('"tree-sitter.json"]', '"tree-sitter.json", "!LICENSE"]'), ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
             # include wins over exclude, so LICENSE still ships.
             (include + '\nexclude = ["LICENSE"]', []),
             # With no include, exclude decides, by pattern.
             ('exclude = ["/LIC*"]', ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
             ('exclude = ["src/LICENSE"]', []),
             # gitignore spellings: "**/" is any depth, a trailing "/" matches directories only.
-            (include.replace('"src/**/*"]', '"src/**/*", "!**/LICENSE"]'), ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
+            (include.replace('"tree-sitter.json"]', '"tree-sitter.json", "!**/LICENSE"]'), ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
             (include.replace('"LICENSE", ', '"LICENSE/", '), ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
-            (include.replace('"src/**/*"]', '"src/**/*", "!LICENSE/"]'), []),
-            (include.replace('"src/**/*"]', '"src/**/*", "!LICENSE", "**/LICENSE"]'), []),
+            (include.replace('"tree-sitter.json"]', '"tree-sitter.json", "!LICENSE/"]'), []),
+            (include.replace('"tree-sitter.json"]', '"tree-sitter.json", "!LICENSE", "**/LICENSE"]'), []),
         )
         for manifest, expected in cases:
             with tempfile.TemporaryDirectory() as tmp:
