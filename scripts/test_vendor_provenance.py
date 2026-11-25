@@ -41,10 +41,11 @@ def provenance_problems(vendor, notice):
                    if not source.startswith("In-house") or f"`{sub}/LICENSE`" in lic}
     for tree in trees:
         license_file = vendor / tree / "LICENSE"
-        lines = license_file.read_text().splitlines() if license_file.exists() else []
-        copyrights = [line.strip() for line in lines if line.strip().startswith("Copyright (c)")]
+        text = license_file.read_text() if license_file.exists() else ""
+        copyrights = [line.strip() for line in text.splitlines() if line.strip().startswith("Copyright (c)")]
         # MIT requires the copyright notice to travel with the binary; NOTICE ships in every archive.
-        if tree in own_license and not copyrights:
+        # An upstream that states none gets a LICENSE that says so (see UPSTREAM_DECLARATIONS).
+        if tree in own_license and not copyrights and NO_COPYRIGHT not in text:
             problems.append(f"{tree}: no LICENSE copyright line, but its row needs one")
         problems += [f"{tree}: {c!r} missing from NOTICE" for c in copyrights if c not in notice]
     return problems
@@ -203,10 +204,11 @@ class VendoredGrammarProvenanceTests(unittest.TestCase):
         self.assertEqual(provenance_problems(VENDOR, (ROOT / "NOTICE").read_text()), [])
 
     def test_a_lost_or_emptied_tree_license_is_caught(self):
-        cases = (("tree-sitter-vb6", "Copyright (c) 2023 joannefan"),
+        cases = (("tree-sitter-cfml", "Copyright (c) 2014 Gareth Edwards & Gavin Baumanis"),
+                 ("tree-sitter-vb6", None),
                  ("tree-sitter-apexlang", "Copyright (c) 2025 Oracle and/or its affiliates."))
         for tree, line in cases:
-            notice = (ROOT / "NOTICE").read_text().replace(line, "")
+            notice = (ROOT / "NOTICE").read_text().replace(line or "\0", "")
             for emptied in (False, True):
                 with tempfile.TemporaryDirectory() as tmp:
                     vendor = Path(tmp) / "vendor"
@@ -219,9 +221,10 @@ class VendoredGrammarProvenanceTests(unittest.TestCase):
                                      [f"{tree}: no LICENSE copyright line, but its row needs one"], (tree, emptied))
 
     def test_a_copyright_line_missing_from_notice_is_caught(self):
-        notice = (ROOT / "NOTICE").read_text().replace("Copyright (c) 2023 tmepple", "")
+        line = "Copyright (c) 2016 Max Brunsfeld"
+        notice = (ROOT / "NOTICE").read_text().replace(line, "")
         self.assertEqual(provenance_problems(VENDOR, notice),
-                         ["tree-sitter-vba: 'Copyright (c) 2023 tmepple' missing from NOTICE"])
+                         [f"tree-sitter-cobol-scanner: {line!r} missing from NOTICE"])
 
     def test_a_tree_without_a_row_is_caught(self):
         with tempfile.TemporaryDirectory() as tmp:

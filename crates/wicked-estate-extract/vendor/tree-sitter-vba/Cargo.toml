@@ -7,7 +7,7 @@ repository = "https://github.com/mikeparcewski/wicked-estate"
 description = "VBA grammar for tree-sitter — vendored from tmepple/tree-sitter-vba"
 readme = "README.md"
 build = "bindings/rust/build.rs"
-include = ["README.md", "bindings/rust/*.rs", "src/**/*"]
+include = ["LICENSE", "README.md", "bindings/rust/*.rs", "src/**/*"]
 
 [lib]
 path = "bindings/rust/lib.rs"

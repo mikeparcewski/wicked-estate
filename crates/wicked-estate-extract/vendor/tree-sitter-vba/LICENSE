@@ -1,6 +1,15 @@
-MIT License
+tree-sitter-vba: vendored from https://github.com/tmepple/tree-sitter-vba
+at commit c691f237b2a703732d4b6a1f01d5b4f73f94d41e.
+The vendored src/grammar.json, src/parser.c and src/node-types.json are
+byte-identical to that commit's.
 
-Copyright (c) 2023 tmepple
+Upstream ships no LICENSE file and states no copyright notice. It declares
+the MIT License in package.json, Cargo.toml and tree-sitter.json, and
+tree-sitter.json names its author as "Todd Epple".
+This directory is used under those terms. The license text follows without a
+copyright line, because upstream states none.
+
+MIT License
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
