@@ -3023,6 +3023,8 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> JsWritesByScope {
                 names.extend(params);
             }
         }
+        #[cfg(test)]
+        count_js_scope_work(names.len());
         if !names.is_empty() {
             shadow = Some(Rc::new(JsShadow {
                 scope: n.id(),
@@ -3201,6 +3203,8 @@ fn js_assignment_seen(
                 .find(|&i| !js_write_blind(&w.events[i], pos))
         })
         .max();
+    #[cfg(test)]
+    count_js_scope_work(before - kill.unwrap_or(0));
     let mut out: Vec<_> = w.events[kill.unwrap_or(0)..before]
         .iter()
         .rev()
@@ -3249,15 +3253,17 @@ enum JsScopeRead {
 
 #[cfg(test)]
 thread_local! {
-    /// Declarations the local-binding path reads (a scope's declarations, then each declaration
-    /// list a join scans), counted in tests so a test bounds this work, not the wall-clock time
-    /// (wicked-estate#501: each is read once per file, not once per call).
-    static JS_DECLS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The items the JS local-binding path reads, counted in tests so a test bounds this work,
+    /// not the wall-clock time: a scope's declarations and each declaration list a join scans
+    /// (wicked-estate#501: once per file, not once per call), the writes a root walk records and
+    /// the names each lexical scope adds (#497: one walk, each scope its own names only), and the
+    /// writes a call scans back over (#497: from its latest covering write, not from the start).
+    static JS_SCOPE_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-fn count_js_decls_read(n: usize) {
-    JS_DECLS_READ.with(|c| c.set(c.get() + n));
+fn count_js_scope_work(n: usize) {
+    JS_SCOPE_WORK.with(|c| c.set(c.get() + n));
 }
 
 /// A scope's declaring starts, by name, each list shared by every call that binds to it.
@@ -3289,7 +3295,7 @@ fn js_scope_starts(
                 JsScopeRead::Hoisted => js_hoisted_vars(n, src),
             };
             #[cfg(test)]
-            count_js_decls_read(decls.len());
+            count_js_scope_work(decls.len());
             let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
             for (name, at) in decls {
                 by_name.entry(name).or_default().push(at);
@@ -3327,10 +3333,18 @@ fn js_scope_write_seen(
             None => break,
         }
     }
-    let writes = memo
-        .writes
-        .entry(root.id())
-        .or_insert_with(|| js_var_writes(root, src));
+    let writes = memo.writes.entry(root.id()).or_insert_with(|| {
+        let writes = js_var_writes(root, src);
+        #[cfg(test)]
+        count_js_scope_work(
+            writes
+                .values()
+                .flat_map(|by_name| by_name.values())
+                .map(|w| w.events.len())
+                .sum(),
+        );
+        writes
+    });
     let mut ancestors = Vec::new();
     let mut loops = Vec::new();
     let mut within_owner = true;
@@ -3556,7 +3570,7 @@ struct JsBindingJoin<'a, 't> {
 impl<'t> JsBindingJoin<'_, 't> {
     fn resolve(&mut self, starts: &[usize], name: &str, depth: usize) -> JsBindingTarget {
         #[cfg(test)]
-        count_js_decls_read(starts.len());
+        count_js_scope_work(starts.len());
         if let Some(i) = starts.iter().find_map(|at| {
             self.defs_at
                 .get(at)?
@@ -6777,25 +6791,59 @@ mod tests {
     /// failed main at 2.1x). Before #501 each call copied and joined the whole list: N x N.
     #[test]
     fn shared_declarations_are_read_once_per_file_501() {
-        let ex = TreeSitterExtractor::for_language("tsx").unwrap();
-        let read = |n: usize, var: &str| {
-            let vars: String = (0..n).map(|_| format!("var {var};\n")).collect();
-            let fns: String = (0..n)
-                .map(|i| format!("function f{i}() {{ return Card(); }}\n"))
-                .collect();
-            let text = format!("export function P() {{ {{\n{vars}}}\n{fns}}}\n");
-            JS_DECLS_READ.with(|c| c.set(0));
-            ex.extract(&sf("src/big.tsx", "tsx", &text)).unwrap();
-            JS_DECLS_READ.with(|c| c.get())
+        let file = |var: &'static str| {
+            move |n: usize| {
+                let vars: String = (0..n).map(|_| format!("var {var};\n")).collect();
+                let fns: String = (0..n)
+                    .map(|i| format!("function f{i}() {{ return Card(); }}\n"))
+                    .collect();
+                format!("export function P() {{ {{\n{vars}}}\n{fns}}}\n")
+            }
         };
-        let (one, two) = (read(1_000, "Card"), read(2_000, "Card"));
-        assert!(one >= 1_000, "the bound file reads its declarations: {one}");
-        assert!(one <= 4 * 1_000, "linear in N: {one} for 1000");
+        assert_linear("shared declarations", 1_000, 8, file("Card"));
+        assert!(js_scope_work(&file("Other")(1_000)) <= 8 * 1_000);
+    }
+
+    /// The [`JS_SCOPE_WORK`] count of extracting `text` as TSX.
+    fn js_scope_work(text: &str) -> usize {
+        let ex = TreeSitterExtractor::for_language("tsx").unwrap();
+        JS_SCOPE_WORK.with(|c| c.set(0));
+        ex.extract(&sf("src/big.tsx", "tsx", text)).unwrap();
+        JS_SCOPE_WORK.with(|c| c.get())
+    }
+
+    /// Linear in `n`: at most `per` items per unit at `n` (a quadratic path reads about `n` per
+    /// unit), and doubling `n` at most doubles it.
+    fn assert_linear(what: &str, n: usize, per: usize, file: impl Fn(usize) -> String) {
+        let (one, two) = (js_scope_work(&file(n)), js_scope_work(&file(2 * n)));
+        assert!(one >= n, "{what}: the path is exercised: {one} for {n}");
+        assert!(one <= per * n, "{what}: linear in N: {one} for {n}");
         assert!(
             two <= 2 * one + 16,
-            "doubling N doubles the work: {one} then {two}"
+            "{what}: doubling N doubles the work: {one} then {two}"
         );
-        assert!(read(1_000, "Other") <= 4 * 1_000);
+    }
+
+    /// #497: a call reads its scope's writes once per file and scans back only to its latest
+    /// covering write, so N writes and N calls to a redeclared parameter are linear work. A
+    /// per-call copy and scan of every earlier write is N x N. Counted, not timed.
+    #[test]
+    fn write_lookup_is_linear_497() {
+        assert_linear("write lookup", 2_000, 8, |n| {
+            let body = "Card = null; Card();\n".repeat(n);
+            format!("export function P(Card: any) {{ {{ var Card = () => null; }}\n{body}}}\n")
+        });
+    }
+
+    /// #497: a block of N `let`s around a write adds its N names once, not N copies of N names.
+    #[test]
+    fn lexical_shadow_is_linear_497() {
+        assert_linear("lexical shadow", 2_000, 8, |n| {
+            let lets: String = (0..n).map(|i| format!("let z{i}: any;\n")).collect();
+            format!(
+                "export function P(Card: any) {{ {{ var Card = () => null; }}\n{{\n{lets}Card = null;\nCard();\n}} }}\n"
+            )
+        });
     }
 
     /// #504: nested mutable bindings share one root walk and retain their own writes.
