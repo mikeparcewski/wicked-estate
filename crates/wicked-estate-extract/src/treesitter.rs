@@ -2949,6 +2949,15 @@ struct JsShadow {
     up: Option<std::rc::Rc<JsShadow>>,
 }
 
+/// Every frame is charged for the names it holds when it ends, so a frame built by any route, a
+/// new scope or a copy of one, is counted (#604 R2).
+#[cfg(test)]
+impl Drop for JsShadow {
+    fn drop(&mut self) {
+        count_js_scope_work(JsWork::Shadow, self.names.len());
+    }
+}
+
 fn js_write_owner(mut frame: Option<&std::rc::Rc<JsShadow>>, name: &str, root: usize) -> usize {
     while let Some(f) = frame {
         if f.names.contains(name) {
@@ -3023,8 +3032,6 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> JsWritesByScope {
                 names.extend(params);
             }
         }
-        #[cfg(test)]
-        count_js_scope_work(JsWork::Shadow, names.len());
         if !names.is_empty() {
             shadow = Some(Rc::new(JsShadow {
                 scope: n.id(),
@@ -3264,7 +3271,8 @@ enum JsWork {
     Writes,
     /// The writes a call scans back over, from its latest covering write (#497).
     Scan,
-    /// The names a lexical scope adds, its own only; children share the frame (#497).
+    /// The names each lexical frame holds, counted when it is dropped: a scope's own names
+    /// only, since children share the frame (#497).
     Shadow,
 }
 

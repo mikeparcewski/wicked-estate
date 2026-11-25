@@ -605,12 +605,13 @@ fn convert_bounded(
 /// The isolated child's command line: the format hint, its own deadline, and the mask flag.
 fn child_command(exe: &std::path::Path, ext: &str, mask: bool, deadline: Duration) -> Command {
     let mut cmd = Command::new(exe);
-    cmd.arg(CHILD_ARG)
-        .arg(format_hint(ext))
-        .arg(format!("{DEADLINE_ARG}{}", deadline.as_millis()));
+    cmd.arg(CHILD_ARG).arg(format_hint(ext));
+    // `mask` stays the third argument: a child built before `deadline=` reads only that one, and
+    // must never return unmasked Markdown (#604 R2 F2).
     if mask {
         cmd.arg(MASK_ARG);
     }
+    cmd.arg(format!("{DEADLINE_ARG}{}", deadline.as_millis()));
     cmd
 }
 
