@@ -202,9 +202,18 @@ fn migrate_fts_rowids(conn: &Connection) -> Result<()> {
     }
 }
 
-/// Every table, index and trigger [`SCHEMA`] creates is in the database (a pure read). A writer
-/// open creates a missing one with `CREATE … IF NOT EXISTS`; a read-only connection cannot, so
-/// [`SqliteStore::open_readonly_current`] refuses a graph that lacks one (wicked-crew#1497).
+/// Schema objects only writes touch (wicked-estate#601): no read path names them, so a graph
+/// without one answers every read exactly as with it, and the read-only currency check does not
+/// require them. A writer open creates them. An additive object goes here only when no read path
+/// names it (`grep` the read paths for it); a table reads use stays required, or reads it through
+/// a check for its presence. `edge_files` (#543) and its index: `upsert_edges`, `remove_file`,
+/// `remove_nodes_inner`, `prune_dangling_edges` and the redaction scrub, all writes.
+const WRITER_ONLY_OBJECTS: &[&str] = &["edge_files", "idx_edge_files_file"];
+
+/// Every table, index and trigger [`SCHEMA`] creates, other than [`WRITER_ONLY_OBJECTS`], is in
+/// the database (a pure read). A writer open creates a missing one with `CREATE … IF NOT EXISTS`;
+/// a read-only connection cannot, so [`SqliteStore::open_readonly_current`] refuses a graph that
+/// lacks one (wicked-crew#1497).
 fn schema_objects_present(conn: &Connection) -> Result<()> {
     let mut have = conn
         .prepare("SELECT 1 FROM sqlite_master WHERE name = ?1")
@@ -233,6 +242,9 @@ fn schema_objects_present(conn: &Connection) -> Result<()> {
             _ => continue,
         };
         let name = name.split('(').next().unwrap_or(name);
+        if WRITER_ONLY_OBJECTS.contains(&name) {
+            continue;
+        }
         if !have.exists(params![name]).map_err(st)? {
             return Err(wicked_estate_core::Error::Invalid(format!(
                 "the graph has no {name}: its schema predates this build"
@@ -8397,6 +8409,24 @@ mod tests {
         assert!(!old.join("g.db-shm").exists(), "refusing it created a -shm");
         assert!(listing(&old) == before, "refusing it changed the directory");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// wicked-estate#601: each writer-only name is an object a fresh graph has, so a rename in
+    /// the schema cannot leave the exemption naming nothing while the renamed object refuses.
+    #[test]
+    fn writer_only_objects_are_schema_objects_601() {
+        let fresh = SqliteStore::in_memory().unwrap();
+        for name in WRITER_ONLY_OBJECTS {
+            let n: i64 = fresh
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name = ?1",
+                    params![name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{name}");
+        }
     }
 
     /// wicked-crew#1497: a graph this build wrote (empty or not) passes the read-only currency
