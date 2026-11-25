@@ -157,6 +157,210 @@ fn fts_rowid_migrated(conn: &Connection) -> Result<bool> {
     .map_err(st)
 }
 
+/// Meta key (#589): the FTS state ([`fts_fingerprint`]) at which every `nodes_fts` row was last
+/// verified keyed by its node's sid. An open whose FTS state is still that one skips the row check.
+/// Any write that changes what the check reads besides `nodes_fts` (a node inserted or deleted, a
+/// node's sid or a symbol's text changed) deletes it in the writing statement's own transaction
+/// ([`FTS_STAMP_TRIGGERS`]). While a writer open checks, it holds a
+/// pending nonce ([`mark_fts_pending`]) that such a write deletes the same way.
+const FTS_VERIFIED_KEY: &str = "fts_verified";
+
+/// (#589) The triggers that delete the stamp ([`FTS_VERIFIED_KEY`]) on every write that changes
+/// what [`fts_rowid_migrated`] reads besides `nodes_fts`: a node inserted or deleted (the counts),
+/// a node's sid or a symbol's text changed (the keys). SQLite runs a schema's triggers for every
+/// binary that writes the store, older ones too, inside the write's own transaction, so a node
+/// written without its FTS row (or a crash between the two) never leaves a stamp behind. Other
+/// columns are not watched: a re-index rewrites them on every node, and they are not what the
+/// check reads. Ordinary tables only: a trigger on
+/// an FTS5 shadow table makes the schema unreadable to a defensive client (#570). A `nodes_fts`
+/// write itself changes [`fts_fingerprint`].
+const FTS_STAMP_TRIGGERS: &[(&str, &str)] = &[
+    ("fts_verified_on_node_insert", "AFTER INSERT ON nodes"),
+    ("fts_verified_on_node_delete", "AFTER DELETE ON nodes"),
+    (
+        "fts_verified_on_node_update",
+        "AFTER UPDATE OF symbol ON nodes",
+    ),
+    ("fts_verified_on_symbol_delete", "AFTER DELETE ON symbols"),
+    (
+        "fts_verified_on_symbol_update",
+        "AFTER UPDATE OF sym ON symbols",
+    ),
+];
+
+/// Create the [`FTS_STAMP_TRIGGERS`] a store lacks (#589). Writer opens only: a schema write.
+fn install_fts_stamp_triggers(conn: &Connection) -> Result<()> {
+    for (name, on) in FTS_STAMP_TRIGGERS {
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS {name} {on} \
+             BEGIN DELETE FROM meta WHERE k = '{FTS_VERIFIED_KEY}'; END"
+        ))
+        .map_err(st)?;
+    }
+    Ok(())
+}
+
+/// The FTS state (#589): FTS5's averages record (`nodes_fts_data` id 1: the row count and token
+/// totals) and its structure record (id 10, which carries a write counter every flush raises), as
+/// hex, and the schema's version. Two rowid reads and a header read. Every commit that writes a
+/// token to `nodes_fts`, by any build, changes it (a rewrite of the same text too); a rollback or
+/// a read does not. A `DROP` and re-`CREATE` of the table (the keyed rebuilds, #420 and later)
+/// resets the counter but changes the schema version, as does a dropped stamp trigger. FTS5's own
+/// `rebuild` command also resets the counter; no build issues it, and it keeps every rowid. A row
+/// rewrite that carries no token changes none of it, and is not caught: the only read of
+/// `nodes_fts` is a `MATCH` (`find_symbols`), which such a row never answers
+/// (`symbol` is UNINDEXED), so it gives no wrong hit, before or after its node is erased. `None`
+/// when a record is absent.
+fn fts_fingerprint(conn: &Connection) -> Result<Option<String>> {
+    let mut stmt = conn
+        .prepare_cached("SELECT block FROM nodes_fts_data WHERE id IN (1, 10) ORDER BY id")
+        .map_err(st)?;
+    let blocks: Vec<Vec<u8>> = stmt
+        .query_map([], |r| r.get(0))
+        .map_err(st)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(st)?;
+    if blocks.len() != 2 {
+        return Ok(None);
+    }
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let schema: i64 = conn
+        .query_row("PRAGMA schema_version", [], |r| r.get(0))
+        .map_err(st)?;
+    Ok(Some(format!(
+        "{}.{}.{schema}",
+        hex(&blocks[0]),
+        hex(&blocks[1])
+    )))
+}
+
+/// The stamped FTS state ([`FTS_VERIFIED_KEY`]), if any.
+fn fts_stamp(conn: &Connection) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT v FROM meta WHERE k = ?1",
+        params![FTS_VERIFIED_KEY],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(st)
+}
+
+/// Whether the rows were verified keyed at exactly the FTS state now (#589): O(log n).
+fn fts_stamped(conn: &Connection) -> Result<bool> {
+    let Some(now) = fts_fingerprint(conn)? else {
+        return Ok(false);
+    };
+    Ok(fts_stamp(conn)?.as_deref() == Some(now.as_str()))
+}
+
+/// Record the FTS state now as verified (#589), inside the caller's write transaction, whose rows
+/// are keyed. FTS5 writes its pending changes out on a savepoint, so the state read is the one the
+/// commit leaves. A state already stamped writes nothing (a read-only handle's batch).
+fn stamp_fts(conn: &Connection) -> Result<()> {
+    conn.execute_batch("SAVEPOINT fts_stamp; RELEASE fts_stamp")
+        .map_err(st)?;
+    let now = fts_fingerprint(conn)?;
+    if fts_stamp(conn)? == now {
+        return Ok(());
+    }
+    match now {
+        Some(now) => conn.execute(
+            "INSERT OR REPLACE INTO meta(k, v) VALUES(?1, ?2)",
+            params![FTS_VERIFIED_KEY, now],
+        ),
+        None => conn.execute("DELETE FROM meta WHERE k = ?1", params![FTS_VERIFIED_KEY]),
+    }
+    .map(|_| ())
+    .map_err(st)
+}
+
+/// (#589) Under the write lock, before a writer open's full row check: install the stamp
+/// triggers and hold a pending nonce in the stamp's place, unique to this check. A write to
+/// `nodes` or `symbols` from here on deletes it ([`FTS_STAMP_TRIGGERS`]), so [`settle_fts`] can
+/// tell whether one happened since. Returns the nonce.
+fn mark_fts_pending(conn: &Connection) -> Result<String> {
+    static CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let nonce = format!(
+        "pending:{}:{nanos}:{}",
+        std::process::id(),
+        CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
+    let res = install_fts_stamp_triggers(conn).and_then(|()| {
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(k, v) VALUES(?1, ?2)",
+            params![FTS_VERIFIED_KEY, nonce],
+        )
+        .map(|_| ())
+        .map_err(st)
+    });
+    match res {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(st)?,
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
+    }
+    Ok(nonce)
+}
+
+/// What a full row check saw (#589): the FTS state, the stamp's value (a check's nonce), and
+/// whether every row was keyed.
+struct FtsCheck {
+    state: Option<String>,
+    stamp: Option<String>,
+    keyed: bool,
+}
+
+/// The full row check ([`fts_rowid_migrated`]), the FTS state it covers and the stamp, read in one
+/// snapshot (#589).
+fn fts_check_snapshot(conn: &Connection) -> Result<FtsCheck> {
+    conn.execute_batch("BEGIN").map_err(st)?;
+    let res = (|| -> Result<FtsCheck> {
+        Ok(FtsCheck {
+            state: fts_fingerprint(conn)?,
+            stamp: fts_stamp(conn)?,
+            keyed: fts_rowid_migrated(conn)?,
+        })
+    })();
+    if res.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+        return res;
+    }
+    conn.execute_batch("COMMIT").map_err(st)?;
+    res
+}
+
+/// Under the write lock (#589): when the snapshot (`seen`) found the rows keyed, its check's
+/// `nonce` still holds the stamp's place (no write to `nodes` or `symbols` since) and the FTS state
+/// is still the one it checked, stamp it. Otherwise another writer wrote since: check again,
+/// rebuild rows not keyed (#420), and stamp the state that leaves.
+fn settle_fts(conn: &Connection, nonce: &str, seen: &FtsCheck) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
+    let res = (|| -> Result<()> {
+        install_fts_stamp_triggers(conn)?;
+        let unchanged = seen.keyed
+            && seen.stamp.as_deref() == Some(nonce)
+            && fts_stamp(conn)?.as_deref() == Some(nonce)
+            && fts_fingerprint(conn)? == seen.state;
+        if !unchanged && !fts_rowid_migrated(conn)? {
+            rebuild_fts_all(conn)?;
+        }
+        stamp_fts(conn)
+    })();
+    match res {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(st),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 /// Drop the 0.35.x shadow-table guard trigger when a store still has it (#570). Writer opens only:
 /// it is a schema write, and a read-only reader using this build is not defensive, so it can
 /// read the store either way.
@@ -182,24 +386,17 @@ fn drop_legacy_fts_guard(conn: &Connection) -> Result<()> {
 /// ([`SqliteStore::open`] / `in_memory`) and the read-only currency check, which refuses a graph
 /// that would need the rebuild: reads join on `symbol` text, so a plain read-only opener of an
 /// unmigrated store still answers right.
+///
+/// A store verified at its FTS state now ([`fts_stamped`], #589) skips the row check: two rowid
+/// reads. Otherwise a pending nonce takes the stamp's place ([`mark_fts_pending`]), the check runs
+/// outside the write lock ([`fts_check_snapshot`]), and [`settle_fts`] stamps or rebuilds under it.
 fn migrate_fts_rowids(conn: &Connection) -> Result<()> {
-    if fts_rowid_migrated(conn)? {
+    if fts_stamped(conn)? {
         return Ok(());
     }
-    conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
-    let res = (|| -> Result<()> {
-        if fts_rowid_migrated(conn)? {
-            return Ok(());
-        }
-        rebuild_fts_all(conn)
-    })();
-    match res {
-        Ok(()) => conn.execute_batch("COMMIT").map_err(st),
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
-    }
+    let nonce = mark_fts_pending(conn)?;
+    let seen = fts_check_snapshot(conn)?;
+    settle_fts(conn, &nonce, &seen)
 }
 
 /// Schema objects only writes touch (wicked-estate#601): no read path names them, so a graph
@@ -254,12 +451,23 @@ fn schema_objects_present(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// (#589) The read-only check's refusal of FTS rows not all keyed by their node's sid: the graph
+/// awaits a writer's #420 rebuild, which a read-only check never runs.
+const FTS_NOT_KEYED: &str = "the FTS rows are not all keyed by their node's sid";
+
 /// The read-only currency check behind [`SqliteStore::open_readonly_current`]. Its error names
 /// what is missing: a schema object, or the columns this build's schema has that the graph lacks.
 fn check_current(conn: &Connection) -> Result<()> {
     schema_objects_present(conn)
         .and_then(|()| migrate_schema(conn))
-        .and_then(|()| migrate_fts_rowids(conn))
+        .and_then(|()| {
+            // A pure read (#589): the stamp or the full row check, never the rebuild's write.
+            if fts_stamped(conn)? || fts_rowid_migrated(conn)? {
+                Ok(())
+            } else {
+                Err(wicked_estate_core::Error::Invalid(FTS_NOT_KEYED.into()))
+            }
+        })
         .map_err(|e| {
             let missing = missing_columns(conn);
             if missing.is_empty() {
@@ -401,7 +609,8 @@ fn wanted_a_write(e: &Error) -> bool {
 /// private copy of the database and its `-wal` in a fresh `0700` temp directory, so SQLite's
 /// sidecars are created there and never beside the graph (wicked-estate#506). The originals are
 /// only read, as plain files. `Some(Err)` only on evidence that the graph's schema predates this
-/// build (an object or a column it lacks, or a migration that wants to write); anything else that goes wrong with the copy (no temp
+/// build (an object or a column it lacks, a migration that wants to write, or FTS rows that await
+/// a writer's rebuild, #589); anything else that goes wrong with the copy (no temp
 /// space, a temp directory that is the graph's own, a copy SQLite cannot open) is `None`, and the
 /// ordinary open decides. A directory a killed process left behind is removed by the next check
 /// once it is ten minutes old.
@@ -447,7 +656,8 @@ fn check_private_copy(real: &std::path::Path) -> Option<Result<()>> {
         Err(e)
             if matches!(schema_objects_present(&conn), Err(Error::Invalid(_)))
                 || !missing_columns(&conn).is_empty()
-                || wanted_a_write(&e) =>
+                || wanted_a_write(&e)
+                || e.to_string().contains(FTS_NOT_KEYED) =>
         {
             Some(Err(e))
         }
@@ -852,6 +1062,11 @@ pub struct SqliteStore {
     /// most every [`GUARD_RECHECK`], so a long-lived reader sees a migration another process
     /// ran.
     guard: std::cell::Cell<Option<(std::time::Instant, bool)>>,
+    /// The open batch began on a verified FTS state ([`fts_stamped`], #589): its commit restamps.
+    fts_batch_verified: bool,
+    /// The open batch wrote nodes without their FTS rows ([`SqliteStore::upsert_nodes_no_fts`],
+    /// #589): its commit checks every row before it restamps.
+    fts_owed: bool,
 }
 
 /// How often a reader re-reads the redaction epoch (see [`SqliteStore::redaction_pending`]).
@@ -1028,6 +1243,11 @@ impl SqliteStore {
     /// `symbols`/`nodes` split in schema.sql), so it survives process restarts and a multi-run
     /// reindex. The bump therefore fires iff the sid HAD a node before and has none now — a true reuse.
     fn upsert_nodes_inner(&mut self, nodes: &[Node], with_fts: bool) -> Result<()> {
+        if !with_fts && !nodes.is_empty() {
+            // #589: these nodes have no FTS rows until the bulk rebuild, so this batch's commit
+            // checks the rows before it restamps (the node writes delete the stamp themselves).
+            self.fts_owed = true;
+        }
         // Secret backstop (#405): token shapes in signatures/docs/metadata never reach the row,
         // the contribution record or the FTS index (both derive from this slice).
         let nodes =
@@ -1332,6 +1552,8 @@ impl SqliteStore {
             in_batch: false,
             history_enabled,
             guard: std::cell::Cell::new(None),
+            fts_batch_verified: false,
+            fts_owed: false,
         })
     }
 
@@ -1379,6 +1601,8 @@ impl SqliteStore {
             in_batch: false,
             history_enabled,
             guard: std::cell::Cell::new(None),
+            fts_batch_verified: false,
+            fts_owed: false,
         })
     }
 
@@ -1509,6 +1733,8 @@ impl SqliteStore {
             in_batch: false,
             history_enabled: false,
             guard: std::cell::Cell::new(None),
+            fts_batch_verified: false,
+            fts_owed: false,
         })
     }
 
@@ -1949,6 +2175,7 @@ impl SqliteStore {
             return Ok(());
         }
         self.in_batch = false;
+        self.fts_owed = false;
         if self.conn.is_autocommit() {
             return Ok(());
         }
@@ -3627,12 +3854,24 @@ impl GraphWrite for SqliteStore {
         if !self.in_batch {
             self.conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
             self.in_batch = true;
+            // #589: a batch that begins on a verified FTS state restamps at its commit.
+            self.fts_batch_verified = fts_stamped(&self.conn).unwrap_or(false);
+            self.fts_owed = false;
         }
         Ok(())
     }
 
     fn commit_batch(&mut self) -> Result<()> {
         if self.in_batch {
+            // #589: this build's own writes keep the rows keyed, so a batch that began verified
+            // (under its write lock) leaves a verified state. One that wrote nodes without their
+            // FTS rows (an index run, its bulk FTS rebuild after) checks every row first. Best
+            // effort: a stamp not written sends the next open to the full row check.
+            if self.fts_batch_verified
+                && (!self.fts_owed || fts_rowid_migrated(&self.conn).unwrap_or(false))
+            {
+                let _ = stamp_fts(&self.conn);
+            }
             self.conn.execute_batch("COMMIT").map_err(st)?;
             self.in_batch = false;
         }
@@ -9742,5 +9981,381 @@ mod tests {
             "re-extracting one file cost {large} op-ticks next to 10k co-located FTS rows vs \
              {small} next to 1k: FTS maintenance scales with other repos' rows (#420)"
         );
+    }
+
+    // ── #589: the open-time FTS check is O(log n) on a verified store ────────
+
+    /// VM op-ticks `f` costs on `conn` (`Connection::progress_handler`, as the #420 gate counts).
+    fn op_ticks(conn: &Connection, f: impl FnOnce(&Connection)) -> u64 {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let ops = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&ops);
+        conn.progress_handler(
+            1,
+            Some(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        f(conn);
+        conn.progress_handler(0, None::<fn() -> bool>);
+        ops.load(Ordering::Relaxed)
+    }
+
+    /// #589: on a store this build verified and then wrote in a batched session (an index run's
+    /// shape: skip-FTS nodes plus the bulk FTS rebuild, then a re-extract of one file), the FTS
+    /// check a writer open runs and the read-only currency check each cost the same at 10k nodes
+    /// as at 1k. The full row check (#571) reads every FTS row: 10x the rows, ~10x the ops.
+    #[test]
+    fn a_verified_stores_open_time_fts_check_does_not_grow_with_its_rows_589() {
+        fn costs(nodes: usize) -> (u64, u64) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("flat.db");
+            {
+                let mut store = SqliteStore::open(&path).unwrap();
+                let all: Vec<Node> = (0..nodes)
+                    .map(|i| fts_node(&format!("n{i}"), &format!("f/{}.rs", i / 100)))
+                    .collect();
+                let files: Vec<String> = (0..nodes.div_ceil(100))
+                    .map(|f| format!("f/{f}.rs"))
+                    .collect();
+                store.begin_batch().unwrap();
+                store.upsert_nodes_no_fts(&all).unwrap();
+                store
+                    .rebuild_fts_for_files(&files.iter().map(String::as_str).collect::<Vec<_>>())
+                    .unwrap();
+                store.commit_batch().unwrap();
+                store.begin_batch().unwrap();
+                store.remove_file("f/0.rs").unwrap();
+                store.upsert_nodes(&all[..100]).unwrap();
+                store.commit_batch().unwrap();
+            }
+            let writer = Connection::open(&path).unwrap();
+            let w = op_ticks(&writer, |c| migrate_fts_rowids(c).unwrap());
+            drop(writer);
+            let ro = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let r = op_ticks(&ro, |c| check_current(c).unwrap());
+            (w, r)
+        }
+        let (w1, r1) = costs(1_000);
+        let (w10, r10) = costs(10_000);
+        assert!(
+            w10 < w1 * 2,
+            "the writer open's FTS check cost {w10} op-ticks at 10k nodes vs {w1} at 1k (#589)"
+        );
+        assert!(
+            r10 < r1 * 2,
+            "the read-only currency check cost {r10} op-ticks at 10k nodes vs {r1} at 1k (#589)"
+        );
+    }
+
+    /// The `(rowid, symbol)` of every FTS row, by rowid.
+    fn fts_rows(conn: &Connection) -> Vec<(i64, String)> {
+        let mut stmt = conn
+            .prepare("SELECT rowid, symbol FROM nodes_fts ORDER BY rowid")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// A verified store with nodes `a` (sid 1) and `c` (sid 5) in f.rs and `b` (sid 3) in g.rs:
+    /// sids 2 and 4 are edge-only symbols, so automatic rowids cannot pass for sids.
+    fn verified_abc(path: &std::path::Path) {
+        {
+            let mut store = SqliteStore::open(path).unwrap();
+            store.upsert_nodes(&[fts_node("a", "f.rs")]).unwrap();
+            store.intern("gap1").unwrap();
+            store.upsert_nodes(&[fts_node("b", "g.rs")]).unwrap();
+            store.intern("gap2").unwrap();
+            store.upsert_nodes(&[fts_node("c", "f.rs")]).unwrap();
+        }
+        // A writer open of this build checks the rows (and may record that it did).
+        let store = SqliteStore::open(path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(
+            fts_rows(&store.conn),
+            vec![(1, "a".into()), (3, "b".into()), (5, "c".into())],
+            "fixture: sids 1, 3 and 5"
+        );
+    }
+
+    /// #589, the counterexample that sank the top-rowid fingerprint: an OLDER binary re-indexes
+    /// f.rs (its FTS rows deleted by symbol text, re-inserted with automatic rowids), which puts
+    /// the top node back on its own sid and `a` on a gap: rows (3,b) (4,a) (5,c). The highest
+    /// rowid, its symbol and the row count all match the verified store. The read-only check
+    /// refuses it (without reaching a write), the next writer open rebuilds, and an erasure of
+    /// `a` afterwards leaves none of its text searchable.
+    #[test]
+    fn an_older_writers_reindex_that_restores_the_top_row_is_still_rebuilt_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("older-reindex.db");
+        verified_abc(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DELETE FROM nodes_fts WHERE symbol IN ('a', 'c'); \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) \
+                   VALUES('a', 'a', '', 'oldbinarytoken'); \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES('c', 'c', '', 'docc');",
+            )
+            .unwrap();
+            assert_eq!(
+                fts_rows(&conn),
+                vec![(3, "b".into()), (4, "a".into()), (5, "c".into())],
+                "fixture: the older writer's rows"
+            );
+        }
+        let err = SqliteStore::open_readonly_current(&path)
+            .err()
+            .expect("rows not keyed by sid await a writer's rebuild");
+        assert!(err.to_string().contains("predates this build"), "{err}");
+        assert!(
+            err.to_string().contains("not all keyed"),
+            "the read-only check says why, never a failed write: {err}"
+        );
+        let mut store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        store.remove_nodes(&[sym("a")]).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "oldbinarytoken"), Vec::<String>::new());
+        assert_eq!(fts_hits(&store, "doca"), Vec::<String>::new());
+        drop(store);
+        assert!(SqliteStore::open_readonly_current(&path).is_ok());
+    }
+
+    /// #589: an older binary deleting a non-top FTS row (the top row, the count of nodes and the
+    /// highest sid unchanged) is caught on the next open and rebuilt.
+    #[test]
+    fn an_older_writers_delete_of_a_lower_fts_row_is_still_rebuilt_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("older-delete.db");
+        verified_abc(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("DELETE FROM nodes_fts WHERE symbol = 'a'")
+                .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "doca"), vec!["a".to_string()]);
+    }
+
+    /// #589: nodes this build wrote without their FTS rows (the skip-FTS path) and committed
+    /// before the bulk FTS rebuild ran (a run cut short) are not taken as verified by the next
+    /// open: it rebuilds them into search.
+    #[test]
+    fn skip_fts_nodes_committed_without_their_rebuild_are_rebuilt_on_the_next_open_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skip-fts.db");
+        verified_abc(&path);
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            store.begin_batch().unwrap();
+            store.upsert_nodes_no_fts(&[fts_node("d", "h.rs")]).unwrap();
+            store.commit_batch().unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "docd"), vec!["d".to_string()]);
+    }
+
+    /// #589: an older binary's write between the full row check and the stamp. The stamp is only
+    /// ever written for a state that was checked: here the state changed under the check, so the
+    /// write lock's re-check sees the older writer's row and rebuilds before stamping.
+    #[test]
+    fn an_older_write_between_the_check_and_the_stamp_is_checked_again_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("between.db");
+        verified_abc(&path);
+        {
+            // This build's own autocommit write: its node write deletes the stamp, so the next
+            // open runs the full check.
+            let mut store = SqliteStore::open(&path).unwrap();
+            store.upsert_nodes(&[fts_node("b", "g.rs")]).unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        assert!(!fts_stamped(&conn).unwrap(), "fixture: the stamp is gone");
+        let nonce = mark_fts_pending(&conn).unwrap();
+        let seen = fts_check_snapshot(&conn).unwrap();
+        assert!(seen.keyed, "fixture: the rows are keyed when checked");
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "DELETE FROM nodes_fts WHERE symbol = 'a'; \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) \
+                   VALUES('a', 'a', '', 'oldbinarytoken');",
+            )
+            .unwrap();
+        }
+        settle_fts(&conn, &nonce, &seen).unwrap();
+        assert!(
+            fts_rowid_migrated(&conn).unwrap(),
+            "rebuilt, not stamped as checked"
+        );
+        assert!(fts_stamped(&conn).unwrap(), "stamped at the rebuilt state");
+        drop(conn);
+        let store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "oldbinarytoken"), Vec::<String>::new());
+        assert_eq!(fts_hits(&store, "doca"), vec!["a".to_string()]);
+    }
+
+    /// #589 (review r1): a node written without its FTS row between the full row check and the
+    /// stamp (another writer's skip-FTS write, its bulk rebuild not run) leaves the FTS state as it
+    /// was, but its node write deletes the check's nonce: the write lock's re-check sees the
+    /// missing row and rebuilds before stamping.
+    #[test]
+    fn a_node_written_between_the_check_and_the_stamp_is_checked_again_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node-between.db");
+        verified_abc(&path);
+        let mut other = SqliteStore::open(&path).unwrap();
+        other.upsert_nodes(&[fts_node("b", "g.rs")]).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let nonce = mark_fts_pending(&conn).unwrap();
+        let seen = fts_check_snapshot(&conn).unwrap();
+        assert!(seen.keyed, "fixture: the rows are keyed when checked");
+        let state = fts_fingerprint(&conn).unwrap();
+        other.upsert_nodes_no_fts(&[fts_node("d", "h.rs")]).unwrap();
+        drop(other);
+        assert_eq!(
+            fts_fingerprint(&conn).unwrap(),
+            state,
+            "fixture: the FTS state did not move"
+        );
+        settle_fts(&conn, &nonce, &seen).unwrap();
+        assert!(
+            fts_rowid_migrated(&conn).unwrap(),
+            "rebuilt before the stamp"
+        );
+        drop(conn);
+        let store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "docd"), vec!["d".to_string()]);
+    }
+
+    /// #589 (review r1): a node committed without its FTS row outside a batch (a crash between
+    /// the two writes, or the skip-FTS path cut short) deletes the stamp in its own transaction:
+    /// the next open runs the full check and rebuilds it into search.
+    #[test]
+    fn a_node_committed_alone_deletes_the_stamp_with_it_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node-alone.db");
+        verified_abc(&path);
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            store.upsert_nodes_no_fts(&[fts_node("d", "h.rs")]).unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            fts_stamp(&conn).unwrap(),
+            None,
+            "the node write took the stamp"
+        );
+        drop(conn);
+        let store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "docd"), vec!["d".to_string()]);
+    }
+
+    /// #589 (review r1): a keyed rebuild by a build between #420 and #571 drops and re-creates
+    /// `nodes_fts`, which resets FTS5's write counter. A pre-#420 writer's re-index of `a` after it
+    /// (a delete by symbol text and an insert on an automatic rowid, each its own autocommit)
+    /// brings both FTS5 records back to the stamped bytes with `a` off its sid. The re-created
+    /// table moved the schema version, so the stamp no longer holds: the read-only check refuses
+    /// the store and the next writer open rebuilds it.
+    #[test]
+    fn a_rebuild_that_resets_the_fts_counter_ends_the_stamp_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reset.db");
+        verified_abc(&path);
+        let records = |c: &Connection| {
+            let state = fts_fingerprint(c).unwrap().expect("both FTS5 records");
+            state.rsplit_once('.').unwrap().0.to_string()
+        };
+        let conn = Connection::open(&path).unwrap();
+        assert!(fts_stamped(&conn).unwrap(), "fixture: verified");
+        let stamped = records(&conn);
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        rebuild_fts_all(&conn).unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        conn.execute_batch(
+            "DELETE FROM nodes_fts WHERE symbol = 'a'; \
+             INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES('a', 'a', '', 'doca');",
+        )
+        .unwrap();
+        assert_eq!(
+            records(&conn),
+            stamped,
+            "fixture: FTS5's records replay the stamped bytes"
+        );
+        assert!(
+            !fts_rowid_migrated(&conn).unwrap(),
+            "fixture: `a` is off its sid"
+        );
+        assert!(
+            fts_stamp(&conn).unwrap().is_some(),
+            "fixture: the meta row is kept"
+        );
+        assert!(
+            !fts_stamped(&conn).unwrap(),
+            "a re-created table is not the one verified"
+        );
+        drop(conn);
+        let err = SqliteStore::open_readonly_current(&path)
+            .err()
+            .expect("the read-only check refuses rows off their sids");
+        assert!(err.to_string().contains("not all keyed"), "{err}");
+        let store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+    }
+
+    /// #589 (review r1): a batch that wrote nodes without their FTS rows and rebuilt only some of
+    /// their files checks every row at its commit: rows still missing leave the store unverified,
+    /// and the next open rebuilds them into search.
+    #[test]
+    fn a_partial_bulk_rebuild_leaves_the_store_unverified_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.db");
+        verified_abc(&path);
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            store.begin_batch().unwrap();
+            store
+                .upsert_nodes_no_fts(&[fts_node("d", "h.rs"), fts_node("e", "i.rs")])
+                .unwrap();
+            store.rebuild_fts_for_files(&["h.rs"]).unwrap();
+            store.commit_batch().unwrap();
+            assert!(!fts_stamped(&store.conn).unwrap(), "e has no FTS row yet");
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "doce"), vec!["e".to_string()]);
+        assert!(fts_stamped(&store.conn).unwrap());
+    }
+
+    /// #589: a batch on a read-only handle (#532) leaves the stamp as it was: its commit writes
+    /// nothing, and the store stays verified.
+    #[test]
+    fn a_read_only_batch_writes_no_stamp_589() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ro-batch.db");
+        verified_abc(&path);
+        let before = fts_stamp(&Connection::open(&path).unwrap()).unwrap();
+        assert!(
+            before.is_some(),
+            "fixture: verified_abc's open stamped the store"
+        );
+        let mut ro = SqliteStore::open_readonly(&path).unwrap();
+        ro.begin_batch().unwrap();
+        assert_eq!(fts_hits(&ro, "docb"), vec!["b".to_string()]);
+        ro.commit_batch().unwrap();
+        drop(ro);
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(fts_stamp(&conn).unwrap(), before);
+        assert!(fts_stamped(&conn).unwrap());
     }
 }
