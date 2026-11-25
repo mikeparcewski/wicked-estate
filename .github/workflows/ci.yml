@@ -96,6 +96,15 @@ jobs:
         run: |
           cargo test -p wicked-estate --features codegraph-fixture --lib codegraph::
           cargo test -p wicked-estate --features codegraph-fixture --test codegraph_recorded_cli
+      # A build without debug assertions refuses the feature (compile_error!), so no optimized
+      # binary can take codegraph's facts from injected SQL.
+      - name: a release build refuses --features codegraph-fixture
+        shell: bash
+        run: |
+          if cargo check --release -p wicked-estate --features codegraph-fixture 2> "$RUNNER_TEMP/release-check.log"; then
+            echo "a release build accepted codegraph-fixture"; exit 1
+          fi
+          grep -q "codegraph-fixture feature is for test builds only" "$RUNNER_TEMP/release-check.log"
       # The gate store (#584 HOLD gate b): the coverage fixture indexed with `--codegraph` by this
       # exact head, the recorded codegraph database standing in for the run.
       - name: build the codegraph gate store

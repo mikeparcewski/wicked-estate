@@ -19,6 +19,16 @@ fn coverage_sql() -> String {
         .unwrap_or_else(|e| panic!("the gate fixture {}: {e}", path.display()))
 }
 
+/// The gate store's input: the recording, then the synthetic rows for the kinds codegraph never
+/// emits (`synthetic-kinds.sql`, labelled `resolvedBy: synthetic`), as
+/// `scripts/codegraph-fixture-store.py store` applies them.
+fn gate_sql() -> String {
+    let path = coverage_dir().join("synthetic-kinds.sql");
+    let synthetic = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("the gate fixture {}: {e}", path.display()));
+    format!("{}\n{synthetic}", coverage_sql())
+}
+
 /// `src/ts/big.ts`, past codegraph's 1 MiB source cap: the bytes
 /// `scripts/codegraph-fixture-store.py grow` writes for regen.sh and the gate store. The recorded
 /// files row's size pins the two to each other.
@@ -87,6 +97,10 @@ fn the_gate_fixture_records_every_language_and_edge_kind_codegraph_emits_595() {
         .collect();
     assert_eq!(languages, want, "one file per language estate hands over");
 
+    assert!(
+        EMITTED.iter().all(|k| !NOT_EMITTED.contains(k)),
+        "a kind is either emitted or not"
+    );
     let kinds = rows(&conn, "SELECT DISTINCT kind FROM edges");
     let want: BTreeSet<String> = EMITTED.iter().map(|k| k.to_string()).collect();
     assert_eq!(kinds, want, "every kind codegraph emits");
@@ -144,7 +158,7 @@ fn index_coverage(tmp: &Path) -> (SqliteStore, usize) {
         languages: Vec::new(),
         timeout: Duration::from_secs(5),
     };
-    TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = Some(coverage_sql()));
+    TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = Some(gate_sql()));
     crate::index_path_with(&mut store, &root, None, Some(&cfg)).unwrap();
     TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = None);
     let dropped = LAST_DROPPED.with(|c| c.get()).expect("the run counted");
@@ -178,16 +192,44 @@ fn the_gate_store_holds_each_shape_the_import_writes_595() {
         EdgeKind::References,
         EdgeKind::Instantiates,
         EdgeKind::Other("decorates".into()),
+        // From synthetic-kinds.sql: the kinds codegraph 1.6.4 never emits.
+        EdgeKind::Overrides,
+        EdgeKind::Returns,
+        EdgeKind::HasType,
+        EdgeKind::Other("exports".into()),
     ] {
         assert!(kinds.contains(&format!("{k:?}")), "{k:?} in {kinds:?}");
     }
+    assert!(
+        bound
+            .iter()
+            .filter(|e| e.resolved_by == "codegraph:synthetic")
+            .count()
+            == 4,
+        "each synthetic row lands once, labelled"
+    );
     assert!(
         !edges
             .iter()
             .any(|e| e.kind == EdgeKind::Other("navigates".into())),
         "navigates points at a route node, which is not imported"
     );
-    assert!(dropped >= 1, "the navigates fact counts as not imported");
+    // Route nodes are not imported, so every fact with a route endpoint counts as not imported.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(&coverage_sql()).unwrap();
+    let route_facts: usize = conn
+        .query_row(
+            "SELECT count(*) FROM edges e JOIN nodes s ON s.id = e.source \
+             JOIN nodes t ON t.id = e.target WHERE s.kind = 'route' OR t.kind = 'route'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap() as usize;
+    assert!(route_facts >= 2, "navigates and the route's reference");
+    assert!(
+        dropped >= route_facts,
+        "not imported {dropped} counts the {route_facts} route facts"
+    );
 
     // Each language's file gets codegraph-bound edges.
     let mut by_ext: BTreeSet<String> = BTreeSet::new();

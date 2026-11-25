@@ -36,9 +36,13 @@ fn copy(from: &Path, to: &Path) {
 fn run(tmp: &Path, args: &[&std::ffi::OsStr]) -> Output {
     let home = tmp.join("home");
     std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(tmp.join("no-plugins")).unwrap();
     Command::new(env!("CARGO_BIN_EXE_wicked-estate"))
         .args(args)
         .env("WICKED_HOME", &home)
+        // No ambient extraction plugin changes what the recorded facts map onto.
+        .env("WICKED_ESTATE_PLUGINS", tmp.join("no-plugins"))
+        .env_remove("WICKED_ESTATE_PLUGIN_OVERRIDE")
         .env(
             "WICKED_ESTATE_CODEGRAPH_RECORDED",
             fixture_dir().join("codegraph-1.6.4.sql"),

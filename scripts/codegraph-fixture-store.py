@@ -7,7 +7,10 @@
 
     codegraph-fixture-store.py store <wicked-estate binary> <out dir>
         Index a copy of tests/fixtures/codegraph/coverage/repo with `--codegraph`, the recorded
-        codegraph database standing in for the run, into <out dir>/codegraph-gate.db. The binary
+        codegraph database standing in for the run, into <out dir>/codegraph-gate.db. The
+        recording is followed by synthetic-kinds.sql (the edge kinds codegraph 1.6.4 never emits,
+        labelled `resolvedBy: synthetic`), so the store holds every kind estate maps. No ambient
+        extraction plugin takes part (an empty plugin dir, no override). The binary
         must be a test build (`--features codegraph-fixture`); a release binary has no hook and
         the run fails here. Consumers' contract tests read the store through
         WICKED_CODEGRAPH_FIXTURE_STORE.
@@ -45,12 +48,22 @@ def store(binary: Path, out: Path) -> Path:
     home = out / "home"
     home.mkdir()
     db = out / "codegraph-gate.db"
+    plugins = out / "no-plugins"
+    plugins.mkdir()
+    recorded = out / "recorded.sql"
+    recorded.write_text(
+        (FIXTURE / "codegraph-1.6.4.sql").read_text(encoding="utf-8") + "\n"
+        + (FIXTURE / "synthetic-kinds.sql").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     env = {k: v for k, v in os.environ.items()
-           if k not in ("WICKED_ESTATE_DB", "WICKED_STORE_URL", "WICKED_RUNTIME", "WICKED_OTEL_ENDPOINT")}
+           if k not in ("WICKED_ESTATE_DB", "WICKED_STORE_URL", "WICKED_RUNTIME", "WICKED_OTEL_ENDPOINT",
+                        "WICKED_ESTATE_PLUGIN_OVERRIDE")}
     env["WICKED_HOME"] = str(home)
+    env["WICKED_ESTATE_PLUGINS"] = str(plugins)
     env["WICKED_ESTATE_EMIT_PROGRAM"] = "wicked-bus-absent-codegraph-gate"
     env["WICKED_ESTATE_EMIT_DEADLETTER"] = str(out / "emit.ndjson")
-    env["WICKED_ESTATE_CODEGRAPH_RECORDED"] = str(FIXTURE / "codegraph-1.6.4.sql")
+    env["WICKED_ESTATE_CODEGRAPH_RECORDED"] = str(recorded)
     run = subprocess.run(
         [str(binary), "index", str(tree), "--db", str(db), "--codegraph", str(out / "no-bundle")],
         capture_output=True, text=True, env=env, timeout=600,

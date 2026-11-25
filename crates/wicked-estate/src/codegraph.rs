@@ -745,6 +745,15 @@ fn file_verdict(snap: &Snapshot, raw: &str) -> Verdict {
     }
 }
 
+// estate#595: the recorded-SQL hook is for test builds. An optimized build with the feature (a
+// source install with `--all-features`, a stray `--features`) would take codegraph's facts from
+// whatever SQL the environment names, so it does not compile.
+#[cfg(all(feature = "codegraph-fixture", not(debug_assertions)))]
+compile_error!(
+    "the codegraph-fixture feature is for test builds only (estate#595): it lets recorded SQL \
+     stand in for codegraph, so a build without debug assertions refuses it"
+);
+
 #[cfg(any(test, feature = "codegraph-fixture"))]
 thread_local! {
     /// SQL that builds the codegraph database a test run reads instead of running codegraph;
