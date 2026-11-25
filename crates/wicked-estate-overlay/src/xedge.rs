@@ -244,12 +244,15 @@ pub struct XedgeReader {
 
 impl XedgeReader {
     /// Read an existing `xedge.db` without writing it: no schema, no `meta` row, no journal
-    /// switch, and a missing file is an error rather than created. For a caller that only reads
-    /// the links, such as the indexer's `CODEGRAPH-OFF` report (estate#597).
+    /// switch, and a missing file is an error rather than created. `path` may be a `file:` URI,
+    /// as [`XedgeStore::open`] accepts; a URI cannot widen the read-only open. For a caller that
+    /// only reads the links, such as the indexer's `CODEGRAPH-OFF` report (estate#597).
     pub fn open_read_only(path: &str) -> Result<Self> {
         let conn = Connection::open_with_flags(
             path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         )
         .map_err(map_err)?;
         Ok(Self {

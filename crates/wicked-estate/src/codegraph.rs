@@ -2086,8 +2086,29 @@ mod tests {
 
     const MINTED_POINT: &str = "ts-java . . . src/p/Shapes/Shapes#Point#";
 
-    /// A scratch xedge.db holding one memory `about` link on the minted `Point`.
-    fn xedge_about_point(tmp: &Path) -> String {
+    /// The nodes codegraph minted in the files `file` accepts.
+    fn minted_in(store: &SqliteStore, file: impl Fn(&str) -> bool) -> usize {
+        store
+            .all_nodes()
+            .unwrap()
+            .iter()
+            .filter(|n| {
+                file(&n.location.file)
+                    && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+            })
+            .count()
+    }
+
+    fn holds_point(store: &SqliteStore) -> bool {
+        store
+            .all_nodes()
+            .unwrap()
+            .iter()
+            .any(|n| n.symbol.0 == MINTED_POINT)
+    }
+
+    /// A scratch xedge.db and its open writer, holding one memory `about` link on `Point`.
+    fn xedge_about_point(tmp: &Path) -> (String, wicked_estate_overlay::XedgeStore) {
         let path = tmp.join("xedge.db").to_string_lossy().into_owned();
         let x = wicked_estate_overlay::XedgeStore::open(&path).unwrap();
         x.put_edge(&wicked_estate_overlay::XEdge::about(
@@ -2096,8 +2117,7 @@ mod tests {
             1,
         ))
         .unwrap();
-        drop(x);
-        path
+        (path, x)
     }
 
     /// Index with `xedge` as the run's xedge.db; the run's `CODEGRAPH-OFF` report, if any.
@@ -2117,17 +2137,26 @@ mod tests {
     #[test]
     fn switching_off_names_a_minted_node_an_xedge_links_to_597() {
         // A knowledge or memory `about` link lives in xedge.db, not the graph: the report must
-        // count it, and read the file without changing it.
+        // count it, and read the file without changing it. The writer stays open, so the link
+        // sits uncheckpointed in its WAL, as under a running MCP server.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = config(tmp.path());
         let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
         index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
-        let xedge = xedge_about_point(tmp.path());
+        let minted = minted_in(&store, |_| true);
+        assert!(minted > 0);
+        let (xedge, writer) = xedge_about_point(tmp.path());
         let before = std::fs::read(&xedge).unwrap();
         let report = index_reporting(&mut store, None, None, &xedge).expect("a report");
-        assert!(report.minted >= 1, "{report:?}");
+        assert_eq!(report.minted, minted, "{report:?}");
         assert_eq!(report.linked, vec![MINTED_POINT.to_string()], "{report:?}");
+        assert!(
+            report.line.ends_with(&format!(": {MINTED_POINT}")),
+            "{report:?}"
+        );
         assert_eq!(std::fs::read(&xedge).unwrap(), before, "xedge.db unchanged");
+        assert_eq!(writer.len().unwrap(), 1);
+        assert!(!holds_point(&store));
         // Outside tests the run reads the xedge.db the MCP server opens.
         let env = |vars: &'static [(&'static str, &'static str)]| {
             move |k: &str| {
@@ -2157,6 +2186,8 @@ mod tests {
         let cfg = config(tmp.path());
         let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
         index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
+        let minted = minted_in(&store, |f| f == "src/p/Shapes.java");
+        assert!(minted > 0);
         let fell_back = format!(
             "{FIXTURE_SQL}\nUPDATE files SET errors = '[{{\"message\":\"too big\",\"severity\":\"error\",\"code\":\"size_exceeded\"}}]', node_count = 0 WHERE path = 'src/p/Shapes.java';"
         );
@@ -2168,34 +2199,56 @@ mod tests {
             &missing.to_string_lossy(),
         )
         .expect("a report");
-        assert!(report.minted >= 1, "{report:?}");
+        assert_eq!(report.minted, minted, "{report:?}");
         assert_eq!(report.files, 1, "{report:?}");
         assert!(report.linked.is_empty(), "{report:?}");
         assert!(!missing.exists() && !missing.parent().unwrap().exists());
-        assert!(
-            !store
-                .all_nodes()
-                .unwrap()
-                .iter()
-                .any(|n| n.symbol.0 == MINTED_POINT)
-        );
+        assert!(!holds_point(&store));
+    }
+
+    /// `path` as an SQLite `file:` URI, on Windows too (`file:///C:/...`).
+    fn file_uri(path: &str) -> String {
+        let p = path.replace('\\', "/");
+        let lead = if p.starts_with('/') { "" } else { "/" };
+        format!("file://{lead}{p}")
     }
 
     #[test]
     fn narrowing_the_languages_reports_the_minted_nodes_that_leave_597() {
+        // The only outside link is a knowledge shape's typed link, and the MCP's xedge.db is
+        // named by a `file:` URI.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = config(tmp.path());
         let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
         index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
-        let xedge = xedge_about_point(tmp.path());
+        let minted = minted_in(&store, |f| f.ends_with(".java"));
+        assert!(minted > 0);
+        let path = tmp.path().join("xedge.db").to_string_lossy().into_owned();
+        let x = wicked_estate_overlay::XedgeStore::open(&path).unwrap();
+        x.put_typed(&wicked_estate_overlay::TypedXEdge {
+            source: wicked_estate_overlay::Endpoint::new("knowledge", "shape-597", 0),
+            target: wicked_estate_overlay::Endpoint::new("estate", MINTED_POINT, 1),
+            rel: "describes".into(),
+            owner: "shape-597".into(),
+            confidence: 1.0,
+            meta: "{}".into(),
+        })
+        .unwrap();
+        drop(x);
         let ts_only = CodegraphConfig {
             languages: vec!["typescript".into()],
             ..config(tmp.path())
         };
-        let report = index_reporting(&mut store, Some(&ts_only), Some(FIXTURE_SQL), &xedge)
-            .expect("a report");
-        assert!(report.minted >= 1, "{report:?}");
+        let report = index_reporting(
+            &mut store,
+            Some(&ts_only),
+            Some(FIXTURE_SQL),
+            &file_uri(&path),
+        )
+        .expect("a report");
+        assert_eq!(report.minted, minted, "{report:?}");
         assert_eq!(report.linked, vec![MINTED_POINT.to_string()], "{report:?}");
+        assert!(!holds_point(&store));
     }
 
     /// The fixture's `src/lib/util.ts` grown past codegraph's cap (`size_exceeded`, no nodes):
