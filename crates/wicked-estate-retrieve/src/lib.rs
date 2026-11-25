@@ -4150,7 +4150,10 @@ mod tests {
             ])
             .unwrap();
         let mut sited = make_call_edge("caller", "middle");
-        sited.location = Some(Location::new("src/a.rs", span(41)));
+        // A real site is bytes wide; `span()` here is zero-width, which `Edge::site` reads as none.
+        let mut at = span(41);
+        at.end_byte = 12;
+        sited.location = Some(Location::new("src/a.rs", at));
         store
             .upsert_edges(&[sited, make_call_edge("middle", "leaf")])
             .unwrap();

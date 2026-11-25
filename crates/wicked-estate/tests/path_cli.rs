@@ -463,7 +463,11 @@ fn hops_name_the_call_site_line_357() {
         .args(["index", ".", "--db", "graph.db"])
         .output()
         .expect("spawn index");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let doc = json_of(&path_in(&scratch, &["a", "b", "--json"]));
     let hops = doc["hops"].as_array().expect("hops");
@@ -480,5 +484,9 @@ fn hops_name_the_call_site_line_357() {
         .iter()
         .position(|l| l.contains("->"))
         .unwrap_or_else(|| panic!("a hop line: {text}"));
-    assert_eq!(lines.get(hop + 1).map(|l| l.trim()), Some("at src/a.rs:3"), "{text}");
+    assert_eq!(
+        lines.get(hop + 1).map(|l| l.trim()),
+        Some("at src/a.rs:3"),
+        "{text}"
+    );
 }
