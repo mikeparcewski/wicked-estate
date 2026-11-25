@@ -44,6 +44,8 @@
 //!   wicked-estate dead-code              [--json] [--db ...]
 //!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
 //!   wicked-estate graph-view [--limit N] [--include-tests] [--include-trivial] [--ignore <pat>] [--db ...]
+//!   wicked-estate convert <file>         [--max-bytes N] [--deadline-ms N]
+//!                                     one document to Markdown on stdout; stores nothing (#556)
 //!
 //! RetrievalTool-backed commands (see `tool_bridge::COMMANDS`; strict flags, `--help` per command):
 //!   wicked-estate traverse <symbol>      [--depth N] [--direction D] [--edge-kinds a,b] [--max-nodes N] [--json] [--db ...]
@@ -53,6 +55,7 @@
 //!                                     [--framework S] [--scope S] [--projects a,b] [--limit N] [--json] [--db ...]
 
 mod cli_flags;
+mod convert;
 mod cutoff;
 mod emit;
 mod scip_auto;
@@ -833,7 +836,20 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
     doc_convert::isolate_conversions();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `std::env::args` panics on an argument that is not UTF-8; refuse it instead (#556).
+    let args: Vec<String> = match std::env::args_os()
+        .skip(1)
+        .map(std::ffi::OsString::into_string)
+        .collect::<Result<_, _>>()
+    {
+        Ok(args) => args,
+        Err(_)
+            if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("convert")) =>
+        {
+            std::process::exit(convert::refuse_non_utf8_operand())
+        }
+        Err(bad) => anyhow::bail!("an argument is not valid UTF-8: {}", bad.to_string_lossy()),
+    };
     let (cmd, rest) = match args.split_first() {
         Some((c, r)) => (c.as_str(), r),
         None => ("help", &[][..]),
@@ -847,6 +863,19 @@ fn main() -> Result<()> {
         cli_flags::parse("version", rest, "").map_err(anyhow::Error::msg)?;
         println!("wicked-estate {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+    // (#556) One document to Markdown on stdout. Before the store resolves: it opens no graph,
+    // so a team runtime or a missing store never stands between a caller and a conversion, or
+    // its help.
+    if cmd == "convert" {
+        match cli_flags::parse("convert", rest, "").map_err(anyhow::Error::msg)? {
+            cli_flags::Parsed::Args(a) => std::process::exit(convert::run(&a)?),
+            _ => {
+                println!("usage:");
+                convert::print_usage();
+                return Ok(());
+            }
+        }
     }
 
     // The DEFAULT spec resolves through the WICKED_RUNTIME profile seam
@@ -3555,21 +3584,28 @@ fn main() -> Result<()> {
         //   wicked-estate changed-since <git-sha> [--json] [--db ...]
         "changed-since" => {
             let sha = args.required(0);
-            let output = std::process::Command::new("git")
-                .args(["diff", "--name-only", &format!("{sha}..HEAD")])
-                .output()
-                .context("git diff failed — is this a git repository?")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("git diff failed: {stderr}");
-            }
-            let changed_files: Vec<String> = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
+            let git = |git_args: &[&str]| -> Result<Vec<u8>> {
+                let output = std::process::Command::new("git")
+                    .args(git_args)
+                    .output()
+                    .context("git failed — is this a git repository?")?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    anyhow::bail!("git {} failed: {stderr}", git_args[0]);
+                }
+                Ok(output.stdout)
+            };
+            // `-z`: the paths raw, never C-quoted (a non-ASCII name would not match).
+            // `--no-relative`: top-level paths even under `diff.relative`, which the mapping needs.
+            let range = format!("{sha}..HEAD");
+            let git_paths: Vec<String> =
+                git(&["diff", "--name-only", "-z", "--no-relative", &range])?
+                    .split(|b| *b == 0)
+                    .map(|p| String::from_utf8_lossy(p).into_owned())
+                    .filter(|p| !p.is_empty())
+                    .collect();
             let json_out = args.switch("json");
-            if changed_files.is_empty() {
+            if git_paths.is_empty() {
                 if json_out {
                     println!("[]");
                 } else {
@@ -3581,6 +3617,31 @@ fn main() -> Result<()> {
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "changed-since")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
+            // (#352) git names paths from the repository's top level; the graph stores them from
+            // the indexed root, under `<label>/` in a labelled graph.
+            let toplevel = git(&["rev-parse", "--show-toplevel"])?;
+            // Only git's line terminator goes: whitespace can end a directory name.
+            let toplevel = String::from_utf8_lossy(&toplevel);
+            let toplevel = wicked_estate::repo_scope::git_line(&toplevel);
+            let (changed_files, outside) = wicked_estate::freshness::stored_paths_for_git(
+                &store,
+                &db,
+                Path::new(&toplevel),
+                &git_paths,
+            );
+            // Said on stderr in --json mode, so stdout stays the one array a caller parses.
+            let outside_line = (!outside.is_empty()).then(|| {
+                format!(
+                    "{} changed file(s) outside the indexed root(s), not in this graph: {}",
+                    outside.len(),
+                    outside
+                        .iter()
+                        .take(10)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            });
             let mut all_nodes: Vec<wicked_estate_core::Node> = Vec::new();
             for file in &changed_files {
                 let nodes = store.nodes_in_file(file).map_err(to_any)?;
@@ -3599,6 +3660,9 @@ fn main() -> Result<()> {
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&j)?);
+                if let Some(line) = outside_line {
+                    eprintln!("{line}");
+                }
             } else {
                 println!(
                     "{} symbol(s) in {} changed file(s) since {sha}:",
@@ -3610,6 +3674,9 @@ fn main() -> Result<()> {
                     for n in all_nodes.iter().filter(|n| n.location.file == *file) {
                         println!("    {:?} {}", n.kind, n.name);
                     }
+                }
+                if let Some(line) = outside_line {
+                    println!("{line}");
                 }
             }
         }
@@ -4439,6 +4506,7 @@ fn main() -> Result<()> {
             println!(
                 "    Evidence-envelope freshness read: \"what needs re-verification?\". A date is 00:00:00 UTC. Never-verified rows (last_verified=0) are always stale."
             );
+            convert::print_usage();
             println!(
                 "  wicked-estate fingerprint <name>   [--db ...]  # stable hex fingerprint for symbol"
             );
@@ -4965,6 +5033,8 @@ fn path_json(from: &str, to: &str, r: &wicked_estate_core::PathResult) -> serde_
                 "confidence": e.confidence.get(),
                 "provenance": &e.provenance,
                 "resolved_by": e.resolved_by,
+                // #357: the line where this hop happens (the MCP Path hop's field).
+                "site": e.site_json(),
             })
         })
         .collect();
@@ -5037,6 +5107,15 @@ fn write_path_text(
                     e.confidence.get(),
                     e.resolved_by
                 )?;
+                // #357: where the hop happens. One representative site per relationship.
+                if let Some(site) = e.site() {
+                    writeln!(
+                        out,
+                        "      at {}:{}",
+                        site.file,
+                        u64::from(site.span.start_line) + 1
+                    )?;
+                }
             }
         }
     } else {

@@ -273,7 +273,7 @@ pub fn git_subpath(root: &Path) -> Option<String> {
 /// One line of git's output without its terminator (`\n`; `\r\n` only on Windows, where a name
 /// cannot end in `\r`), every other character kept: on unix `meta\r` is a directory of its own
 /// (codex r2 on #401).
-fn git_line(raw: &str) -> &str {
+pub fn git_line(raw: &str) -> &str {
     let line = raw.strip_suffix('\n').unwrap_or(raw);
     if cfg!(windows) {
         line.strip_suffix('\r').unwrap_or(line)
