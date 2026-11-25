@@ -1040,7 +1040,9 @@ impl RetrievalTool for Path {
         "The ordered hops from one symbol to another — how A reaches B, not merely that it \
          does. Each hop carries its edge kind, confidence, provenance and resolving tier, and \
          both endpoints are denormalized (name, file, line), so an agent can name the \
-         intermediate functions and open only those files. Use this instead of reconstructing \
+         intermediate functions and open only those files. `site` is where the hop happens \
+         ({file, line_1based, representative: true}: one site per relationship, a caller that \
+         calls three times keeps one), or null when the edge carries no location. Use this instead of reconstructing \
          a route from TraverseGraph's edge list. `from` and `to` accept a symbol name or a \
          SymbolId. `found: false` is a PROVEN absence only when `depth_bounded` and \
          `node_bounded` are both false and `unresolved_on_frontier` is 0 (a positive count \
@@ -1196,7 +1198,10 @@ impl RetrievalTool for Path {
         }
         let mut hops_json: Vec<Value> = Vec::with_capacity(result.hops.len());
         for e in &result.hops {
-            hops_json.push(edge_json(store, e, &mut node_cache)?);
+            let mut hop = edge_json(store, e, &mut node_cache)?;
+            // #357: the line where this hop happens, not only the two declarations.
+            hop["site"] = e.site_json();
+            hops_json.push(hop);
         }
 
         let mut content = json!({
@@ -4129,6 +4134,45 @@ mod tests {
             assert!(!hop["provenance"].is_null());
             assert!(!hop["resolved_by"].is_null());
         }
+    }
+
+    /// #357: every hop carries the line where the relationship happens (the edge's location),
+    /// not only the two declarations; an edge with no location says `null`, never a guess.
+    #[test]
+    fn path_hops_carry_the_call_site_357() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("caller", "caller_fn", NodeKind::Function, "src/a.rs", 1),
+                make_node("middle", "middle_fn", NodeKind::Function, "src/b.rs", 10),
+                make_node("leaf", "leaf_fn", NodeKind::Function, "src/c.rs", 20),
+            ])
+            .unwrap();
+        let mut sited = make_call_edge("caller", "middle");
+        // A real site is bytes wide; `span()` here is zero-width, which `Edge::site` reads as none.
+        let mut at = span(41);
+        at.end_byte = 12;
+        sited.location = Some(Location::new("src/a.rs", at));
+        store
+            .upsert_edges(&[sited, make_call_edge("middle", "leaf")])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let res = Path
+            .invoke(&store, &json!({"from": "caller_fn", "to": "leaf_fn"}))
+            .unwrap();
+        let hops = res.content["hops"].as_array().unwrap();
+        assert_eq!(hops.len(), 2);
+        assert_eq!(
+            hops[0]["site"],
+            json!({"file": "src/a.rs", "line_1based": 42, "representative": true}),
+            "{}",
+            hops[0]
+        );
+        // Present and null: the key is the contract, the value says the edge has no site.
+        assert!(hops[1].as_object().unwrap().contains_key("site"));
+        assert!(hops[1]["site"].is_null(), "{}", hops[1]);
     }
 
     /// Round 2's R3 defect: an operand that is present but empty (or not a string) used to
