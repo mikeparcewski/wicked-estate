@@ -1,6 +1,6 @@
 [package]
 name = "wicked-estate-tree-sitter-vbscript"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT AND ISC"
 repository = "https://github.com/mikeparcewski/wicked-estate"
