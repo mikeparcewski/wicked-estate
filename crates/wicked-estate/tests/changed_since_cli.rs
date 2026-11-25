@@ -41,11 +41,20 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 fn estate(dir: &Path, args: &[&str]) -> Output {
+    estate_from(dir, dir.parent().unwrap(), args)
+}
+
+/// [`estate`] run from `cwd` (a subdirectory, say), with git stopped above `ceiling`.
+fn estate_from(cwd: &Path, ceiling: &Path, args: &[&str]) -> Output {
+    let dir = cwd;
     let out = Command::new(bin())
-        .current_dir(dir)
+        .current_dir(cwd)
         .args(args)
-        .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
-        .env("WICKED_ESTATE_EMIT_PROGRAM", "wicked-bus-absent-changed-since")
+        .env("GIT_CEILING_DIRECTORIES", ceiling)
+        .env(
+            "WICKED_ESTATE_EMIT_PROGRAM",
+            "wicked-bus-absent-changed-since",
+        )
         .env("WICKED_ESTATE_EMIT_DEADLETTER", dir.join("emit.ndjson"))
         .env_remove("WICKED_ESTATE_DB")
         .env_remove("WICKED_STORE_URL")
@@ -113,8 +122,9 @@ fn a_labelled_graph_reports_the_changed_symbols() {
         assert_eq!(row["file"], "shop/svc/src/orders.ts", "{rows}");
     }
 
-    let text = String::from_utf8_lossy(&estate(&dir, &["changed-since", &first, "--db", db]).stdout)
-        .into_owned();
+    let text =
+        String::from_utf8_lossy(&estate(&dir, &["changed-since", &first, "--db", db]).stdout)
+            .into_owned();
     assert!(!text.starts_with("0 symbol(s)"), "{text}");
     assert!(text.contains("placeOrder"), "{text}");
 }
@@ -131,11 +141,95 @@ fn a_graph_of_a_subdirectory_reports_the_changed_symbols() {
     for want in ["cancelOrder", "placeOrder"] {
         assert!(found.iter().any(|n| n == want), "{want}: {found:?}");
     }
-    // README.md changed too, outside the indexed root: said, not silently dropped.
-    let text = String::from_utf8_lossy(&estate(&dir, &["changed-since", &first, "--db", db]).stdout)
-        .into_owned();
+    // README.md changed too, outside the indexed root: said, by name, not silently dropped. With
+    // --json it goes to stderr, so stdout stays the one array parsed above.
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
-        text.contains("1 changed file(s) outside the indexed root(s)"),
+        err.contains("1 changed file(s) outside the indexed root(s), not in this graph: README.md"),
+        "{err}"
+    );
+    let text =
+        String::from_utf8_lossy(&estate(&dir, &["changed-since", &first, "--db", db]).stdout)
+            .into_owned();
+    assert!(
+        text.contains(
+            "1 changed file(s) outside the indexed root(s), not in this graph: README.md"
+        ),
         "{text}"
     );
+}
+
+/// `diff.relative` makes `git diff` name paths relative to the working directory, and leave out
+/// the rest; run from `svc/`, the mapping still gets top-level paths.
+#[test]
+fn diff_relative_config_does_not_change_the_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, first) = repo(tmp.path());
+    git(&dir, &["config", "diff.relative", "true"]);
+    let db = tmp.path().join("graph.db");
+    let db = db.to_str().unwrap();
+    estate(&dir, &["index", "svc", "--db", db]);
+    let out = estate_from(
+        &dir.join("svc"),
+        tmp.path(),
+        &["changed-since", &first, "--json", "--db", db],
+    );
+    let found = names(&out.stdout);
+    for want in ["cancelOrder", "placeOrder"] {
+        assert!(found.iter().any(|n| n == want), "{want}: {found:?}");
+    }
+}
+
+/// A backslash in a unix file name: the indexer stores it as `/`, and so does the mapping.
+#[cfg(unix)]
+#[test]
+fn a_backslash_in_a_file_name_maps_like_the_indexer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, _) = repo(tmp.path());
+    let odd = dir.join("svc/src/a\\b.ts");
+    fs::write(&odd, "export function oddOne() { return 1; }\n").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "three"]);
+    let before = git(&dir, &["rev-parse", "HEAD"]);
+    fs::write(&odd, "export function oddOne() { return 2; }\n").unwrap();
+    git(&dir, &["commit", "-q", "-am", "four"]);
+    let db = tmp.path().join("graph.db");
+    let db = db.to_str().unwrap();
+    estate(&dir, &["index", "svc", "--db", db]);
+    let out = estate(&dir, &["changed-since", &before, "--json", "--db", db]);
+    let found = names(&out.stdout);
+    assert!(found.iter().any(|n| n == "oddOne"), "{found:?}");
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// On a case-insensitive filesystem a case-only directory rename leaves git with the old case.
+/// The graph of the renamed directory still gets the change (skipped where names are
+/// case-sensitive).
+#[test]
+fn a_case_only_rename_on_a_case_insensitive_filesystem_still_maps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let probe = tmp.path().join("CaseProbe");
+    fs::create_dir(&probe).unwrap();
+    if !tmp.path().join("caseprobe").exists() {
+        return;
+    }
+    let (dir, _) = repo(tmp.path());
+    let before = git(&dir, &["rev-parse", "HEAD"]);
+    fs::rename(dir.join("svc"), dir.join("SVC")).unwrap();
+    fs::write(
+        dir.join("SVC/src/orders.ts"),
+        "export function placeOrder() { return 3; }\nexport function refundOrder() {}\n",
+    )
+    .unwrap();
+    git(&dir, &["commit", "-q", "-am", "three"]);
+    let db = tmp.path().join("graph.db");
+    let db = db.to_str().unwrap();
+    estate(&dir, &["index", "SVC", "--db", db]);
+    let out = estate(&dir, &["changed-since", &before, "--json", "--db", db]);
+    let found = names(&out.stdout);
+    assert!(found.iter().any(|n| n == "refundOrder"), "{found:?}");
 }
