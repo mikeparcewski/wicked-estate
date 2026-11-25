@@ -605,12 +605,13 @@ fn convert_bounded(
 /// The isolated child's command line: the format hint, its own deadline, and the mask flag.
 fn child_command(exe: &std::path::Path, ext: &str, mask: bool, deadline: Duration) -> Command {
     let mut cmd = Command::new(exe);
-    cmd.arg(CHILD_ARG)
-        .arg(format_hint(ext))
-        .arg(format!("{DEADLINE_ARG}{}", deadline.as_millis()));
+    cmd.arg(CHILD_ARG).arg(format_hint(ext));
+    // `mask` stays the third argument: a child built before `deadline=` reads only that one, and
+    // must never return unmasked Markdown (#604 R2 F2).
     if mask {
         cmd.arg(MASK_ARG);
     }
+    cmd.arg(format!("{DEADLINE_ARG}{}", deadline.as_millis()));
     cmd
 }
 
@@ -1130,7 +1131,9 @@ mod tests {
             Duration::from_millis(250),
         );
         let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(args, [CHILD_ARG, "docx", "deadline=250", MASK_ARG]);
+        // `mask` comes before `deadline=`: a child from before the deadline reads only the third
+        // argument as `mask`, and must still mask (#604 R2 F2).
+        assert_eq!(args, [CHILD_ARG, "docx", MASK_ARG, "deadline=250"]);
     }
 
     /// #556 R2 F4: the converter reads bytes already in memory, so its I/O error is a corrupt
