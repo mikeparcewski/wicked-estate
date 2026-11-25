@@ -444,3 +444,49 @@ fn help_lists_path_with_its_flags() {
     assert!(line.contains("--max-depth"), "{line}");
     assert!(line.contains("--json"), "{line}");
 }
+
+/// #357: a hop names the line where the call happens, not only the two declarations. The call
+/// in `a` is on line 3 while `a` is declared on line 1 and `b` on line 5.
+#[test]
+fn hops_name_the_call_site_line_357() {
+    let d = std::env::temp_dir().join(format!("ci_pathcli_site_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    let scratch = Scratch(d);
+    fs::create_dir_all(scratch.join("src")).unwrap();
+    fs::write(
+        scratch.join("src/a.rs"),
+        "fn a() {\n    let x = 1;\n    b(x);\n}\nfn b(_x: i32) {}\n",
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .current_dir(&*scratch)
+        .args(["index", ".", "--db", "graph.db"])
+        .output()
+        .expect("spawn index");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let doc = json_of(&path_in(&scratch, &["a", "b", "--json"]));
+    let hops = doc["hops"].as_array().expect("hops");
+    assert_eq!(hops.len(), 1, "{doc}");
+    assert_eq!(
+        hops[0]["site"],
+        serde_json::json!({"file": "src/a.rs", "line_1based": 3, "representative": true}),
+        "{doc}"
+    );
+
+    let text = stdout_of(&path_in(&scratch, &["a", "b"]));
+    let lines: Vec<&str> = text.lines().collect();
+    let hop = lines
+        .iter()
+        .position(|l| l.contains("->"))
+        .unwrap_or_else(|| panic!("a hop line: {text}"));
+    assert_eq!(
+        lines.get(hop + 1).map(|l| l.trim()),
+        Some("at src/a.rs:3"),
+        "{text}"
+    );
+}

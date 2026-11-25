@@ -2949,6 +2949,15 @@ struct JsShadow {
     up: Option<std::rc::Rc<JsShadow>>,
 }
 
+/// Every frame is charged for the names it holds when it ends, so a frame built by any route, a
+/// new scope or a copy of one, is counted (#604 R2).
+#[cfg(test)]
+impl Drop for JsShadow {
+    fn drop(&mut self) {
+        count_js_scope_work(JsWork::Shadow, self.names.len());
+    }
+}
+
 fn js_write_owner(mut frame: Option<&std::rc::Rc<JsShadow>>, name: &str, root: usize) -> usize {
     while let Some(f) = frame {
         if f.names.contains(name) {
@@ -3201,6 +3210,8 @@ fn js_assignment_seen(
                 .find(|&i| !js_write_blind(&w.events[i], pos))
         })
         .max();
+    #[cfg(test)]
+    count_js_scope_work(JsWork::Scan, before - kill.unwrap_or(0));
     let mut out: Vec<_> = w.events[kill.unwrap_or(0)..before]
         .iter()
         .rev()
@@ -3247,6 +3258,39 @@ enum JsScopeRead {
     Hoisted,
 }
 
+/// The items the JS local-binding path reads, by kind, counted in tests so a test bounds this
+/// work, not the wall-clock time (wicked-estate#497, #501).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum JsWork {
+    /// A scope's declarations, read once per file (#501).
+    Decls,
+    /// The declaration list a join scans, joined once per file, not once per call (#501).
+    Join,
+    /// The writes a root walk records, once per root (#497).
+    Writes,
+    /// The writes a call scans back over, from its latest covering write (#497).
+    Scan,
+    /// The names each lexical frame holds, counted when it is dropped: a scope's own names
+    /// only, since children share the frame (#497).
+    Shadow,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`JsWork`] counts, indexed by kind.
+    static JS_SCOPE_WORK: std::cell::Cell<[usize; 5]> = const { std::cell::Cell::new([0; 5]) };
+}
+
+#[cfg(test)]
+fn count_js_scope_work(kind: JsWork, n: usize) {
+    JS_SCOPE_WORK.with(|c| {
+        let mut counts = c.get();
+        counts[kind as usize] += n;
+        c.set(counts);
+    });
+}
+
 /// A scope's declaring starts, by name, each list shared by every call that binds to it.
 type JsDeclsByName = HashMap<String, std::rc::Rc<[usize]>>;
 
@@ -3275,6 +3319,8 @@ fn js_scope_starts(
                 JsScopeRead::Block => js_scope_decls(n, src),
                 JsScopeRead::Hoisted => js_hoisted_vars(n, src),
             };
+            #[cfg(test)]
+            count_js_scope_work(JsWork::Decls, decls.len());
             let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
             for (name, at) in decls {
                 by_name.entry(name).or_default().push(at);
@@ -3312,10 +3358,19 @@ fn js_scope_write_seen(
             None => break,
         }
     }
-    let writes = memo
-        .writes
-        .entry(root.id())
-        .or_insert_with(|| js_var_writes(root, src));
+    let writes = memo.writes.entry(root.id()).or_insert_with(|| {
+        let writes = js_var_writes(root, src);
+        #[cfg(test)]
+        count_js_scope_work(
+            JsWork::Writes,
+            writes
+                .values()
+                .flat_map(|by_name| by_name.values())
+                .map(|w| w.events.len())
+                .sum(),
+        );
+        writes
+    });
     let mut ancestors = Vec::new();
     let mut loops = Vec::new();
     let mut within_owner = true;
@@ -3540,6 +3595,8 @@ struct JsBindingJoin<'a, 't> {
 
 impl<'t> JsBindingJoin<'_, 't> {
     fn resolve(&mut self, starts: &[usize], name: &str, depth: usize) -> JsBindingTarget {
+        #[cfg(test)]
+        count_js_scope_work(JsWork::Join, starts.len());
         if let Some(i) = starts.iter().find_map(|at| {
             self.defs_at
                 .get(at)?
@@ -6753,6 +6810,91 @@ mod tests {
             language: Language::new(lang),
             text: text.into(),
         }
+    }
+
+    /// #501: N nested functions calling a name hoisted N times read the declarations once per
+    /// file: the work is linear in N, counted, not timed (a wall-clock ratio on a shared runner
+    /// failed main at 2.1x). Before #501 each call copied and joined the whole list: N x N.
+    #[test]
+    fn shared_declarations_are_read_once_per_file_501() {
+        let file = |var: &'static str| {
+            move |n: usize| {
+                let vars: String = (0..n).map(|_| format!("var {var};\n")).collect();
+                let fns: String = (0..n)
+                    .map(|i| format!("function f{i}() {{ return Card(); }}\n"))
+                    .collect();
+                format!("export function P() {{ {{\n{vars}}}\n{fns}}}\n")
+            }
+        };
+        assert_linear(
+            "shared declarations",
+            1_000,
+            8,
+            &[(JsWork::Decls, 1_000), (JsWork::Join, 1_000)],
+            file("Card"),
+        );
+        assert!(js_scope_work(&file("Other")(1_000)).iter().sum::<usize>() <= 8 * 1_000);
+    }
+
+    /// The [`JsWork`] counts of extracting `text` as TSX.
+    fn js_scope_work(text: &str) -> [usize; 5] {
+        let ex = TreeSitterExtractor::for_language("tsx").unwrap();
+        JS_SCOPE_WORK.with(|c| c.set([0; 5]));
+        ex.extract(&sf("src/big.tsx", "tsx", text)).unwrap();
+        JS_SCOPE_WORK.with(|c| c.get())
+    }
+
+    /// Linear in `n`: at most `per` items in all per unit at `n` (a quadratic path reads about
+    /// `n` per unit), and doubling `n` at most doubles it. Each `(kind, min)` in `ran` is counted at
+    /// least `min` times at both sizes, so the path under test really ran.
+    fn assert_linear(
+        what: &str,
+        n: usize,
+        per: usize,
+        ran: &[(JsWork, usize)],
+        file: impl Fn(usize) -> String,
+    ) {
+        let (one, two) = (js_scope_work(&file(n)), js_scope_work(&file(2 * n)));
+        for &(kind, min) in ran {
+            assert!(
+                one[kind as usize] >= min && two[kind as usize] >= min,
+                "{what}: {kind:?} ran: {one:?} then {two:?}"
+            );
+        }
+        let (one, two) = (one.iter().sum::<usize>(), two.iter().sum::<usize>());
+        assert!(one <= per * n, "{what}: linear in N: {one} for {n}");
+        assert!(
+            two <= 2 * one + 16,
+            "{what}: doubling N doubles the work: {one} then {two}"
+        );
+    }
+
+    /// #497: a call reads its scope's writes once per file and scans back only to its latest
+    /// covering write, so N writes and N calls to a redeclared parameter are linear work. A
+    /// per-call copy and scan of every earlier write is N x N. Counted, not timed.
+    #[test]
+    fn write_lookup_is_linear_497() {
+        let ran = [(JsWork::Writes, 2_000), (JsWork::Scan, 2_000)];
+        assert_linear("write lookup", 2_000, 8, &ran, |n| {
+            let body = "Card = null; Card();\n".repeat(n);
+            format!("export function P(Card: any) {{ {{ var Card = () => null; }}\n{body}}}\n")
+        });
+    }
+
+    /// #497: a block of N `let`s holding N inner blocks that each add a name builds one frame per
+    /// scope, holding that scope's own names, and every node below shares its parent's frame.
+    /// Copying the outer N names into each inner scope, or into a frame per node, is N x N. Every
+    /// frame is counted, by whatever route it was built. Counted, not timed.
+    #[test]
+    fn lexical_shadow_is_linear_497() {
+        let ran = [(JsWork::Shadow, 4_000), (JsWork::Scan, 1)];
+        assert_linear("lexical shadow", 2_000, 8, &ran, |n| {
+            let lets: String = (0..n).map(|i| format!("let z{i}: any;\n")).collect();
+            let inner: String = (0..n).map(|i| format!("{{ let y{i}: any; }}\n")).collect();
+            format!(
+                "export function P(Card: any) {{ {{ var Card = () => null; }}\n{{\n{lets}{inner}Card = null;\nCard();\n}} }}\n"
+            )
+        });
     }
 
     /// #504: nested mutable bindings share one root walk and retain their own writes.
