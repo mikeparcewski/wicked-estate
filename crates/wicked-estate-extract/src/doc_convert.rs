@@ -1130,7 +1130,9 @@ mod tests {
             Duration::from_millis(250),
         );
         let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(args, [CHILD_ARG, "docx", "deadline=250", MASK_ARG]);
+        // `mask` comes before `deadline=`: a child from before the deadline reads only the third
+        // argument as `mask`, and must still mask (#604 R2 F2).
+        assert_eq!(args, [CHILD_ARG, "docx", MASK_ARG, "deadline=250"]);
     }
 
     /// #556 R2 F4: the converter reads bytes already in memory, so its I/O error is a corrupt

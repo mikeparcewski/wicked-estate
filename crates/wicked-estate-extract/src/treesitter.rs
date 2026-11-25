@@ -6873,14 +6873,18 @@ mod tests {
         });
     }
 
-    /// #497: a block of N `let`s around a write adds its N names once, not N copies of N names.
+    /// #497: a block of N `let`s holding N inner blocks that each add a name builds one frame per
+    /// scope, holding that scope's own names, and every node below shares its parent's frame.
+    /// Copying the outer N names into each inner scope, or into a frame per node, is N x N. Every
+    /// frame is counted, by whatever route it was built. Counted, not timed.
     #[test]
     fn lexical_shadow_is_linear_497() {
-        let ran = [(JsWork::Shadow, 2_000), (JsWork::Scan, 1)];
+        let ran = [(JsWork::Shadow, 4_000), (JsWork::Scan, 1)];
         assert_linear("lexical shadow", 2_000, 8, &ran, |n| {
             let lets: String = (0..n).map(|i| format!("let z{i}: any;\n")).collect();
+            let inner: String = (0..n).map(|i| format!("{{ let y{i}: any; }}\n")).collect();
             format!(
-                "export function P(Card: any) {{ {{ var Card = () => null; }}\n{{\n{lets}Card = null;\nCard();\n}} }}\n"
+                "export function P(Card: any) {{ {{ var Card = () => null; }}\n{{\n{lets}{inner}Card = null;\nCard();\n}} }}\n"
             )
         });
     }
