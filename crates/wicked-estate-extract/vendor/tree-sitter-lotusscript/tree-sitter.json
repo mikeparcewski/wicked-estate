@@ -1,0 +1,22 @@
+{
+  "grammars": [
+    {
+      "name": "lotusscript",
+      "camelcase": "Lotusscript",
+      "scope": "source.lotusscript",
+      "path": ".",
+      "file-types": [
+        "lss",
+        "ls"
+      ]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "LotusScript (IBM Domino) symbols+calls grammar for tree-sitter (wicked-estate)",
+    "links": {
+      "repository": "https://github.com/mikeparcewski/wicked-estate"
+    }
+  }
+}

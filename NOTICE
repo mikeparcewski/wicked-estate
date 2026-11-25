@@ -41,10 +41,13 @@ ColdFusion CFML (tag + cfscript) tree-sitter grammar
   Path:      crates/wicked-estate-extract/vendor/tree-sitter-cfml/
   Crate:     wicked-estate-tree-sitter-cfml
   Origin:    Vendored from https://github.com/cfmleditor/tree-sitter-cfml;
-             its grammar sources (grammar.js, src/, common/) and LICENSE are
-             byte-identical to upstream commit
+             its grammar sources (grammar.js, src/grammar.json, the scanners,
+             common/) and LICENSE are byte-identical to upstream commit
              6b4a43943c191950ee2c77f7b94cec5e903318a4 (tag v0.26.20).
-             Cargo.toml, README.md and bindings/rust/ are this repository's.
+             parser.c, node-types.json and the tree_sitter/ headers are
+             generated from grammar.json by the pinned tree-sitter CLI.
+             Cargo.toml, README.md, tree-sitter.json and bindings/rust/ are
+             this repository's.
   License:   MIT License (the terms of this product's LICENSE file)
              Copyright (c) 2014 Gareth Edwards & Gavin Baumanis
              The full license text ships in the directory (LICENSE).
@@ -68,11 +71,12 @@ Visual Basic 6 tree-sitter grammar
   Path:      crates/wicked-estate-extract/vendor/tree-sitter-vb6/
   Crate:     wicked-estate-tree-sitter-vb6
   Origin:    Vendored from https://github.com/joannefan/tree-sitter-vb6;
-             its src/ (grammar.json, parser.c, node-types.json and the
-             tree_sitter/ headers) is byte-identical to upstream commit
+             its src/grammar.json is byte-identical to upstream commit
              1ee443353ce49f12e39a8e627b557c59e348b729.
-             Cargo.toml, README.md, bindings/rust/ and LICENSE are this
-             repository's.
+             parser.c, node-types.json and the tree_sitter/ headers are
+             generated from it by the pinned tree-sitter CLI.
+             Cargo.toml, README.md, tree-sitter.json, bindings/rust/ and
+             LICENSE are this repository's.
   License:   MIT License, as upstream declares it in package.json,
              Cargo.toml, pyproject.toml and tree-sitter.json, which name
              its author as "joanne". Upstream ships no LICENSE file and
@@ -83,11 +87,12 @@ VBA tree-sitter grammar
   Path:      crates/wicked-estate-extract/vendor/tree-sitter-vba/
   Crate:     wicked-estate-tree-sitter-vba
   Origin:    Vendored from https://github.com/tmepple/tree-sitter-vba;
-             its src/ (grammar.json, parser.c, node-types.json and the
-             tree_sitter/ headers) is byte-identical to upstream commit
+             its src/grammar.json is byte-identical to upstream commit
              c691f237b2a703732d4b6a1f01d5b4f73f94d41e.
-             Cargo.toml, README.md, bindings/rust/ and LICENSE are this
-             repository's.
+             parser.c, node-types.json and the tree_sitter/ headers are
+             generated from it by the pinned tree-sitter CLI.
+             Cargo.toml, README.md, tree-sitter.json, bindings/rust/ and
+             LICENSE are this repository's.
   License:   MIT License, as upstream declares it in package.json,
              Cargo.toml and tree-sitter.json; tree-sitter.json names its
              author as "Todd Epple". Upstream ships no LICENSE file and

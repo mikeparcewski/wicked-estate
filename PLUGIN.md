@@ -147,8 +147,9 @@ A plugin's library is just a compiled tree-sitter parser exporting `tree_sitter_
 simplest path (no Rust required):
 
 ```sh
-# 1. author grammar.js, then generate the parser (ABI 13–15; 14 is the safe default)
-npx tree-sitter generate --abi 14
+# 1. author grammar.js and a tree-sitter.json beside it (`tree-sitter init` writes one; without it
+#    the CLI falls back to ABI 14), then generate the parser with the CLI this repository pins (ABI 15)
+npx --yes tree-sitter-cli@0.25.10 generate
 # 2. compile to a shared library
 cc -shared -fPIC -O2 -I src -o libnginx.dylib src/parser.c   # + src/scanner.c if present
 ```

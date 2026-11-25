@@ -123,7 +123,7 @@ get hand-written line/macro extractors:
 - `REDEFINES` → reference edge; `OCCURS … DEPENDING ON` → reference to the counter field.
 
 ### In-house grammar authoring ✅
-- Method: template from a battle-tested grammar (JS/Python) → `npx tree-sitter-cli generate` →
+- Method: template from a battle-tested grammar (JS/Python) → `npx --yes tree-sitter-cli@0.25.10 generate` (the pinned CLI, ABI 15; `scripts/regen-vendored-parsers.py`) →
   vendored `parser.c` + `build.rs` (cc) + Rust binding + corpus **parse-gate** (zero ERROR nodes) +
   **extraction-count comparison** = "manufactured battle-testing."
 - Delivered (legacy enterprise stacks with no usable upstream grammar): **RPG IV** (free-format),

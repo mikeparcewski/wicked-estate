@@ -10723,7 +10723,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-tree-sitter-abl"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -10739,7 +10739,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-tree-sitter-crystal-formula"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -10747,7 +10747,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-tree-sitter-foxpro"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -10755,7 +10755,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-tree-sitter-informix4gl"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -10763,7 +10763,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-tree-sitter-lotusscript"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -10771,7 +10771,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-tree-sitter-powerscript"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -10779,7 +10779,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-tree-sitter-rpg"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "cc",
  "tree-sitter-language",
