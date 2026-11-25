@@ -751,6 +751,9 @@ thread_local! {
     /// `"FAIL"` makes the run fail.
     pub(crate) static TEST_DATABASE_SQL: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+    /// The last run's `not imported` count on this thread, for tests.
+    pub(crate) static LAST_DROPPED: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 // ── prepare ─────────────────────────────────────────────────────────────────────────────────
@@ -767,6 +770,9 @@ pub struct Prepared {
     consumed: Mutex<HashSet<usize>>,
     /// Per-file facts the merge step dropped, reported once per run.
     pub dropped_edges: Mutex<usize>,
+    /// Facts not imported for refs that went on to the fall-through, by site, until it settles
+    /// them ([`Prepared::settle_dropped`]).
+    pending_dropped: Mutex<HashMap<DroppedKey, usize>>,
 }
 
 /// Inputs from the caller for [`prepare`].
@@ -910,6 +916,7 @@ impl Prepared {
                 fingerprints,
                 consumed: Mutex::new(HashSet::new()),
                 dropped_edges: Mutex::new(0),
+                pending_dropped: Mutex::new(HashMap::new()),
             },
             forced,
         )
@@ -1407,6 +1414,11 @@ impl Prepared {
         let mut unresolved = Vec::new();
         let mut covered: HashSet<(String, u32, String)> = HashSet::new();
         let mut dropped = 0usize;
+        let mut pending = self
+            .pending_dropped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut accounted: HashSet<usize> = HashSet::new();
         let key_of = |r: &UnresolvedRef| {
             (
                 r.location.file.clone(),
@@ -1444,10 +1456,14 @@ impl Prepared {
                 hits = exact;
             }
             let mut bound = false;
+            let mut site_dropped = 0usize;
             for i in hits {
                 let e = &self.snap.edges[i];
                 let Some(target) = ids.ids.get(&e.target) else {
-                    dropped += 1;
+                    // Accounted here, through the fall-through: never again as a
+                    // codegraph-only fact (round 1 codex P3).
+                    accounted.insert(i);
+                    site_dropped += 1;
                     continue;
                 };
                 if *target == r.from {
@@ -1463,13 +1479,19 @@ impl Prepared {
                 ));
                 bound = true;
             }
-            if !bound {
+            if bound {
+                dropped += site_dropped;
+            } else {
+                // Counted once the fall-through settles the ref ([`Self::settle_dropped`]).
+                if site_dropped > 0 {
+                    *pending.entry(dropped_key(r)).or_default() += site_dropped;
+                }
                 unbound.push(r.clone());
             }
         }
         // Codegraph-only edges sourced in files extracted this run.
         for (i, e) in self.snap.edges.iter().enumerate() {
-            if consumed.contains(&i) {
+            if consumed.contains(&i) || accounted.contains(&i) {
                 continue;
             }
             let Some(kind) = map_edge_kind(&e.kind) else {
@@ -1545,6 +1567,43 @@ impl Prepared {
         *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) += dropped;
         (edges, unbound, unresolved)
     }
+
+    /// Count the facts [`Self::resolve`] could not import for refs the fall-through left
+    /// unbound (`still`), and forget the rest: a ref estate's resolvers bound lost nothing.
+    /// Called once after each [`Self::resolve`] (`resolve_with_codegraph`).
+    pub(crate) fn settle_dropped(&self, still: &[UnresolvedRef]) {
+        let mut pending = self
+            .pending_dropped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let counted = settle(&mut pending, still);
+        *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) += counted;
+    }
+}
+
+/// The site a ref was written at, as [`Prepared::settle_dropped`] matches it.
+type DroppedKey = (String, String, EdgeKind, String, u32, u32, u32);
+
+fn dropped_key(r: &UnresolvedRef) -> DroppedKey {
+    (
+        r.from.0.clone(),
+        r.raw_name.clone(),
+        r.kind.clone(),
+        r.location.file.clone(),
+        r.location.span.start_line,
+        r.location.span.start_byte,
+        r.location.span.end_byte,
+    )
+}
+
+/// The pending drop counts of the refs in `still`, summed; `pending` is emptied.
+fn settle(pending: &mut HashMap<DroppedKey, usize>, still: &[UnresolvedRef]) -> usize {
+    let still: HashSet<DroppedKey> = still.iter().map(dropped_key).collect();
+    pending
+        .drain()
+        .filter(|(k, _)| still.contains(k))
+        .map(|(_, n)| n)
+        .sum()
 }
 
 /// Park a ref no resolver bound: the `codegraph:` prefix keeps every estate resolver, back-fill
@@ -1698,6 +1757,7 @@ mod tests {
     const GET: &str = "ts-typescript . . . src/svc/UserService#get().";
     const LIB_HELPER: &str = "ts-typescript . . . src/lib/util/helper().";
     const DECOY_HELPER: &str = "ts-typescript . . . src/util/helper().";
+    const GET2: &str = "ts-typescript . . . src/svc/UserService#get2().";
 
     #[test]
     fn codegraph_binds_a_tsconfig_alias_import_to_the_configured_file_only() {
@@ -1965,21 +2025,57 @@ mod tests {
         );
     }
 
-    #[test]
-    fn callers_of_a_file_that_fell_back_keep_their_edges_into_it() {
-        // Coord r2 F1 (W16): src/lib/util.ts grew past the cap (size_exceeded, no nodes). Its
-        // caller src/svc.ts is still codegraph's; the call to helper must bind into the fallen
-        // back file through estate's resolvers, and never to the decoy codegraph answers for.
-        let sql = format!(
+    /// The fixture's `src/lib/util.ts` grown past codegraph's cap (`size_exceeded`, no nodes):
+    /// the file falls back to estate's pipeline while its callers stay codegraph's.
+    fn lib_util_fell_back_sql() -> String {
+        format!(
             "{FIXTURE_SQL}\nUPDATE files SET errors = '[{{\"message\":\"too big\",\"severity\":\"error\",\"code\":\"size_exceeded\"}}]', node_count = 0 WHERE path = 'src/lib/util.ts';\n\
              DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = 'src/lib/util.ts') OR target IN (SELECT id FROM nodes WHERE file_path = 'src/lib/util.ts');\n\
              DELETE FROM unresolved_refs WHERE file_path = 'src/lib/util.ts';\n\
              DELETE FROM nodes WHERE file_path = 'src/lib/util.ts';"
-        );
+        )
+    }
+
+    /// A copy of the fixture repo under `tmp`, for a test that edits a source.
+    fn fixture_copy(tmp: &Path) -> PathBuf {
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for e in std::fs::read_dir(from).unwrap() {
+                let e = e.unwrap();
+                if e.file_type().unwrap().is_dir() {
+                    copy(&e.path(), &to.join(e.file_name()));
+                } else {
+                    std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+                }
+            }
+        }
+        let root = tmp.join("repo");
+        copy(&fixture_root(), &root);
+        root
+    }
+
+    #[test]
+    fn callers_of_a_file_that_fell_back_keep_their_edges_into_it() {
+        // Coord r2 F1 (W16): src/lib/util.ts fell back. Its caller src/svc.ts is still
+        // codegraph's; the call to helper binds into the fallen back file through estate's
+        // resolvers, on the evidence estate main uses: a relative import (estate#594: never on a
+        // uniqueness the fall-through manufactured by hiding the decoy).
         let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+        std::fs::write(
+            root.join("src/svc.ts"),
+            svc.replace("'@lib/util'", "'./lib/util'"),
+        )
+        .unwrap();
         let cfg = config(tmp.path());
         let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
-        index(&mut store, &fixture_root(), Some(&cfg), Some(&sql));
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
         let calls = edges(&store, EdgeKind::Calls);
         let from_get = calls_from(&calls, GET);
         assert!(
@@ -2001,23 +2097,203 @@ mod tests {
     }
 
     #[test]
+    fn a_fall_through_call_named_like_a_codegraph_definition_stays_ambiguous_594() {
+        // estate#594 (N1, W12): the same fall-back, with the call's only evidence the tsconfig
+        // alias estate does not read. `helper` is defined in the fallen-back file AND in the
+        // codegraph file src/util.ts, so estate main finds it ambiguous and binds nothing. The
+        // fall-through must see the same two candidates: the call parks, never bound into the
+        // fallen-back file as if it were the only `helper`.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(
+            &mut store,
+            &fixture_root(),
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get = calls_from(&calls, GET);
+        assert!(
+            !from_get.iter().any(|(_, t, _)| t.ends_with("/helper().")),
+            "an ambiguous name binds nothing: {from_get:?}"
+        );
+        let parked = store
+            .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}helper"))
+            .unwrap();
+        assert!(
+            parked.iter().any(|r| r.from.0 == GET),
+            "the call parks: {parked:?}"
+        );
+    }
+
+    #[test]
+    fn a_fact_not_imported_counts_only_when_the_fall_through_left_its_ref_unbound() {
+        // #584 fold: the `not imported` count no longer counts a site the fall-through binds.
+        let at = |line: u32| {
+            UnresolvedRef::new(
+                SymbolId("ts . src/a/f().".into()),
+                "helper",
+                EdgeKind::Calls,
+                Location::new(
+                    "src/a.ts",
+                    Span {
+                        start_byte: line * 10,
+                        end_byte: line * 10 + 6,
+                        start_line: line,
+                        start_col: 0,
+                        end_line: line,
+                        end_col: 6,
+                    },
+                ),
+            )
+        };
+        let mut pending: HashMap<DroppedKey, usize> = HashMap::new();
+        pending.insert(dropped_key(&at(1)), 2);
+        pending.insert(dropped_key(&at(2)), 1);
+        // The fall-through bound line 1's ref; line 2's stays unbound.
+        assert_eq!(settle(&mut pending, &[at(2)]), 1);
+        assert!(pending.is_empty(), "settled once");
+        assert_eq!(settle(&mut pending, &[at(2)]), 0);
+    }
+
+    #[test]
+    fn a_fall_through_site_binds_what_estate_main_binds_outside_codegraph_files_594() {
+        // Round 1 codex P2, answered: src/svc.ts (codegraph's) imports `helper` from the
+        // fallen-back ./lib/util and gains a class whose own method is `helper`; its
+        // `this.helper(s)` has no codegraph site. Every resolver sees every candidate; a pick in
+        // a codegraph file (the same-file method) is dropped, and the other resolvers' picks stand
+        // exactly as estate's own pipeline makes them. Never an edge estate main lacks.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+        std::fs::write(
+            root.join("src/svc.ts"),
+            format!(
+                "{}export class Helped {{ helper(s: string): string {{ return s; }} run(s: string): string {{ return this.helper(s); }} }}\n",
+                svc.replace("'@lib/util'", "'./lib/util'")
+            ),
+        )
+        .unwrap();
+        let run = "ts-typescript . . . src/svc/Helped#run().";
+        let from_run = |cfg: Option<&CodegraphConfig>, db: &str| {
+            let mut store = SqliteStore::open(tmp.path().join(db)).unwrap();
+            index(&mut store, &root, cfg, Some(&lib_util_fell_back_sql()));
+            let calls = edges(&store, EdgeKind::Calls);
+            let mut targets: Vec<String> = calls_from(&calls, run)
+                .iter()
+                .map(|(_, t, _)| t.clone())
+                .collect();
+            targets.sort();
+            targets.dedup();
+            targets
+        };
+        let estate_main = from_run(None, "main.db");
+        let cfg = config(tmp.path());
+        let hybrid = from_run(Some(&cfg), "g.db");
+        assert!(
+            estate_main.iter().any(|t| t.ends_with("Helped#helper().")),
+            "estate's own pipeline binds the same-file method: {estate_main:?}"
+        );
+        assert!(
+            !hybrid.iter().any(|t| t.ends_with("Helped#helper().")),
+            "no edge into the codegraph file: {hybrid:?}"
+        );
+        let outside_main: Vec<&String> = estate_main
+            .iter()
+            .filter(|t| !t.contains(" src/svc/"))
+            .collect();
+        assert_eq!(
+            hybrid.iter().collect::<Vec<_>>(),
+            outside_main,
+            "the fall-through keeps exactly estate main's picks outside codegraph's files"
+        );
+    }
+
+    #[test]
+    fn the_not_imported_count_leaves_out_a_fact_the_fall_through_binds() {
+        // Round 1 codex P3: with src/lib/util.ts fallen back but codegraph's facts into it kept,
+        // three facts have a target with no estate node: svc.ts's import of the file (edge 23)
+        // and get()'s call to `helper` (edge 31), each at an estate ref's site, and the
+        // specifier-level import of `helper` (edge 24), which no estate ref covers. With a
+        // relative import the fall-through binds the two refs, so only edge 24 counts; with the
+        // alias import neither binds, and each of the three counts once, never twice.
+        let fell_back_keeping_facts = format!(
+            "{FIXTURE_SQL}\nUPDATE files SET errors = '[{{\"message\":\"too big\",\"severity\":\"error\",\"code\":\"size_exceeded\"}}]', node_count = 0 WHERE path = 'src/lib/util.ts';"
+        );
+        let count = |sql: &str, relative: bool| {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = fixture_copy(tmp.path());
+            if relative {
+                let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+                std::fs::write(
+                    root.join("src/svc.ts"),
+                    svc.replace("'@lib/util'", "'./lib/util'"),
+                )
+                .unwrap();
+            }
+            let cfg = config(tmp.path());
+            let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+            LAST_DROPPED.with(|c| c.set(None));
+            index(&mut store, &root, Some(&cfg), Some(sql));
+            let calls = edges(&store, EdgeKind::Calls);
+            let bound = calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t == LIB_HELPER);
+            (
+                LAST_DROPPED.with(|c| c.get()).expect("a codegraph run"),
+                bound,
+            )
+        };
+        let (base, _) = count(FIXTURE_SQL, false);
+        let (relative, relative_bound) = count(&fell_back_keeping_facts, true);
+        let (alias, alias_bound) = count(&fell_back_keeping_facts, false);
+        assert!(relative_bound, "the relative import binds helper");
+        assert!(!alias_bound, "the alias leaves helper ambiguous");
+        assert_eq!(
+            relative,
+            base + 1,
+            "only edge 24 counts: {relative} over {base}"
+        );
+        assert_eq!(
+            alias,
+            base + 3,
+            "each unbound fact counts once: {alias} over {base}"
+        );
+    }
+
+    #[test]
+    fn a_fall_through_winner_in_a_codegraph_file_is_dropped_and_parks_594() {
+        // estate#594 / #584 fold: codegraph leaves `this.get(..)` in get2() unbound (its edge 32
+        // removed). Estate's resolvers see every candidate, and the only `get` lives in
+        // src/svc.ts, a file codegraph answers for, where its verdict stands: the edge is
+        // dropped and the call parks.
+        let sql = format!("{FIXTURE_SQL}\nDELETE FROM edges WHERE id = 32;");
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(&sql));
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get2 = calls_from(&calls, GET2);
+        assert!(
+            !from_get2.iter().any(|(_, t, _)| t == GET),
+            "no edge into the codegraph file: {from_get2:?}"
+        );
+        let parked = store
+            .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}get"))
+            .unwrap();
+        assert!(
+            parked.iter().any(|r| r.from.0 == GET2),
+            "the call parks: {parked:?}"
+        );
+    }
+
+    #[test]
     fn an_import_of_a_file_codegraph_never_sees_keeps_its_edge() {
         // Coord r2 F2 (W12): `import './styles.css'` has no codegraph site (the mirror holds only
         // switched sources), so it goes to estate's resolvers instead of parking.
-        fn copy(from: &Path, to: &Path) {
-            std::fs::create_dir_all(to).unwrap();
-            for e in std::fs::read_dir(from).unwrap() {
-                let e = e.unwrap();
-                if e.file_type().unwrap().is_dir() {
-                    copy(&e.path(), &to.join(e.file_name()));
-                } else {
-                    std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
-                }
-            }
-        }
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("repo");
-        copy(&fixture_root(), &root);
+        let root = fixture_copy(tmp.path());
         let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
         std::fs::write(
             root.join("src/svc.ts"),

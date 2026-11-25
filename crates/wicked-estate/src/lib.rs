@@ -493,7 +493,11 @@ fn resolve_with_codegraph(
     // A ref codegraph bound nothing for goes to estate's resolvers, which may bind it only into
     // files codegraph does not answer for: a file that fell back (its callers would otherwise
     // lose every edge into it), a file in an unswitched language, a stylesheet or a JSON file.
-    // Inside codegraph's files its verdict stands, so whatever stays unbound parks.
+    // Inside codegraph's files its verdict stands, so whatever stays unbound parks. The
+    // resolvers see the whole index (estate#594), so a name is as unique, and candidates rank,
+    // as on estate's own pipeline. Each resolver's pick that lands in a codegraph file is
+    // dropped; the picks of the others stand, as estate's own pipeline keeps every resolver's
+    // edge (`resolve_all_with_coverage`), and a ref with no pick left parks.
     let outside: Vec<OutsideCodegraph<'_>> = resolvers
         .iter()
         .map(|inner| OutsideCodegraph {
@@ -503,12 +507,10 @@ fn resolve_with_codegraph(
         })
         .collect();
     let outside: Vec<&dyn Resolver> = outside.iter().map(|r| r as &dyn Resolver).collect();
-    let outside_index = OutsideCodegraphIndex {
-        inner: index,
-        cg,
-        ids,
-    };
-    let through = resolve_all_with_coverage(&outside, &unbound, &outside_index)?;
+    let through = resolve_all_with_coverage(&outside, &unbound, index)?;
+    // A fact codegraph could not import (its target has no estate node) counts only when the
+    // fall-through did not bind the ref either.
+    cg.settle_dropped(&through.unresolved);
     edges.extend(through.site_edges);
     unresolved.extend(through.unresolved.iter().map(codegraph::park));
     let mut best: HashMap<(String, String, String), Edge> = resolution
@@ -579,46 +581,6 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
         }
     );
     Ok(())
-}
-
-/// The symbol index as the fall-through resolvers see it: name lookups and scans skip the
-/// definitions of files codegraph answers for, so a same-named definition there neither binds
-/// nor makes a candidate set ambiguous. File nodes and `get` stay whole: resolvers look up the
-/// importing file and the ref's own source node, which live in a codegraph file (the relative
-/// import resolver reads the importer's language from its File node). An edge into a codegraph
-/// file is dropped afterwards by [`OutsideCodegraph`].
-struct OutsideCodegraphIndex<'a> {
-    inner: &'a dyn SymbolIndex,
-    cg: &'a codegraph::Prepared,
-    ids: &'a codegraph::IdMap,
-}
-
-impl OutsideCodegraphIndex<'_> {
-    fn visible(&self, n: &Node) -> bool {
-        n.kind == NodeKind::File || !self.cg.answers_file(&n.location.file, self.ids)
-    }
-}
-
-impl SymbolIndex for OutsideCodegraphIndex<'_> {
-    fn by_name(&self, name: &str) -> Vec<Node> {
-        let mut nodes = self.inner.by_name(name);
-        nodes.retain(|n| self.visible(n));
-        nodes
-    }
-
-    fn get(&self, id: &SymbolId) -> Option<Node> {
-        self.inner.get(id)
-    }
-
-    fn all_nodes(&self) -> Result<Vec<Node>> {
-        let mut nodes = self.inner.all_nodes()?;
-        nodes.retain(|n| self.visible(n));
-        Ok(nodes)
-    }
-
-    fn language_family(&self, language: &str) -> Option<String> {
-        self.inner.language_family(language)
-    }
 }
 
 /// An estate resolver whose edges into files codegraph answers for are dropped (see
@@ -3516,6 +3478,8 @@ fn index_path_inner(
     match &codegraph_state {
         Some(cg) => {
             let dropped = *cg.dropped_edges.lock().unwrap_or_else(|e| e.into_inner());
+            #[cfg(test)]
+            codegraph::LAST_DROPPED.with(|c| c.set(Some(dropped)));
             if dropped > 0 {
                 eprintln!(
                     "CODEGRAPH: {dropped} fact(s) not imported (an endpoint has no estate node)"
