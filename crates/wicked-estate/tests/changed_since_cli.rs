@@ -212,17 +212,22 @@ fn a_backslash_in_a_file_name_maps_like_the_indexer() {
     assert!(!err.contains("outside the indexed root"), "{err}");
 }
 
-/// On a case-insensitive filesystem a case-only directory rename leaves git with the old case.
-/// The graph of the renamed directory still gets the change (skipped where names are
-/// case-sensitive).
+/// On a case-insensitive filesystem a case-only rename of the indexed root's directory leaves git
+/// with the old case. The graph of the renamed directory still gets the change. It runs where the
+/// filesystem is case-insensitive (macOS and Windows) and is reported ignored elsewhere.
 #[test]
+#[cfg_attr(
+    not(any(target_os = "macos", windows)),
+    ignore = "needs a case-insensitive filesystem"
+)]
 fn a_case_only_rename_on_a_case_insensitive_filesystem_still_maps() {
     let tmp = tempfile::tempdir().unwrap();
     let probe = tmp.path().join("CaseProbe");
     fs::create_dir(&probe).unwrap();
-    if !tmp.path().join("caseprobe").exists() {
-        return;
-    }
+    assert!(
+        tmp.path().join("caseprobe").exists(),
+        "the temp directory's filesystem is case-sensitive; this test needs a case-insensitive one"
+    );
     let (dir, _) = repo(tmp.path());
     let before = git(&dir, &["rev-parse", "HEAD"]);
     fs::rename(dir.join("svc"), dir.join("SVC")).unwrap();
@@ -238,4 +243,351 @@ fn a_case_only_rename_on_a_case_insensitive_filesystem_still_maps() {
     let out = estate(&dir, &["changed-since", &before, "--json", "--db", db]);
     let found = names(&out.stdout);
     assert!(found.iter().any(|n| n == "refundOrder"), "{found:?}");
+}
+
+/// A graph used from another worktree of its repository: the root is rebased onto this checkout
+/// at its position in the work tree, so the changed symbols are found, a subdirectory graph keeps
+/// its scope, and a file outside it is still named outside (#606 round 2).
+#[test]
+fn a_graph_used_from_another_worktree_still_reports_the_changed_symbols() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, first) = repo(tmp.path());
+    let other = tmp.path().join("other");
+    git(
+        &dir,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            other.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    for (scope, outside) in [(".", false), ("svc", true)] {
+        let db = tmp.path().join(format!("graph-{}.db", scope.len()));
+        let db = db.to_str().unwrap();
+        estate(&dir, &["index", scope, "--db", db]);
+        let out = estate(&other, &["changed-since", &first, "--json", "--db", db]);
+        let found = names(&out.stdout);
+        for want in ["cancelOrder", "placeOrder"] {
+            assert!(
+                found.iter().any(|n| n == want),
+                "{scope}: {want}: {found:?}"
+            );
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            err.contains("outside the indexed root(s), not in this graph: README.md"),
+            outside,
+            "{scope}: {err}"
+        );
+    }
+}
+
+/// A moved checkout: the recorded root is gone, so the root is placed in this checkout at the
+/// position recorded at index time (#606 round 2).
+#[test]
+fn a_graph_used_from_a_moved_checkout_still_reports_the_changed_symbols() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, first) = repo(tmp.path());
+    let db = tmp.path().join("graph.db");
+    let db = db.to_str().unwrap();
+    estate(&dir, &["index", "svc", "--db", db]);
+    let moved = tmp.path().join("moved");
+    fs::rename(&dir, &moved).unwrap();
+    // Then again with a plain directory made where the root was.
+    for remade in [false, true] {
+        if remade {
+            fs::create_dir_all(dir.join("svc")).unwrap();
+        }
+        let out = estate(&moved, &["changed-since", &first, "--json", "--db", db]);
+        let found = names(&out.stdout);
+        for want in ["cancelOrder", "placeOrder"] {
+            assert!(
+                found.iter().any(|n| n == want),
+                "remade: {remade}: {want}: {found:?}"
+            );
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains(
+                "1 changed file(s) outside the indexed root(s), not in this graph: README.md"
+            ),
+            "remade: {remade}: {err}"
+        );
+    }
+}
+
+/// Another repository with the same file names is not this graph's checkout, even when it holds
+/// the graph's commit in a side ref: it shares no history with its HEAD, so nothing is rebased.
+/// The root is said to be not placed in this checkout, whether it still exists or is gone.
+#[test]
+fn an_unrelated_repository_is_not_read_as_a_moved_checkout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, _) = repo(tmp.path());
+    let indexed = git(&dir, &["rev-parse", "HEAD"]);
+    let db = tmp.path().join("graph.db");
+    let db = db.to_str().unwrap();
+    estate(&dir, &["index", ".", "--db", db]);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let stranger = elsewhere.path().join("stranger");
+    fs::create_dir_all(stranger.join("svc/src")).unwrap();
+    let orders = stranger.join("svc/src/orders.ts");
+    fs::write(&orders, "export function strangerOrder() { return 1; }\n").unwrap();
+    git(&stranger, &["init", "-q", "-b", "main"]);
+    git(&stranger, &["add", "-A"]);
+    git(&stranger, &["commit", "-q", "-m", "one"]);
+    let first = git(&stranger, &["rev-parse", "HEAD"]);
+    fs::write(&orders, "export function strangerOrder() { return 2; }\n").unwrap();
+    git(&stranger, &["commit", "-q", "-am", "two"]);
+    git(
+        &stranger,
+        &[
+            "fetch",
+            "-q",
+            dir.to_str().unwrap(),
+            "+refs/heads/main:refs/side/graph",
+        ],
+    );
+    let held = git(&stranger, &["rev-parse", "refs/side/graph"]);
+    assert_eq!(held, indexed, "the side ref holds the graph's commit");
+    for gone in [false, true] {
+        if gone {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        let out = estate(&stranger, &["changed-since", &first, "--json", "--db", db]);
+        assert_eq!(names(&out.stdout), Vec::<String>::new(), "gone: {gone}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("1 indexed root(s) not placed in this checkout"),
+            "gone: {gone}: {err}"
+        );
+        assert!(
+            err.contains("1 changed file(s) under no root placed in this checkout"),
+            "gone: {gone}: {err}"
+        );
+        assert!(!err.contains("not in this graph"), "gone: {gone}: {err}");
+    }
+}
+
+/// A clone of the repository, with the indexed checkout still in place, is placed by shared
+/// history; a shallow clone that lacks the indexed commit cannot be, and says so.
+#[test]
+fn a_clone_is_placed_by_shared_history_and_a_shallow_one_without_the_commit_is_said_unplaced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, _) = repo(tmp.path());
+    let db = tmp.path().join("graph.db");
+    let db = db.to_str().unwrap();
+    estate(&dir, &["index", "svc", "--db", db]);
+    let orders = dir.join("svc/src/orders.ts");
+    let mut since = String::new();
+    for (i, body) in ["3", "4"].into_iter().enumerate() {
+        fs::write(
+            &orders,
+            format!("export function placeOrder() {{ return {body}; }}\n"),
+        )
+        .unwrap();
+        git(&dir, &["commit", "-q", "-am", body]);
+        if i == 0 {
+            since = git(&dir, &["rev-parse", "HEAD"]);
+        }
+    }
+    for (name, depth, placed) in [("full", None, true), ("shallow", Some("2"), false)] {
+        let clone = tmp.path().join(name);
+        // `--no-local`: git's own transport, so `--depth` applies to a path (no URL to encode).
+        let mut args = vec!["clone", "-q", "--no-local"];
+        if let Some(depth) = depth {
+            args.extend(["--depth", depth]);
+        }
+        args.extend([dir.to_str().unwrap(), clone.to_str().unwrap()]);
+        git(tmp.path(), &args);
+        let out = estate(&clone, &["changed-since", &since, "--json", "--db", db]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        if placed {
+            let found = names(&out.stdout);
+            for want in ["cancelOrder", "placeOrder"] {
+                assert!(found.iter().any(|n| n == want), "{name}: {want}: {found:?}");
+            }
+            assert!(!err.contains("not placed"), "{name}: {err}");
+        } else {
+            assert_eq!(names(&out.stdout), Vec::<String>::new(), "{name}");
+            assert!(
+                err.contains("1 indexed root(s) not placed in this checkout"),
+                "{name}: {err}"
+            );
+        }
+    }
+}
+
+/// Two labelled scopes indexed from two linked worktrees of one repository: from either
+/// worktree, both labels read this checkout's changes.
+#[test]
+fn labelled_scopes_from_two_worktrees_both_read_this_checkouts_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, first) = repo(tmp.path());
+    let other = tmp.path().join("other");
+    git(
+        &dir,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            other.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let db = tmp.path().join("graph.db");
+    let db = db.to_str().unwrap();
+    estate(&dir, &["index", "svc", "--repo", "api", "--db", db]);
+    estate(&other, &["index", ".", "--repo", "all", "--db", db]);
+    let out = estate(&dir, &["changed-since", &first, "--json", "--db", db]);
+    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: std::collections::BTreeSet<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        files,
+        [
+            "all/README.md",
+            "all/svc/src/orders.ts",
+            "api/src/orders.ts"
+        ]
+        .into(),
+        "{rows}"
+    );
+}
+
+/// A labelled graph used from a moved checkout keeps its label and scope.
+#[test]
+fn a_labelled_graph_used_from_a_moved_checkout_keeps_its_label() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, first) = repo(tmp.path());
+    let db = tmp.path().join("graph.db");
+    let db = db.to_str().unwrap();
+    estate(&dir, &["index", "svc", "--repo", "shop", "--db", db]);
+    let moved = tmp.path().join("moved");
+    fs::rename(&dir, &moved).unwrap();
+    let out = estate(&moved, &["changed-since", &first, "--json", "--db", db]);
+    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: std::collections::BTreeSet<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, ["shop/src/orders.ts"].into(), "{rows}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("1 changed file(s) outside the indexed root(s), not in this graph: README.md"),
+        "{err}"
+    );
+}
+
+/// A linked worktree nested inside the indexed checkout is another checkout, not a directory of
+/// the indexed one: its files map at the same position.
+#[test]
+fn a_graph_used_from_a_nested_worktree_still_reports_the_changed_symbols() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, first) = repo(tmp.path());
+    let db = tmp.path().join("graph.db");
+    let db = db.to_str().unwrap();
+    estate(&dir, &["index", "svc", "--db", db]);
+    let nested = dir.join("nested");
+    git(
+        &dir,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            nested.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    // git may look above the worktree (the root is in the checkout holding it).
+    let out = estate_from(
+        &nested,
+        tmp.path(),
+        &["changed-since", &first, "--json", "--db", db],
+    );
+    let found = names(&out.stdout);
+    for want in ["cancelOrder", "placeOrder"] {
+        assert!(found.iter().any(|n| n == want), "{want}: {found:?}");
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("1 changed file(s) outside the indexed root(s), not in this graph: README.md"),
+        "{err}"
+    );
+}
+
+/// A graph that recorded no position (written before it was recorded, or where git could not
+/// answer) and whose root is gone cannot be placed: said so, not reported as empty.
+#[test]
+fn a_moved_checkout_of_a_graph_without_a_recorded_position_is_said_unplaced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, first) = repo(tmp.path());
+    let db_path = tmp.path().join("graph.db");
+    let db = db_path.to_str().unwrap();
+    estate(&dir, &["index", "svc", "--db", db]);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let recorded: String = conn
+        .query_row("SELECT v FROM meta WHERE k = 'indexed_subpath'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(recorded, "\"svc\"");
+    conn.execute("DELETE FROM meta WHERE k = 'indexed_subpath'", [])
+        .unwrap();
+    drop(conn);
+    let moved = tmp.path().join("moved");
+    fs::rename(&dir, &moved).unwrap();
+    let out = estate(&moved, &["changed-since", &first, "--json", "--db", db]);
+    assert_eq!(names(&out.stdout), Vec::<String>::new());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("1 indexed root(s) not placed in this checkout"),
+        "{err}"
+    );
+    assert!(
+        err.contains("2 changed file(s) under no root placed in this checkout"),
+        "{err}"
+    );
+}
+
+/// The recorded root replaced by a symlink into another repository is not followed: the root is
+/// placed in this checkout at its recorded position.
+#[cfg(unix)]
+#[test]
+fn a_root_replaced_by_a_symlink_is_placed_at_its_recorded_position() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, first) = repo(tmp.path());
+    let db = tmp.path().join("graph.db");
+    let db = db.to_str().unwrap();
+    estate(&dir, &["index", "svc", "--db", db]);
+    let moved = tmp.path().join("moved");
+    fs::rename(&dir, &moved).unwrap();
+    let other = tmp.path().join("other");
+    // The symlink resolves to a directory where the root was: `svc` exists there too.
+    fs::create_dir_all(other.join("svc")).unwrap();
+    fs::write(other.join("svc/x.txt"), "x\n").unwrap();
+    git(&other, &["init", "-q", "-b", "main"]);
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-q", "-m", "one"]);
+    std::os::unix::fs::symlink(&other, &dir).unwrap();
+    let out = estate(&moved, &["changed-since", &first, "--json", "--db", db]);
+    let found = names(&out.stdout);
+    for want in ["cancelOrder", "placeOrder"] {
+        assert!(found.iter().any(|n| n == want), "{want}: {found:?}");
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("1 changed file(s) outside the indexed root(s), not in this graph: README.md"),
+        "{err}"
+    );
 }
