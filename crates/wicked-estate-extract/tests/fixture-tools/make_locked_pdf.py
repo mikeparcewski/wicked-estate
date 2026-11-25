@@ -1,6 +1,7 @@
 """Writes locked.pdf: a one-page PDF under the Standard security handler (V1, R2, RC4-40) whose
 user password is not empty, so a reader with no password cannot open it. Made-up passwords; the
-file holds no text. Run: python3 make_locked_pdf.py locked.pdf"""
+file holds no text. Run: python3 make_locked_pdf.py ../fixtures/docs/locked.pdf
+(this script stays out of tests/fixtures, whose files the language fixture harness extracts)."""
 import hashlib, struct, sys
 PAD = bytes.fromhex("28BF4E5E4E758A4164004E56FFFA01082E2E00B6D0683E802F0CA9FE6453697A")
 def rc4(key, data):

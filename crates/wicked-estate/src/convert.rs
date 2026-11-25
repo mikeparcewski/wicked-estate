@@ -2,10 +2,10 @@
 //!
 //! One binary document (PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB) to Markdown on
 //! stdout, through the same converter the index uses ([`doc_convert`]): read under the size cap,
-//! converted in the isolated child (#442: live-heap budget, wall-clock deadline, a crash stays in
-//! the child), then masked with the Markdown redaction rules, as `knowledge.ingest` masks it.
-//! Local only, and it stores nothing: it is dispatched before the store resolves and opens no
-//! graph.
+//! converted and masked in the isolated child (#442: live-heap budget, wall-clock deadline, a crash
+//! stays in the child). Masking is `knowledge.ingest`'s: the Markdown rules, then the free-text
+//! rules ([`doc_convert::mask_markdown`]). Local only, and it stores nothing: it is dispatched
+//! before the store resolves and opens no graph.
 //!
 //! A refusal leaves stdout empty, writes one `refused <kind>: <reason>` line on stderr and exits
 //! with that kind's code ([`exit_code`]), so a caller branches on the code, not on prose.
@@ -14,7 +14,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use wicked_estate_extract::doc_convert::{self, Skipped};
-use wicked_estate_extract::redact;
 
 use crate::cli_flags;
 
@@ -41,6 +40,32 @@ pub fn exit_code(kind: &str) -> i32 {
         .or_else(|| EXIT_CODES.iter().find(|(k, _)| *k == "failed"))
         .map(|(_, code)| *code)
         .expect("a code for failed")
+}
+
+/// The usage lines, shared by `convert --help` and the full usage text.
+pub fn print_usage() {
+    println!(
+        "  wicked-estate convert <file> [--max-bytes N] [--deadline-ms N]  # one document (pdf, docx, pptx, xlsx, odt, rtf, epub, ...) to Markdown on stdout, secrets masked; stores nothing"
+    );
+    println!(
+        "    Refusal: empty stdout, one stderr line 'refused <kind>: <reason>', exit {}",
+        EXIT_CODES
+            .iter()
+            .map(|(kind, code)| format!("{code} {kind}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
+/// A file operand that is not valid UTF-8: refused as unreadable, like any file this command
+/// cannot open, so a caller still branches on the code.
+pub fn refuse_non_utf8_operand() -> i32 {
+    let skip = Skipped::Unreadable("cannot open");
+    eprintln!(
+        "refused {}: the file name is not valid UTF-8; not converted",
+        skip.kind()
+    );
+    exit_code(skip.kind())
 }
 
 /// Run the command: Markdown on stdout and `Ok(0)`, or a refusal on stderr and its code.
@@ -74,10 +99,14 @@ pub fn run(args: &cli_flags::Args) -> std::io::Result<i32> {
 
 fn convert(path: &Path, max_bytes: usize, deadline: Duration) -> Result<String, Skipped> {
     let bytes = doc_convert::read_capped_at(path, max_bytes)?;
-    // The file name only names the format when the bytes carry no signature.
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let md = doc_convert::to_markdown_within(name, &bytes, deadline)?;
-    Ok(redact::redact_source("convert.md", &md))
+    // The file name names the format only when the bytes carry no signature, and only for a
+    // document extension: a signatureless `.csv` (text, not a document) is unsupported.
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| doc_convert::is_doc_path(n))
+        .unwrap_or("");
+    doc_convert::to_masked_markdown_within(name, &bytes, deadline)
 }
 
 /// The refusal's reason, with the limits this run used where they differ from the converter's

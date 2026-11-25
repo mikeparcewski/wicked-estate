@@ -836,7 +836,20 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
     doc_convert::isolate_conversions();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `std::env::args` panics on an argument that is not UTF-8; refuse it instead (#556).
+    let args: Vec<String> = match std::env::args_os()
+        .skip(1)
+        .map(std::ffi::OsString::into_string)
+        .collect::<Result<_, _>>()
+    {
+        Ok(args) => args,
+        Err(_)
+            if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("convert")) =>
+        {
+            std::process::exit(convert::refuse_non_utf8_operand())
+        }
+        Err(bad) => anyhow::bail!("an argument is not valid UTF-8: {}", bad.to_string_lossy()),
+    };
     let (cmd, rest) = match args.split_first() {
         Some((c, r)) => (c.as_str(), r),
         None => ("help", &[][..]),
@@ -852,14 +865,16 @@ fn main() -> Result<()> {
         return Ok(());
     }
     // (#556) One document to Markdown on stdout. Before the store resolves: it opens no graph,
-    // so a team runtime or a missing store never stands between a caller and a conversion. A
-    // help request falls through to the usage arm.
+    // so a team runtime or a missing store never stands between a caller and a conversion, or
+    // its help.
     if cmd == "convert" {
-        if let cli_flags::Parsed::Args(a) =
-            cli_flags::parse("convert", rest, "").map_err(anyhow::Error::msg)?
-        {
-            let code = convert::run(&a)?;
-            std::process::exit(code);
+        match cli_flags::parse("convert", rest, "").map_err(anyhow::Error::msg)? {
+            cli_flags::Parsed::Args(a) => std::process::exit(convert::run(&a)?),
+            _ => {
+                println!("usage:");
+                convert::print_usage();
+                return Ok(());
+            }
         }
     }
 
@@ -4453,17 +4468,7 @@ fn main() -> Result<()> {
             println!(
                 "    Evidence-envelope freshness read: \"what needs re-verification?\". A date is 00:00:00 UTC. Never-verified rows (last_verified=0) are always stale."
             );
-            println!(
-                "  wicked-estate convert <file> [--max-bytes N] [--deadline-ms N]  # one document (pdf, docx, pptx, xlsx, odt, rtf, epub, ...) to Markdown on stdout, secrets masked; stores nothing"
-            );
-            println!(
-                "    Refusal: empty stdout, one stderr line 'refused <kind>: <reason>', exit {}",
-                convert::EXIT_CODES
-                    .iter()
-                    .map(|(kind, code)| format!("{code} {kind}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+            convert::print_usage();
             println!(
                 "  wicked-estate fingerprint <name>   [--db ...]  # stable hex fingerprint for symbol"
             );
