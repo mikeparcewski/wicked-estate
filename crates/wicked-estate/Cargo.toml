@@ -13,7 +13,7 @@ categories = ["development-tools", "parsing", "command-line-utilities"]
 # tests/lineage_cli.rs and tests/mcp_name_parity.rs need the path-only wicked-estate-mcp
 # dev-dependency below, which `cargo publish` strips: shipped, each would be a test target the
 # published crate cannot compile.
-exclude = ["tests/lineage_cli.rs", "tests/mcp_name_parity.rs"]
+exclude = ["tests/lineage_cli.rs", "tests/mcp_name_parity.rs", "tests/codegraph_recorded_cli.rs"]
 
 [[bin]]
 name = "wicked-estate"
@@ -59,6 +59,12 @@ postgres = ["wicked-estate-store/postgres"]
 # Off by default to keep the base binary dependency-light (roxmltree/quick-xml/calamine).
 xml-rules = ["wicked-estate-extract/xml-rules"]     # Camunda DMN, Progress Corticon (.dmn/.ers/.erf/.ecore)
 excel-rules = ["wicked-estate-extract/excel-rules"] # Excel/XLSX decision tables
+# TEST BUILDS ONLY (estate#595): `index --codegraph` reads codegraph's facts from the recorded SQL
+# that WICKED_ESTATE_CODEGRAPH_RECORDED names instead of running codegraph, so consumers' CI can
+# write a `--codegraph` store from tests/fixtures/codegraph. No release build enables it, and
+# scripts/smoke-binary.py fails a shipped binary that carries it, and a build without debug
+# assertions (any release profile) refuses to compile with it.
+codegraph-fixture = []
 
 [dev-dependencies]
 tempfile = "3"
