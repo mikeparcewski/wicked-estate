@@ -745,12 +745,38 @@ fn file_verdict(snap: &Snapshot, raw: &str) -> Verdict {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "codegraph-fixture"))]
 thread_local! {
     /// SQL that builds the codegraph database a test run reads instead of running codegraph;
     /// `"FAIL"` makes the run fail.
     pub(crate) static TEST_DATABASE_SQL: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// A test build (`--features codegraph-fixture`, never a release) reads the codegraph database
+/// from the recorded SQL this names instead of running codegraph, so consumers' CI can write a
+/// `--codegraph` store through the real `index` route (estate#595).
+#[cfg(feature = "codegraph-fixture")]
+pub const RECORDED_SQL_ENV: &str = "WICKED_ESTATE_CODEGRAPH_RECORDED";
+
+/// The recorded SQL standing in for this run: a test's, else (feature builds) the file
+/// [`RECORDED_SQL_ENV`] names.
+#[cfg(any(test, feature = "codegraph-fixture"))]
+fn recorded_sql() -> std::result::Result<Option<String>, String> {
+    if let Some(sql) = TEST_DATABASE_SQL.with(|t| t.borrow().clone()) {
+        return Ok(Some(sql));
+    }
+    #[cfg(feature = "codegraph-fixture")]
+    if let Some(path) = std::env::var_os(RECORDED_SQL_ENV) {
+        return std::fs::read_to_string(&path)
+            .map(Some)
+            .map_err(|e| format!("{RECORDED_SQL_ENV}={}: {e}", Path::new(&path).display()));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+thread_local! {
     /// The last run's `not imported` count on this thread, for tests.
     pub(crate) static LAST_DROPPED: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
@@ -837,10 +863,15 @@ pub fn prepare(
     // The mirror and the scratch home are never one `git add -A` away from a commit.
     std::fs::write(cfg.state_dir.join(".gitignore"), "*\n")
         .map_err(|e| format!("state dir: {e}"))?;
-    #[cfg(test)]
-    if let Some(sql) = TEST_DATABASE_SQL.with(|t| t.borrow().clone()) {
+    #[cfg(any(test, feature = "codegraph-fixture"))]
+    if let Some(sql) = recorded_sql()? {
         // Tests stand a recorded codegraph database (real bundle output, see
-        // tests/fixtures/codegraph) in for the run; the mirror is still written.
+        // tests/fixtures/codegraph) in for the run; the mirror is still written. The marker is
+        // what scripts/smoke-binary.py looks for in shipped binaries: it must never be in one.
+        eprintln!(
+            "CODEGRAPH-FIXTURE: codegraph's facts come from recorded SQL, not a codegraph run \
+             (a test build)"
+        );
         sync_mirror(cfg, &input.files, &input.configs, input.read)
             .map_err(|e| format!("mirror: {e}"))?;
         if sql == "FAIL" {

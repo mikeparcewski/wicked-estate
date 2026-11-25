@@ -74,6 +74,29 @@ jobs:
           npm install -g --no-audit --no-fund typescript@5.9.3 typescript-language-server@6.0.2
           cargo test -p wicked-estate-resolve --test lsp_live -- --nocapture
 
+  # ── estate#595: the recorded-SQL codegraph hook is a test-only feature, so nothing in `gate`
+  #    compiles it. This job lints and tests the feature build; release builds never enable it,
+  #    and the install smoke test (gate-os, binaries.yml) fails a shipped binary that carries it. ──
+  codegraph-fixture:
+    name: codegraph fixture store (test-only feature)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: codegraph-fixture
+      - name: clippy (-D warnings, --features codegraph-fixture)
+        run: cargo clippy -p wicked-estate --features codegraph-fixture --all-targets -- -D warnings
+      - name: test (--features codegraph-fixture)
+        run: |
+          cargo test -p wicked-estate --features codegraph-fixture --lib codegraph::
+          cargo test -p wicked-estate --features codegraph-fixture --test codegraph_recorded_cli
+
   # ── #360: the same gate on macOS and Windows, plus the install smoke test of release binaries.
   #    Grammar plugins load .so/.dylib/.dll, SQLite and 11 grammars are compiled from C, several
   #    tests shell out to git, and paths are normalised for the evidence layer — none of it ran

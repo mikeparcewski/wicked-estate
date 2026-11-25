@@ -13,6 +13,8 @@ Against the binaries in <unpacked-archive-dir> it checks:
   3. `blast-radius` of a known symbol returns its known dependent;
   4. `wicked-estate-mcp` answers `initialize` then `tools/list` over stdin with exactly the tool
      count CLAUDE.md states ("N tools across 3 domains") — the one constant this reads.
+  5. neither binary carries the recorded-SQL codegraph hook (`--features codegraph-fixture`, test
+     builds only, estate#595): its `CODEGRAPH-FIXTURE:` marker is not in the file.
 
 `--exec-prefix` runs every binary through a wrapper — e.g.
 `docker run --rm -i -v <dir>:<dir> -w <dir> rockylinux:8` — so the same checks prove a clean
@@ -34,6 +36,25 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 FIXTURE = HERE / "smoke-fixture"
 EXE = ".exe" if os.name == "nt" else ""
+
+
+# The marker the recorded-SQL hook prints; a binary that holds it can take codegraph's facts from
+# injected SQL. Read in chunks with an overlap, so a marker across a chunk boundary is found.
+FIXTURE_MARKER = b"CODEGRAPH-FIXTURE:"
+READ_CHUNK = 1 << 20
+
+
+def with_recorded_hook(binaries: list[Path]) -> list[Path]:
+    hooked = []
+    for b in binaries:
+        tail = b""
+        with open(b, "rb") as f:
+            while chunk := f.read(READ_CHUNK):
+                if FIXTURE_MARKER in tail + chunk:
+                    hooked.append(b)
+                    break
+                tail = chunk[-(len(FIXTURE_MARKER) - 1):]
+    return hooked
 
 
 def fail(step: str, detail: str) -> None:
@@ -68,6 +89,12 @@ def main() -> None:
     for doc in ("LICENSE", "NOTICE", "README.md"):
         if not (bindir / doc).is_file():
             fail("archive", f"missing {doc} in {bindir}")
+
+    hooked = with_recorded_hook([estate, mcp])
+    if hooked:
+        fail("release-features", f"{[b.name for b in hooked]} carry the recorded-SQL codegraph hook "
+                                 f"(--features codegraph-fixture is for test builds only)")
+    print("ok  release features: no recorded-SQL codegraph hook in the binaries")
 
     work = bindir / "smoke-work"
     shutil.rmtree(work, ignore_errors=True)
