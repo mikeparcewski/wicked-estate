@@ -1321,11 +1321,31 @@ fn a_cycle_no_unnamed_paragraph_reaches_is_run_from_its_first_paragraph() {
     assert_eq!(callers_of(&ex, "2000-PROC"), ["1000-READ"]);
 }
 
+/// The nodes named `name`, in source order.
+fn nodes_named<'a>(ex: &'a Extraction, name: &str) -> Vec<&'a Node> {
+    let mut out: Vec<&Node> = ex.nodes.iter().filter(|n| n.name == name).collect();
+    out.sort_by_key(|n| n.location.span.start_line);
+    out
+}
+
+/// The `kind` local edges from `from`, as targets.
+fn edges_from<'a>(
+    ex: &'a Extraction,
+    from: &wicked_estate_core::SymbolId,
+    kind: EdgeKind,
+) -> Vec<&'a wicked_estate_core::SymbolId> {
+    ex.local_edges
+        .iter()
+        .filter(|e| &e.source == from && e.kind == kind)
+        .map(|e| &e.target)
+        .collect()
+}
+
 #[test]
-fn a_qualified_perform_of_a_same_named_paragraph_is_not_a_self_jump() {
-    // FIRST-SECTION's A-PARA performs SECOND-SECTION's A-PARA. Paragraph ids carry no section
-    // (#580), so the two share one id: the call is not stored (no self-edges). The program starts
-    // at FIRST-SECTION (#585).
+fn same_named_paragraphs_of_two_sections_are_two_nodes_580() {
+    // FIRST-SECTION's A-PARA performs SECOND-SECTION's A-PARA. A paragraph name that repeats in
+    // two sections of one program is qualified by its section, `A-PARA(FIRST-SECTION).` (#580):
+    // two nodes, and the qualified PERFORM is a call from one to the other, bound by identity.
     let ex = extract(
         "QUALPGM",
         &program(
@@ -1343,9 +1363,46 @@ fn a_qualified_perform_of_a_same_named_paragraph_is_not_a_self_jump() {
         ),
     );
     assert!(ex.local_edges.iter().all(|e| e.source != e.target));
+    let paras = nodes_named(&ex, "A-PARA");
+    assert_eq!(paras.len(), 2, "{:?}", function_names(&ex));
+    let (first, second) = (&paras[0].symbol, &paras[1].symbol);
+    assert!(
+        first.as_str().ends_with("QUALPGM#A-PARA(FIRST-SECTION)."),
+        "{first}"
+    );
+    assert!(
+        second.as_str().ends_with("QUALPGM#A-PARA(SECOND-SECTION)."),
+        "{second}"
+    );
+    assert_eq!(edges_from(&ex, first, EdgeKind::Calls), [second]);
+    // Each section contains its own A-PARA only.
+    for (section, para) in [("FIRST-SECTION", first), ("SECOND-SECTION", second)] {
+        let held: Vec<_> = edges_from(&ex, &node(&ex, section).symbol, EdgeKind::Contains)
+            .into_iter()
+            .filter(|t| name_of(&ex, t) == "A-PARA")
+            .collect();
+        assert_eq!(held, [para], "{section}");
+    }
+    // The CALL is the second A-PARA's alone. The program starts at FIRST-SECTION (#585), which
+    // falls into the first A-PARA; the second is reached only by the qualified PERFORM.
+    let calls_of = |sym| {
+        ex.refs
+            .iter()
+            .filter(|r| &r.from == sym && r.kind == EdgeKind::Calls)
+            .map(|r| r.raw_name.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(calls_of(first), Vec::<&str>::new());
+    assert_eq!(calls_of(second), ["SUBPGM"]);
     assert_eq!(calls_from(&ex, "QUALPGM"), ["FIRST-SECTION"]);
+    assert_eq!(
+        edges_from(&ex, &node(&ex, "FIRST-SECTION").symbol, EdgeKind::Calls),
+        [first]
+    );
+
     // A differently named paragraph of FIRST-SECTION performs A-PARA OF SECOND-SECTION: a local
-    // call from it on the PERFORM line, though FIRST-SECTION has an A-PARA too.
+    // call from it on the PERFORM line to SECOND-SECTION's A-PARA, though FIRST-SECTION has an
+    // A-PARA too.
     let text = program(
         "QUALTWO",
         DATA,
@@ -1367,7 +1424,7 @@ fn a_qualified_perform_of_a_same_named_paragraph_is_not_a_self_jump() {
         .position(|l| l.trim() == "PERFORM A-PARA OF SECOND-SECTION")
         .unwrap() as u32;
     let main = &node(&ex, "MAIN-PARA").symbol;
-    let performed: Vec<&str> = ex
+    let performed: Vec<&wicked_estate_core::SymbolId> = ex
         .local_edges
         .iter()
         .filter(|e| e.kind == EdgeKind::Calls && &e.source == main)
@@ -1376,9 +1433,164 @@ fn a_qualified_perform_of_a_same_named_paragraph_is_not_a_self_jump() {
                 .as_ref()
                 .is_some_and(|l| l.span.start_line == line)
         })
-        .map(|e| name_of(&ex, &e.target))
+        .map(|e| &e.target)
         .collect();
-    assert_eq!(performed, ["A-PARA"], "{:?}", ex.local_edges);
+    assert_eq!(
+        performed,
+        [&nodes_named(&ex, "A-PARA")[1].symbol],
+        "{:?}",
+        ex.local_edges
+    );
+}
+
+#[test]
+fn a_paragraph_name_used_once_keeps_its_unqualified_id_580() {
+    // Only a name that repeats across sections is qualified: MAIN-PARA and M1-PARA are unique,
+    // so their ids carry no section and do not change; A-PARA and Z-PARA repeat.
+    let ex = extract("QUALPGM", &two_sections("    PERFORM M1-PARA."));
+    for unique in ["MAIN-PARA", "M1-PARA", "M2-PARA"] {
+        let sym = node(&ex, unique).symbol.as_str();
+        assert!(
+            sym.ends_with(&format!("QUALPGM#{unique}().")),
+            "{unique}: {sym}"
+        );
+    }
+    for repeated in ["A-PARA", "Z-PARA"] {
+        let found: Vec<&str> = nodes_named(&ex, repeated)
+            .iter()
+            .map(|n| n.symbol.as_str())
+            .collect();
+        assert_eq!(found.len(), 2, "{repeated}: {found:?}");
+        assert!(
+            found[0].ends_with(&format!("QUALPGM#{repeated}(FIRST-SECTION).")),
+            "{found:?}"
+        );
+        assert!(
+            found[1].ends_with(&format!("QUALPGM#{repeated}(SECOND-SECTION).")),
+            "{found:?}"
+        );
+    }
+    // Sections themselves keep their ids.
+    let section = node(&ex, "FIRST-SECTION").symbol.as_str();
+    assert!(section.ends_with("QUALPGM#FIRST-SECTION()."), "{section}");
+
+    // A section named like a paragraph is no repeated paragraph name: the paragraph keeps its id.
+    let ex = extract(
+        "SECTPGM",
+        &program(
+            "SECTPGM",
+            DATA,
+            &[
+                "S SECTION.",
+                "P.",
+                "    PERFORM Q.",
+                "P SECTION.",
+                "Q.",
+                "    EXIT.",
+            ],
+        ),
+    );
+    let p = nodes_named(&ex, "P");
+    assert!(
+        p.iter()
+            .all(|n| n.symbol.as_str().ends_with("SECTPGM#P().")),
+        "{:?}",
+        p.iter().map(|n| n.symbol.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn repeated_paragraphs_in_integer_named_sections_are_two_nodes_580() {
+    // A section named by an integer emits no node of its own; its paragraphs are still qualified.
+    let ex = extract(
+        "NUMPGM",
+        &program(
+            "NUMPGM",
+            DATA,
+            &[
+                "100 SECTION.",
+                "P.",
+                "    PERFORM P OF 200.",
+                "200 SECTION.",
+                "P.",
+                "    EXIT.",
+            ],
+        ),
+    );
+    let p: Vec<&str> = nodes_named(&ex, "P")
+        .iter()
+        .map(|n| n.symbol.as_str())
+        .collect();
+    assert_eq!(p.len(), 2, "{p:?}");
+    assert!(
+        p[0].ends_with("NUMPGM#P(100).") && p[1].ends_with("NUMPGM#P(200)."),
+        "{p:?}"
+    );
+}
+
+#[test]
+fn a_paragraph_before_any_section_keeps_its_id_and_its_twin_is_qualified_580() {
+    // P before any section and P in section S: two nodes. The one in no section keeps its id; the
+    // one in S is qualified.
+    let ex = extract(
+        "PREPGM",
+        &program(
+            "PREPGM",
+            DATA,
+            &[
+                "P.",
+                "    PERFORM P OF S.",
+                "    GOBACK.",
+                "S SECTION.",
+                "P.",
+                "    EXIT.",
+            ],
+        ),
+    );
+    let p: Vec<&str> = nodes_named(&ex, "P")
+        .iter()
+        .map(|n| n.symbol.as_str())
+        .collect();
+    assert_eq!(p.len(), 2, "{p:?}");
+    assert!(
+        p[0].ends_with("PREPGM#P().") && p[1].ends_with("PREPGM#P(S)."),
+        "{p:?}"
+    );
+}
+
+#[test]
+fn a_section_qualified_paragraph_never_takes_a_nested_programs_id_580() {
+    // OUTER repeats P in sections INNER and OTHER; the nested program INNER has its own P. The
+    // section is in the paragraph's own descriptor, not a container, so the three ids differ.
+    let text = [
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. OUTER.",
+        "       PROCEDURE DIVISION.",
+        "       INNER SECTION.",
+        "       P.",
+        "           EXIT.",
+        "       OTHER SECTION.",
+        "       P.",
+        "           EXIT.",
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. INNER.",
+        "       PROCEDURE DIVISION.",
+        "       P.",
+        "           EXIT.",
+        "       END PROGRAM INNER.",
+        "       END PROGRAM OUTER.",
+    ]
+    .join("\n")
+        + "\n";
+    let ex = extract("OUTER", &text);
+    let mut p: Vec<&str> = nodes_named(&ex, "P")
+        .iter()
+        .map(|n| n.symbol.as_str())
+        .collect();
+    assert_eq!(p.len(), 3, "{p:?}");
+    p.sort_unstable();
+    p.dedup();
+    assert_eq!(p.len(), 3, "three distinct ids: {p:?}");
 }
 
 #[test]

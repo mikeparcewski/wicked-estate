@@ -366,7 +366,7 @@
         }
       },
       {
-        "symbol": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA().",
+        "symbol": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA(FIRST-SECT).",
         "kind": "function",
         "name": "STEP-PARA",
         "language": "cobol",
@@ -411,7 +411,7 @@
         }
       },
       {
-        "symbol": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA().",
+        "symbol": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA(SECOND-SECT).",
         "kind": "function",
         "name": "STEP-PARA",
         "language": "cobol",
@@ -542,7 +542,7 @@
       },
       {
         "source": "file . cbl/AMBPGM.cbl:",
-        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA().",
+        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA(FIRST-SECT).",
         "kind": "contains",
         "confidence": 1.0,
         "provenance": "parsed",
@@ -584,7 +584,7 @@
       },
       {
         "source": "file . cbl/AMBPGM.cbl:",
-        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA().",
+        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA(SECOND-SECT).",
         "kind": "contains",
         "confidence": 1.0,
         "provenance": "parsed",
@@ -668,7 +668,7 @@
       },
       {
         "source": "ts-cobol . . . cbl/AMBPGM/AMBPGM#FIRST-SECT().",
-        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA().",
+        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA(FIRST-SECT).",
         "kind": "contains",
         "confidence": 1.0,
         "provenance": "parsed",
@@ -710,7 +710,7 @@
       },
       {
         "source": "ts-cobol . . . cbl/AMBPGM/AMBPGM#SECOND-SECT().",
-        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA().",
+        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA(SECOND-SECT).",
         "kind": "contains",
         "confidence": 1.0,
         "provenance": "parsed",
@@ -794,7 +794,7 @@
       },
       {
         "source": "ts-cobol . . . cbl/AMBPGM/AMBPGM#",
-        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA().",
+        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA(FIRST-SECT).",
         "kind": "calls",
         "confidence": 1.0,
         "provenance": "parsed",
@@ -816,6 +816,27 @@
       {
         "source": "ts-cobol . . . cbl/AMBPGM/AMBPGM#",
         "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#SECOND-SECT().",
+        "kind": "calls",
+        "confidence": 1.0,
+        "provenance": "parsed",
+        "resolved_by": "tree-sitter",
+        "evidence_count": 0,
+        "location": {
+          "file": "cbl/AMBPGM.cbl",
+          "span": {
+            "start_byte": 0,
+            "end_byte": 0,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 0
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "source": "ts-cobol . . . cbl/AMBPGM/AMBPGM#",
+        "target": "ts-cobol . . . cbl/AMBPGM/AMBPGM#STEP-PARA(SECOND-SECT).",
         "kind": "calls",
         "confidence": 1.0,
         "provenance": "parsed",
