@@ -4131,6 +4131,42 @@ mod tests {
         }
     }
 
+    /// #357: every hop carries the line where the relationship happens (the edge's location),
+    /// not only the two declarations; an edge with no location says `null`, never a guess.
+    #[test]
+    fn path_hops_carry_the_call_site_357() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("caller", "caller_fn", NodeKind::Function, "src/a.rs", 1),
+                make_node("middle", "middle_fn", NodeKind::Function, "src/b.rs", 10),
+                make_node("leaf", "leaf_fn", NodeKind::Function, "src/c.rs", 20),
+            ])
+            .unwrap();
+        let mut sited = make_call_edge("caller", "middle");
+        sited.location = Some(Location::new("src/a.rs", span(41)));
+        store
+            .upsert_edges(&[sited, make_call_edge("middle", "leaf")])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let res = Path
+            .invoke(&store, &json!({"from": "caller_fn", "to": "leaf_fn"}))
+            .unwrap();
+        let hops = res.content["hops"].as_array().unwrap();
+        assert_eq!(hops.len(), 2);
+        assert_eq!(
+            hops[0]["site"],
+            json!({"file": "src/a.rs", "line_1based": 42, "representative": true}),
+            "{}",
+            hops[0]
+        );
+        // Present and null: the key is the contract, the value says the edge has no site.
+        assert!(hops[1].as_object().unwrap().contains_key("site"));
+        assert!(hops[1]["site"].is_null(), "{}", hops[1]);
+    }
+
     /// Round 2's R3 defect: an operand that is present but empty (or not a string) used to
     /// return `unresolved: null` — byte-identical to the wire shape the spec licenses a
     /// reader to treat as "no route exists in the graph" — while the diagnostic called a
