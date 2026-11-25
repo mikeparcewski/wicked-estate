@@ -1698,6 +1698,7 @@ mod tests {
     const GET: &str = "ts-typescript . . . src/svc/UserService#get().";
     const LIB_HELPER: &str = "ts-typescript . . . src/lib/util/helper().";
     const DECOY_HELPER: &str = "ts-typescript . . . src/util/helper().";
+    const GET2: &str = "ts-typescript . . . src/svc/UserService#get2().";
 
     #[test]
     fn codegraph_binds_a_tsconfig_alias_import_to_the_configured_file_only() {
@@ -1965,21 +1966,57 @@ mod tests {
         );
     }
 
-    #[test]
-    fn callers_of_a_file_that_fell_back_keep_their_edges_into_it() {
-        // Coord r2 F1 (W16): src/lib/util.ts grew past the cap (size_exceeded, no nodes). Its
-        // caller src/svc.ts is still codegraph's; the call to helper must bind into the fallen
-        // back file through estate's resolvers, and never to the decoy codegraph answers for.
-        let sql = format!(
+    /// The fixture's `src/lib/util.ts` grown past codegraph's cap (`size_exceeded`, no nodes):
+    /// the file falls back to estate's pipeline while its callers stay codegraph's.
+    fn lib_util_fell_back_sql() -> String {
+        format!(
             "{FIXTURE_SQL}\nUPDATE files SET errors = '[{{\"message\":\"too big\",\"severity\":\"error\",\"code\":\"size_exceeded\"}}]', node_count = 0 WHERE path = 'src/lib/util.ts';\n\
              DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = 'src/lib/util.ts') OR target IN (SELECT id FROM nodes WHERE file_path = 'src/lib/util.ts');\n\
              DELETE FROM unresolved_refs WHERE file_path = 'src/lib/util.ts';\n\
              DELETE FROM nodes WHERE file_path = 'src/lib/util.ts';"
-        );
+        )
+    }
+
+    /// A copy of the fixture repo under `tmp`, for a test that edits a source.
+    fn fixture_copy(tmp: &Path) -> PathBuf {
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for e in std::fs::read_dir(from).unwrap() {
+                let e = e.unwrap();
+                if e.file_type().unwrap().is_dir() {
+                    copy(&e.path(), &to.join(e.file_name()));
+                } else {
+                    std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+                }
+            }
+        }
+        let root = tmp.join("repo");
+        copy(&fixture_root(), &root);
+        root
+    }
+
+    #[test]
+    fn callers_of_a_file_that_fell_back_keep_their_edges_into_it() {
+        // Coord r2 F1 (W16): src/lib/util.ts fell back. Its caller src/svc.ts is still
+        // codegraph's; the call to helper binds into the fallen back file through estate's
+        // resolvers, on the evidence estate main uses: a relative import (estate#594: never on a
+        // uniqueness the fall-through manufactured by hiding the decoy).
         let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+        std::fs::write(
+            root.join("src/svc.ts"),
+            svc.replace("'@lib/util'", "'./lib/util'"),
+        )
+        .unwrap();
         let cfg = config(tmp.path());
         let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
-        index(&mut store, &fixture_root(), Some(&cfg), Some(&sql));
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
         let calls = edges(&store, EdgeKind::Calls);
         let from_get = calls_from(&calls, GET);
         assert!(
@@ -2001,23 +2038,70 @@ mod tests {
     }
 
     #[test]
+    fn a_fall_through_call_named_like_a_codegraph_definition_stays_ambiguous_594() {
+        // estate#594 (N1, W12): the same fall-back, with the call's only evidence the tsconfig
+        // alias estate does not read. `helper` is defined in the fallen-back file AND in the
+        // codegraph file src/util.ts, so estate main finds it ambiguous and binds nothing. The
+        // fall-through must see the same two candidates: the call parks, never bound into the
+        // fallen-back file as if it were the only `helper`.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(
+            &mut store,
+            &fixture_root(),
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get = calls_from(&calls, GET);
+        assert!(
+            !from_get
+                .iter()
+                .any(|(_, t, _)| t == LIB_HELPER || t == DECOY_HELPER),
+            "an ambiguous name binds nothing: {from_get:?}"
+        );
+        let parked = store
+            .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}helper"))
+            .unwrap();
+        assert!(
+            parked.iter().any(|r| r.from.0 == GET),
+            "the call parks: {parked:?}"
+        );
+    }
+
+    #[test]
+    fn a_fall_through_winner_in_a_codegraph_file_is_dropped_and_parks_594() {
+        // estate#594 / #584 fold: codegraph leaves `this.get(..)` in get2() unbound (its edge 32
+        // removed). Estate's resolvers see every candidate, and the only `get` lives in
+        // src/svc.ts, a file codegraph answers for, where its verdict stands: the edge is
+        // dropped and the call parks.
+        let sql = format!("{FIXTURE_SQL}\nDELETE FROM edges WHERE id = 32;");
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(&sql));
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get2 = calls_from(&calls, GET2);
+        assert!(
+            !from_get2.iter().any(|(_, t, _)| t == GET),
+            "no edge into the codegraph file: {from_get2:?}"
+        );
+        let parked = store
+            .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}get"))
+            .unwrap();
+        assert!(
+            parked.iter().any(|r| r.from.0 == GET2),
+            "the call parks: {parked:?}"
+        );
+    }
+
+    #[test]
     fn an_import_of_a_file_codegraph_never_sees_keeps_its_edge() {
         // Coord r2 F2 (W12): `import './styles.css'` has no codegraph site (the mirror holds only
         // switched sources), so it goes to estate's resolvers instead of parking.
-        fn copy(from: &Path, to: &Path) {
-            std::fs::create_dir_all(to).unwrap();
-            for e in std::fs::read_dir(from).unwrap() {
-                let e = e.unwrap();
-                if e.file_type().unwrap().is_dir() {
-                    copy(&e.path(), &to.join(e.file_name()));
-                } else {
-                    std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
-                }
-            }
-        }
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("repo");
-        copy(&fixture_root(), &root);
+        let root = fixture_copy(tmp.path());
         let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
         std::fs::write(
             root.join("src/svc.ts"),
