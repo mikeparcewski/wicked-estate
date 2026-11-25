@@ -91,6 +91,62 @@ UPSTREAM_DECLARATIONS = {
             "common/scanner.h": "2e938459c2000aae38b0a4d20caf2f7b1eb2b879",
             "common/tag.h": "d441dc4fc5f21b35db1d279be38e2e19ec8b6ab7",
         },
+        # Local edits to pinned files, each marked WICKED PATCH: (our bytes, upstream's bytes).
+        "patches": {
+            # wicked-estate#636: deserialize reads a zero-padded copy; four start tags free their names.
+            "common/scanner.h": (
+                (
+                    b'static void deserialize(Scanner *scanner, const char *buffer, unsigned length, bool is_cfquery_context) {\n'
+                    b"    // WICKED PATCH 2 (wicked-estate#636): serialize skips the CF stack's header when the HTML stack\n"
+                    b'    // fills the buffer, but DESERIALIZE_TAGS reads it anyway. Read from a zero-padded copy, so a\n'
+                    b'    // missing header reads as an empty stack instead of past the end of `buffer`.\n'
+                    b'    char padded[TREE_SITTER_SERIALIZATION_BUFFER_SIZE + 8] = {0};\n'
+                    b'    if (length > TREE_SITTER_SERIALIZATION_BUFFER_SIZE) length = TREE_SITTER_SERIALIZATION_BUFFER_SIZE;\n'
+                    b'    if (length > 0) memcpy(padded, buffer, length);\n'
+                    b'    buffer = padded;\n'
+                    b'    scanner->cfoutput_depth = 0;',
+                    b'static void deserialize(Scanner *scanner, const char *buffer, unsigned length, bool is_cfquery_context) {\n'
+                    b'    scanner->cfoutput_depth = 0;',
+                ),
+                (
+                    b'        // WICKED PATCH 3 (wicked-estate#636): these four tags are not pushed, so free their names.\n'
+                    b'        case CF_SET:\n'
+                    b'            lexer->result_symbol = CF_SET_START_TAG_NAME;\n'
+                    b'            tag_free(&tag);\n'
+                    b'            return true;\n'
+                    b'        case CF_RETURN:\n'
+                    b'            lexer->result_symbol = CF_RETURN_START_TAG_NAME;\n'
+                    b'            tag_free(&tag);\n'
+                    b'            return true;\n'
+                    b'        case CF_IF:\n'
+                    b'            lexer->result_symbol = CF_IF_START_TAG_NAME;\n'
+                    b'            break;\n'
+                    b'        case CF_ELSEIF:\n'
+                    b'            lexer->result_symbol = CF_ELSEIF_TAG_NAME;\n'
+                    b'            tag_free(&tag);\n'
+                    b'            return true;\n'
+                    b'        case CF_ELSE:\n'
+                    b'            lexer->result_symbol = CF_ELSE_TAG_NAME;\n'
+                    b'            tag_free(&tag);\n'
+                    b'            return true;\n',
+                    b'        case CF_SET:\n'
+                    b'            lexer->result_symbol = CF_SET_START_TAG_NAME;\n'
+                    b'            return true;\n'
+                    b'        case CF_RETURN:\n'
+                    b'            lexer->result_symbol = CF_RETURN_START_TAG_NAME;\n'
+                    b'            return true;\n'
+                    b'        case CF_IF:\n'
+                    b'            lexer->result_symbol = CF_IF_START_TAG_NAME;\n'
+                    b'            break;\n'
+                    b'        case CF_ELSEIF:\n'
+                    b'            lexer->result_symbol = CF_ELSEIF_TAG_NAME;\n'
+                    b'            return true;\n'
+                    b'        case CF_ELSE:\n'
+                    b'            lexer->result_symbol = CF_ELSE_TAG_NAME;\n'
+                    b'            return true;\n',
+                ),
+            ),
+        },
         "license_blob": "aaf7a85db9f6e80c1ade3484da50e719087fe4a8",
         "licenses": ("MIT",),
         "notice_texts": (),
@@ -163,7 +219,7 @@ UPSTREAM_DECLARATIONS = {
         "author": "Jan-Jaap Korpershoek",
     },
     "tree-sitter-cobol-scanner": {
-        # LICENSE at that commit. scanner.c carries four WICKED PATCHes and arborium's packaging
+        # LICENSE at that commit. scanner.c carries five WICKED PATCHes and arborium's packaging
         # edits (the arborium-cobol 2.18.0 crate declares MIT, author Amos Wenger; arborium's
         # LICENSE-MIT: "Copyright (c) 2024 Amos Wenger"), so no source file is pinned here.
         "repo": "https://github.com/zharinov/tree-sitter-cobol",
@@ -173,6 +229,8 @@ UPSTREAM_DECLARATIONS = {
         "licenses": ("MIT",),
         "notice_texts": (),
         "spdx": None,
+        # No crate of its own: it ships inside wicked-estate-extract, whose license names this.
+        "shipped_in_extract": "MIT",
         "copyrights": ("Copyright (c) 2016 Max Brunsfeld",),
         "extra_copyrights": ("Copyright (c) 2024 Amos Wenger",),
         "author": None,
@@ -187,6 +245,8 @@ UPSTREAM_DECLARATIONS = {
         "licenses": ("Universal Permissive License (UPL), Version 1.0",),
         "notice_texts": (),
         "spdx": None,
+        # No crate of its own: it ships inside wicked-estate-extract, whose license names this.
+        "shipped_in_extract": "UPL-1.0",
         "copyrights": ("Copyright (c) 2025 Oracle and/or its affiliates.",),
         "extra_copyrights": (),
         "author": None,
@@ -227,7 +287,10 @@ LICENSE_BODIES = {
 
 def git_blob(path):
     """The git blob sha of a file's bytes, as `git hash-object` gives it."""
-    data = path.read_bytes()
+    return blob_of(path.read_bytes())
+
+
+def blob_of(data):
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
@@ -320,11 +383,23 @@ def declaration_problems(vendor, notice, declarations=UPSTREAM_DECLARATIONS):
                      for n in undeclared_licenses(license_cell, d["licenses"])]
         if offers_a_choice(license_cell) and not offers_a_choice(d["spdx"] or ""):
             problems.append(f"{tree}: PROVENANCE license cell offers a choice (OR); upstream's terms are {d['spdx']!r}")
-        # The files the record pins are the upstream bytes.
+        # The files the record pins are the upstream bytes, once each recorded patch is undone.
+        patches = d.get("patches", {})
+        problems += [f"{tree}: patch for {rel}, which the record does not pin" for rel in sorted(set(patches) - set(d["files"]))]
         for rel, sha in d["files"].items():
             path = vendor / tree / rel
-            if not path.is_file() or git_blob(path) != sha:
-                problems.append(f"{tree}: {rel} is not upstream's blob {sha}")
+            data = path.read_bytes() if path.is_file() else b""
+            dropped = [n for n, (ours, _) in enumerate(patches.get(rel, ()), 1) if data.count(ours) != 1]
+            problems += [f"{tree}: {rel} does not carry its recorded patch {n}" for n in dropped]
+            if dropped:
+                continue
+            for ours, theirs in patches.get(rel, ()):
+                data = data.replace(ours, theirs)
+            if not path.is_file() or blob_of(data) != sha:
+                problems.append(f"{tree}: {rel} is not upstream's blob {sha}"
+                                + (" plus its recorded patches" if rel in patches else ""))
+        if patches and "WICKED PATCH" not in row:
+            problems.append(f"{tree}: PROVENANCE row does not name its WICKED PATCHes")
         # LICENSE: upstream's own file unchanged, or one that states the declaration.
         license_file = vendor / tree / "LICENSE"
         text = license_file.read_text() if license_file.is_file() else ""
@@ -350,6 +425,8 @@ def declaration_problems(vendor, notice, declarations=UPSTREAM_DECLARATIONS):
         for name in (d["repo"], d["commit"]) + d["licenses"] + holders + ((d["author"], NO_COPYRIGHT) if d["author"] else ()):
             if collapsed(name) not in flat:
                 problems.append(f"{tree}: NOTICE entry lacks {name!r}")
+        if patches and "WICKED PATCH" not in block:
+            problems.append(f"{tree}: NOTICE entry does not name its WICKED PATCHes")
         for line in copyright_lines(block):
             if not line.startswith(stems):
                 problems.append(f"{tree}: NOTICE entry states {line!r}, which upstream does not")

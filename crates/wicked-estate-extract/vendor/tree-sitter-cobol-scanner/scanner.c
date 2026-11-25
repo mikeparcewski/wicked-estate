@@ -28,6 +28,9 @@
  *      upstream's recovery, one ERROR to the end, in linear time. Real COBOL recovers from a
  *      statement in a few scans and never gets there. The count lives in the scanner's payload,
  *      so it is per parser, and the extractor makes one parser per file.
+ *   6. The keyword matcher (wicked-estate#636). Upstream advanced and read every keyword's pointer,
+ *      including keywords already ruled out, so a short one was read past its terminating NUL
+ *      while a long one still matched. Only the keywords still matching are read now.
  * Every function and table is `static`, so nothing clashes with the crate's own scanner symbols,
  * except `wicked_cobol_take_recovery_took_over` (patch 4's report to the extractor).
  */
@@ -130,20 +133,22 @@ static bool start_with_word( TSLexer *lexer, char *words[], int number_of_words)
         }
 
         // If the head of the line matches any of specified keywords, return true;
+        // WICKED PATCH 6: read and advance only the keywords still matching, so a pointer never
+        // passes its keyword's terminating NUL (wicked-estate#636).
         char c = lexer->lookahead;
         for(int i=0; i<number_of_words; ++i) {
-            if(*(keyword_pointer[i]) == 0 && continue_check[i]) {
+            if(continue_check[i] && *(keyword_pointer[i]) == 0) {
                 return true;
             }
         }
 
         // matching keywords
         for(int i=0; i<number_of_words; ++i) {
-            char k = *(keyword_pointer[i]);
             if(continue_check[i]) {
+                char k = *(keyword_pointer[i]);
                 continue_check[i] = c == towupper(k) || c == towlower(k);
+                (keyword_pointer[i])++;
             }
-            (keyword_pointer[i])++;
         }
 
         // next character

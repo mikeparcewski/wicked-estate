@@ -6,7 +6,7 @@ keywords = ["tree-sitter", "code-graph", "parsing", "extraction", "llm"]
 categories = ["development-tools", "parsing"]
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT AND UPL-1.0"
 repository.workspace = true
 rust-version.workspace = true
 
