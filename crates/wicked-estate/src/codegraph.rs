@@ -2362,6 +2362,73 @@ mod tests {
         );
     }
 
+    /// estate#596: a ref parked as `codegraph:<name>` is back-filled when an unchanged re-index
+    /// adds what it names in a file codegraph does not answer for, as estate main binds it.
+    #[test]
+    fn a_parked_codegraph_import_binds_once_its_stylesheet_exists_596() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+        std::fs::write(
+            root.join("src/svc.ts"),
+            format!("{svc}import './Button.css';\n"),
+        )
+        .unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
+        let parked = format!("{CODEGRAPH_REF_PREFIX}'./Button.css'");
+        assert_eq!(
+            store.unresolved_refs_for_name(&parked).unwrap().len(),
+            1,
+            "the import parks while the stylesheet is missing"
+        );
+
+        // The stylesheet appears; svc.ts is unchanged, so only back-fill can bind its import.
+        std::fs::write(root.join("src/Button.css"), ".b { color: red; }\n").unwrap();
+        index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
+        let imports = edges(&store, EdgeKind::Imports);
+        assert!(
+            imports
+                .iter()
+                .any(|(_, t, by)| t.contains("src/Button.css") && !by.starts_with("codegraph:")),
+            "the unchanged importer binds the new stylesheet: {imports:?}"
+        );
+        assert!(store.unresolved_refs_for_name(&parked).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_parked_codegraph_call_binds_a_definition_added_outside_codegraph_files_596() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+        std::fs::write(root.join("src/svc.ts"), format!("{svc}fresh596();\n")).unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
+        let parked = format!("{CODEGRAPH_REF_PREFIX}fresh596");
+        assert_eq!(
+            store.unresolved_refs_for_name(&parked).unwrap().len(),
+            1,
+            "the call parks while nothing defines it"
+        );
+
+        // A file codegraph has no record of (so it falls back to estate's pipeline) defines it.
+        std::fs::write(
+            root.join("src/later.ts"),
+            "export function fresh596() {}\n",
+        )
+        .unwrap();
+        index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            calls.iter().any(|(_, t, by)| t.contains("src/later/fresh596")
+                && !by.starts_with("codegraph:")),
+            "the unchanged caller binds the new definition: {calls:?}"
+        );
+        assert!(store.unresolved_refs_for_name(&parked).unwrap().is_empty());
+    }
+
     #[test]
     fn a_site_binds_only_a_ref_of_a_fitting_kind_and_the_tier_names_the_method() {
         // Coord r2 L9, L10.
