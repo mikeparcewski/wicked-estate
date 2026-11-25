@@ -1745,7 +1745,12 @@ pub trait GraphStoreMutExt: GraphStore {
 /// True when a written import specifier is RELATIVE (`./` / `../`) after stripping one pair of
 /// matching quotes. Local mirror of the resolver's `dequote` semantics — the store crate must not
 /// depend on `wicked-estate-resolve` (dependency direction: both sit on `wicked-estate-core`).
+/// A specifier the codegraph import parked (`codegraph:'./x'`, estate#596) is read past its
+/// prefix, so back-fill's import lane sees it.
 pub(crate) fn is_relative_import_spec(raw: &str) -> bool {
+    let raw = raw
+        .strip_prefix(wicked_estate_core::refs::CODEGRAPH_REF_PREFIX)
+        .unwrap_or(raw);
     let s = raw.trim();
     let s = if s.len() >= 2
         && ((s.starts_with('\'') && s.ends_with('\''))
@@ -2838,6 +2843,40 @@ pub mod backfill_conformance {
             vec!["'./b'".to_string(), "../up/x".to_string()],
             "kind- and spec-filtering must exclude bare specifiers and non-Imports rows"
         );
+
+        // estate#596: a relative import the codegraph import parked (`codegraph:<spec>`) is a
+        // candidate too; a bare one is not.
+        let cg_rel = uref(
+            "ts:a.ts:file",
+            "codegraph:'./d'",
+            EdgeKind::Imports,
+            "a.ts",
+            5,
+            110,
+        );
+        let cg_pkg = uref(
+            "ts:a.ts:file",
+            "codegraph:react",
+            EdgeKind::Imports,
+            "a.ts",
+            6,
+            130,
+        );
+        store
+            .upsert_unresolved_refs(&[cg_rel.clone(), cg_pkg.clone()])
+            .unwrap();
+        let listed: Vec<String> = store
+            .parked_relative_import_refs()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.raw_name)
+            .collect();
+        assert!(
+            listed.contains(&"codegraph:'./d'".to_string())
+                && !listed.contains(&"codegraph:react".to_string()),
+            "{listed:?}"
+        );
+        assert_eq!(store.delete_unresolved_refs(&[cg_rel, cg_pkg]).unwrap(), 2);
 
         // Delete by site identity: only the named site goes; second delete finds nothing.
         assert_eq!(

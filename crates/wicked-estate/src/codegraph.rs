@@ -1655,6 +1655,20 @@ pub(crate) fn park(r: &UnresolvedRef) -> UnresolvedRef {
     parked
 }
 
+/// The estate ref a stored row parked through the fall-through ([`park`]), for back-fill to
+/// resolve again (estate#596). `None` for any other row: a plain ref, and codegraph's own
+/// unresolved rows at sites no estate ref covered ([`Prepared::resolve`]), which carry no byte
+/// span and never go through the fall-through, so a full index leaves them parked too.
+pub(crate) fn unpark(r: &UnresolvedRef) -> Option<UnresolvedRef> {
+    let name = r.raw_name.strip_prefix(CODEGRAPH_REF_PREFIX)?;
+    if r.location.span.end_byte == 0 {
+        return None;
+    }
+    let mut unparked = r.clone();
+    unparked.raw_name = name.to_string();
+    Some(unparked)
+}
+
 /// Whether a codegraph site edge of kind `cg` can answer an estate ref of kind `estate`.
 fn site_kind_fits(estate: &EdgeKind, cg: &str) -> bool {
     let call = matches!(cg, "calls" | "instantiates");
@@ -2414,11 +2428,7 @@ mod tests {
         );
 
         // A file codegraph has no record of (so it falls back to estate's pipeline) defines it.
-        std::fs::write(
-            root.join("src/later.ts"),
-            "export function fresh596() {}\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("src/later.ts"), "export function fresh596() {}\n").unwrap();
         index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
         let calls = edges(&store, EdgeKind::Calls);
         assert!(
@@ -2427,6 +2437,44 @@ mod tests {
             "the unchanged caller binds the new definition: {calls:?}"
         );
         assert!(store.unresolved_refs_for_name(&parked).unwrap().is_empty());
+    }
+
+    /// Codegraph's own unresolved rows (sites no estate ref covered) never go through the
+    /// fall-through on the main pass, so back-fill leaves them parked as a full index does.
+    #[test]
+    fn back_fill_leaves_codegraph_own_unresolved_rows_parked_596() {
+        // A row codegraph recorded at a site no estate ref covers (its own unresolved list).
+        let sql = format!(
+            "{FIXTURE_SQL}\nINSERT INTO unresolved_refs VALUES(900,\
+             'function:a1f6ebd3c9bfbcb942ebc1692bc3d480','cgOwn596','calls',1,0,NULL,\
+             'src/lib/util.ts','typescript','failed','cgOwn596');"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        let parked = format!("{CODEGRAPH_REF_PREFIX}cgOwn596");
+        let rows = store.unresolved_refs_for_name(&parked).unwrap();
+        assert_eq!(rows.len(), 1, "codegraph's own row parks: {rows:?}");
+        assert_eq!(rows[0].location.span.end_byte, 0, "{rows:?}");
+
+        std::fs::write(
+            root.join("src/later.ts"),
+            "export function cgOwn596() {}\n",
+        )
+        .unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        assert_eq!(
+            store.unresolved_refs_for_name(&parked).unwrap().len(),
+            1,
+            "a full index leaves it parked, and so does back-fill"
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            !calls.iter().any(|(_, t, _)| t.contains("src/later/")),
+            "nothing binds into later.ts: {calls:?}"
+        );
     }
 
     #[test]

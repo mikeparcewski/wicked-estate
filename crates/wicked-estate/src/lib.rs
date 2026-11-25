@@ -498,6 +498,25 @@ fn resolve_with_codegraph(
     // as on estate's own pipeline. Each resolver's pick that lands in a codegraph file is
     // dropped; the picks of the others stand, as estate's own pipeline keeps every resolver's
     // edge (`resolve_all_with_coverage`), and a ref with no pick left parks.
+    let through = fall_through(resolvers, &unbound, index, cg, ids)?;
+    // A fact codegraph could not import (its target has no estate node) counts only when the
+    // fall-through did not bind the ref either.
+    cg.settle_dropped(&through.unresolved);
+    edges.extend(through.site_edges);
+    unresolved.extend(through.unresolved.iter().map(codegraph::park));
+    merge_resolution(&mut resolution, edges, unresolved);
+    Ok(resolution)
+}
+
+/// Estate's resolvers on refs codegraph bound nothing for, each resolver's picks in files
+/// codegraph answers for dropped ([`OutsideCodegraph`]).
+fn fall_through(
+    resolvers: &[&dyn Resolver],
+    refs: &[wicked_estate_core::UnresolvedRef],
+    index: &InMemoryIndex,
+    cg: &codegraph::Prepared,
+    ids: &codegraph::IdMap,
+) -> Result<wicked_estate_resolve::Resolution> {
     let outside: Vec<OutsideCodegraph<'_>> = resolvers
         .iter()
         .map(|inner| OutsideCodegraph {
@@ -507,12 +526,17 @@ fn resolve_with_codegraph(
         })
         .collect();
     let outside: Vec<&dyn Resolver> = outside.iter().map(|r| r as &dyn Resolver).collect();
-    let through = resolve_all_with_coverage(&outside, &unbound, index)?;
-    // A fact codegraph could not import (its target has no estate node) counts only when the
-    // fall-through did not bind the ref either.
-    cg.settle_dropped(&through.unresolved);
-    edges.extend(through.site_edges);
-    unresolved.extend(through.unresolved.iter().map(codegraph::park));
+    resolve_all_with_coverage(&outside, refs, index)
+}
+
+/// Add another resolver pass's site edges and unresolved refs to `resolution`, deduplicating
+/// edges as `resolve_all_with_coverage` does: one per `(source, target, kind)`, highest
+/// confidence kept.
+fn merge_resolution(
+    resolution: &mut wicked_estate_resolve::Resolution,
+    edges: Vec<Edge>,
+    unresolved: Vec<wicked_estate_core::UnresolvedRef>,
+) {
     let mut best: HashMap<(String, String, String), Edge> = resolution
         .edges
         .drain(..)
@@ -532,6 +556,35 @@ fn resolve_with_codegraph(
     resolution.edges = merged;
     resolution.site_edges.extend(edges);
     resolution.unresolved.extend(unresolved);
+}
+
+/// Back-fill's resolution of previously parked rows (#141). A row the fall-through parked as
+/// `codegraph:<name>` (estate#596) belongs to an unchanged caller, so codegraph's answer for it
+/// still stands: it goes through the same fall-through as on the main pass and re-parks under
+/// the prefix when it stays unbound. Every other row resolves as before.
+fn resolve_backfill(
+    resolvers: &[&dyn Resolver],
+    candidates: &[wicked_estate_core::UnresolvedRef],
+    index: &InMemoryIndex,
+    codegraph: Option<(&codegraph::Prepared, &codegraph::IdMap)>,
+) -> Result<wicked_estate_resolve::Resolution> {
+    let Some((cg, ids)) = codegraph else {
+        return resolve_all_with_coverage(resolvers, candidates, index);
+    };
+    let mut plain = Vec::new();
+    let mut unparked = Vec::new();
+    for r in candidates {
+        match codegraph::unpark(r) {
+            Some(u) => unparked.push(u),
+            None => plain.push(r.clone()),
+        }
+    }
+    let mut resolution = resolve_all_with_coverage(resolvers, &plain, index)?;
+    if !unparked.is_empty() {
+        let through = fall_through(resolvers, &unparked, index, cg, ids)?;
+        let still = through.unresolved.iter().map(codegraph::park).collect();
+        merge_resolution(&mut resolution, through.site_edges, still);
+    }
     Ok(resolution)
 }
 
@@ -3387,11 +3440,18 @@ fn index_path_inner(
         }
         let mut seen: HashSet<(String, String, EdgeKind, String, u32, u32, u32)> = HashSet::new();
         let mut candidates: Vec<wicked_estate_core::UnresolvedRef> = Vec::new();
-        // Name lane: exact indexed lookups for extracted and lost nodes' probe forms.
+        // Name lane: exact indexed lookups for extracted and lost nodes' probe forms. With
+        // codegraph on, a ref the fall-through left unbound parked as `codegraph:<name>`
+        // (estate#596), so that form is probed too.
         for probe in &backfill_probes {
-            for r in store.unresolved_refs_for_name(probe)? {
-                if admissible(&r) && seen.insert(site_key(&r)) {
-                    candidates.push(r);
+            let parked = codegraph_pair
+                .is_some()
+                .then(|| format!("{}{probe}", wicked_estate_core::refs::CODEGRAPH_REF_PREFIX));
+            for name in std::iter::once(probe).chain(parked.as_ref()) {
+                for r in store.unresolved_refs_for_name(name)? {
+                    if admissible(&r) && seen.insert(site_key(&r)) {
+                        candidates.push(r);
+                    }
                 }
             }
         }
@@ -3404,7 +3464,7 @@ fn index_path_inner(
             }
         }
         if !candidates.is_empty() {
-            let backfill = resolve_all_with_coverage(resolvers, &candidates, &index)?;
+            let backfill = resolve_backfill(resolvers, &candidates, &index, codegraph_pair)?;
             let still: HashSet<_> = backfill.unresolved.iter().map(site_key).collect();
             let bound: Vec<wicked_estate_core::UnresolvedRef> = candidates
                 .iter()
