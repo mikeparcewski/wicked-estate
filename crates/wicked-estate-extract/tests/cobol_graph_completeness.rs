@@ -1773,6 +1773,61 @@ fn many_paragraphs_extract_in_linear_time() {
     );
 }
 
+/// The behaviour each named paragraph was given (wicked-estate#582's guards check the fast path
+/// still classifies).
+fn behaviour_of<'a>(ex: &'a Extraction, name: &str) -> Vec<&'a str> {
+    ex.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function && n.name == name)
+        .filter_map(|n| n.metadata.get("behaviour").and_then(|v| v.as_str()))
+        .collect()
+}
+
+#[test]
+fn many_exit_paragraphs_classify_in_linear_time_582() {
+    // 6,000 PERFORM ... THRU ranges, each ending in an EXIT paragraph (about 24k lines). Each
+    // exit-only paragraph re-read the whole file (UTF-8 and free-format checks) and walked its
+    // siblings with tree-sitter's O(index) `next_sibling`: about 16 s for 25k lines in a debug
+    // build, growing with the square of the size.
+    let mut body = Vec::new();
+    for i in 0..6_000 {
+        body.push(format!("P{i}."));
+        body.push(format!("    PERFORM Q{i} THRU Q{i}-EXIT."));
+        body.push(format!("Q{i}."));
+        body.push("    MOVE 'Y' TO WS-FLAG.".to_string());
+        body.push(format!("Q{i}-EXIT."));
+        body.push("    EXIT.".to_string());
+    }
+    let body: Vec<&str> = body.iter().map(String::as_str).collect();
+    let text = program("EXITPGM", DATA, &body);
+    assert_extracts_within("EXITPGM", &text, std::time::Duration::from_secs(30));
+    let ex = extract("EXITPGM", &text);
+    assert_eq!(behaviour_of(&ex, "Q0-EXIT"), ["stub"]);
+    assert_eq!(behaviour_of(&ex, "Q5999-EXIT"), ["stub"]);
+    assert_eq!(behaviour_of(&ex, "Q3000"), ["real"]);
+}
+
+#[test]
+fn many_programs_in_one_file_classify_in_linear_time_582() {
+    // 4,000 small programs in one file: the error-after-division check walked from the file's
+    // root once per program, about 135 s in a debug build.
+    let mut text = String::new();
+    for i in 0..4_000 {
+        let mut one = program(
+            &format!("PG{i}"),
+            &[],
+            &["A-PARA.", "    PERFORM B-PARA.", "B-PARA.", "    EXIT."],
+        );
+        one.push_str(&format!("       END PROGRAM PG{i}.\n"));
+        text.push_str(&one);
+    }
+    assert_extracts_within("MANYPROGS", &text, std::time::Duration::from_secs(30));
+    let ex = extract("MANYPROGS", &text);
+    let stubs = behaviour_of(&ex, "B-PARA");
+    assert_eq!(stubs.len(), 4_000);
+    assert!(stubs.iter().all(|b| *b == "stub"), "{:?}", &stubs[..5]);
+}
+
 /// The 1-based first and last line of the parse error the File node reports (scanner patch 4),
 /// read as the index reads it. Checks the report's claim: no paragraph node lies in those lines.
 fn unparsed_lines(ex: &Extraction) -> Option<(u32, u32)> {
