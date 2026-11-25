@@ -44,6 +44,8 @@
 //!   wicked-estate dead-code              [--json] [--db ...]
 //!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
 //!   wicked-estate graph-view [--limit N] [--include-tests] [--include-trivial] [--ignore <pat>] [--db ...]
+//!   wicked-estate convert <file>         [--max-bytes N] [--deadline-ms N]
+//!                                     one document to Markdown on stdout; stores nothing (#556)
 //!
 //! RetrievalTool-backed commands (see `tool_bridge::COMMANDS`; strict flags, `--help` per command):
 //!   wicked-estate traverse <symbol>      [--depth N] [--direction D] [--edge-kinds a,b] [--max-nodes N] [--json] [--db ...]
@@ -53,6 +55,7 @@
 //!                                     [--framework S] [--scope S] [--projects a,b] [--limit N] [--json] [--db ...]
 
 mod cli_flags;
+mod convert;
 mod cutoff;
 mod emit;
 mod scip_auto;
@@ -847,6 +850,17 @@ fn main() -> Result<()> {
         cli_flags::parse("version", rest, "").map_err(anyhow::Error::msg)?;
         println!("wicked-estate {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+    // (#556) One document to Markdown on stdout. Before the store resolves: it opens no graph,
+    // so a team runtime or a missing store never stands between a caller and a conversion. A
+    // help request falls through to the usage arm.
+    if cmd == "convert" {
+        if let cli_flags::Parsed::Args(a) =
+            cli_flags::parse("convert", rest, "").map_err(anyhow::Error::msg)?
+        {
+            let code = convert::run(&a)?;
+            std::process::exit(code);
+        }
     }
 
     // The DEFAULT spec resolves through the WICKED_RUNTIME profile seam
@@ -4438,6 +4452,17 @@ fn main() -> Result<()> {
             );
             println!(
                 "    Evidence-envelope freshness read: \"what needs re-verification?\". A date is 00:00:00 UTC. Never-verified rows (last_verified=0) are always stale."
+            );
+            println!(
+                "  wicked-estate convert <file> [--max-bytes N] [--deadline-ms N]  # one document (pdf, docx, pptx, xlsx, odt, rtf, epub, ...) to Markdown on stdout, secrets masked; stores nothing"
+            );
+            println!(
+                "    Refusal: empty stdout, one stderr line 'refused <kind>: <reason>', exit {}",
+                convert::EXIT_CODES
+                    .iter()
+                    .map(|(kind, code)| format!("{code} {kind}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
             println!(
                 "  wicked-estate fingerprint <name>   [--db ...]  # stable hex fingerprint for symbol"

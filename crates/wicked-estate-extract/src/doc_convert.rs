@@ -359,23 +359,54 @@ impl fmt::Display for Skipped {
     }
 }
 
+impl Skipped {
+    /// A stable, machine-readable name for this refusal, for callers that branch on it
+    /// (`wicked-estate convert` exits with a code per kind, wicked-estate#556). The library owns
+    /// the reason strings, so it owns this mapping too.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Skipped::NeedsOcr(_) => "needs_ocr",
+            Skipped::TooLarge(_) => "too_large",
+            Skipped::Encrypted => "encrypted",
+            Skipped::Panicked => "failed",
+            Skipped::Unreadable(reason) => match *reason {
+                "unrecognized format" | "unsupported content" => "unsupported",
+                "missing part" | "malformed document" => "malformed",
+                "no text" => "empty",
+                "cannot open" | "not a regular file" | "cannot read" => "unreadable",
+                DEADLINE_REASON => "deadline",
+                MEMORY_REASON
+                | "over a converter safety limit"
+                | "converted text is over the 1 MiB limit" => "over_budget",
+                _ => "failed",
+            },
+        }
+    }
+}
+
 /// Read `path`, refusing past [`MAX_INPUT_BYTES`] without reading the rest (the size is checked
 /// before the read, and the read itself is capped, so a file that grows meanwhile is still bounded).
 /// Only a regular file is opened: a FIFO or device named `x.pdf` is refused without blocking.
 pub fn read_capped(path: &std::path::Path) -> Result<Vec<u8>, Skipped> {
+    read_capped_at(path, MAX_INPUT_BYTES)
+}
+
+/// [`read_capped`] with a lower cap: `max` is clamped to [`MAX_INPUT_BYTES`].
+pub fn read_capped_at(path: &std::path::Path, max: usize) -> Result<Vec<u8>, Skipped> {
+    let max = max.min(MAX_INPUT_BYTES);
     let meta = std::fs::metadata(path).map_err(|_| Skipped::Unreadable("cannot open"))?;
     if !meta.is_file() {
         return Err(Skipped::Unreadable("not a regular file"));
     }
-    if meta.len() > MAX_INPUT_BYTES as u64 {
+    if meta.len() > max as u64 {
         return Err(Skipped::TooLarge(meta.len()));
     }
     let file = std::fs::File::open(path).map_err(|_| Skipped::Unreadable("cannot open"))?;
     let mut bytes = Vec::with_capacity(meta.len() as usize);
-    file.take(MAX_INPUT_BYTES as u64 + 1)
+    file.take(max as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| Skipped::Unreadable("cannot read"))?;
-    if bytes.len() > MAX_INPUT_BYTES {
+    if bytes.len() > max {
         return Err(Skipped::TooLarge(bytes.len() as u64));
     }
     Ok(bytes)
@@ -390,6 +421,13 @@ pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 /// any text); nothing else is changed. It is NOT redacted here: callers redact it with the markdown
 /// rules, like any `.md` file.
 pub fn to_markdown(path: &str, bytes: &[u8]) -> Result<String, Skipped> {
+    to_markdown_within(path, bytes, CONVERT_DEADLINE)
+}
+
+/// [`to_markdown`] with a shorter wall-clock limit for the isolated child: `deadline` is clamped
+/// to [`CONVERT_DEADLINE`]. Without isolation ([`isolate_conversions`] not called) there is no
+/// child to time out, so the limit does not apply.
+pub fn to_markdown_within(path: &str, bytes: &[u8], deadline: Duration) -> Result<String, Skipped> {
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(Skipped::TooLarge(bytes.len() as u64));
     }
@@ -400,7 +438,7 @@ pub fn to_markdown(path: &str, bytes: &[u8]) -> Result<String, Skipped> {
             .map_err(|_| Skipped::Unreadable(UNAVAILABLE_REASON))?;
         let mut cmd = Command::new(exe);
         cmd.arg(CHILD_ARG).arg(format_hint(ext));
-        return supervise(cmd, bytes, CONVERT_DEADLINE);
+        return supervise(cmd, bytes, deadline.min(CONVERT_DEADLINE));
     }
     convert_in_process(ext, bytes)
 }
@@ -908,6 +946,47 @@ mod tests {
     fn skip_reasons_never_carry_document_text() {
         let err = to_markdown("x.docx", b"PK\x03\x04 SECRETPAYLOAD").expect_err("garbage");
         assert!(!err.to_string().contains("SECRETPAYLOAD"), "{err}");
+    }
+
+    #[test]
+    fn every_refusal_has_a_kind_556() {
+        // Every reason the child may send back names a kind; only the missing converter is a
+        // plain failure, like a panic.
+        for &reason in UNREADABLE_REASONS {
+            let kind = Skipped::Unreadable(reason).kind();
+            assert_eq!(
+                kind == "failed",
+                reason == UNAVAILABLE_REASON,
+                "{reason:?} -> {kind}"
+            );
+        }
+        assert_eq!(Skipped::Unreadable(DEADLINE_REASON).kind(), "deadline");
+        assert_eq!(Skipped::Unreadable(MEMORY_REASON).kind(), "over_budget");
+        assert_eq!(Skipped::Unreadable("no text").kind(), "empty");
+        assert_eq!(
+            Skipped::NeedsOcr("all 1 pages need OCR".into()).kind(),
+            "needs_ocr"
+        );
+        assert_eq!(Skipped::TooLarge(9).kind(), "too_large");
+        assert_eq!(Skipped::Encrypted.kind(), "encrypted");
+        assert_eq!(Skipped::Panicked.kind(), "failed");
+    }
+
+    #[test]
+    fn a_lower_read_cap_refuses_before_reading_556() {
+        // The fixture itself: read_capped_at only reads it.
+        let path = std::path::PathBuf::from(format!(
+            "{}/tests/fixtures/docs/spec.docx",
+            env!("CARGO_MANIFEST_DIR")
+        ));
+        let len = fixture("spec.docx").len();
+        assert_eq!(
+            read_capped_at(&path, len - 1),
+            Err(Skipped::TooLarge(len as u64))
+        );
+        assert_eq!(read_capped_at(&path, len).unwrap().len(), len);
+        // A cap above the converter's own is clamped to it.
+        assert_eq!(read_capped_at(&path, usize::MAX).unwrap().len(), len);
     }
 
     #[test]

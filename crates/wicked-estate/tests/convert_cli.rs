@@ -27,7 +27,10 @@ fn convert(file: &Path, extra: &[&str]) -> Output {
         .env_remove("WICKED_ESTATE_DB")
         .env_remove("WICKED_STORE_URL")
         .env_remove("WICKED_RUNTIME")
-        .env("WICKED_ESTATE_EMIT_PROGRAM", "wicked-bus-absent-convert-cli")
+        .env(
+            "WICKED_ESTATE_EMIT_PROGRAM",
+            "wicked-bus-absent-convert-cli",
+        )
         .output()
         .expect("spawn wicked-estate");
     let left: Vec<_> = std::fs::read_dir(tmp.path())
@@ -189,7 +192,12 @@ fn limits_are_checked_before_any_work() {
         ("--deadline-ms", "120001"),
     ] {
         let out = convert(&fixture("spec.docx"), &[flag, value]);
-        assert_eq!(out.status.code(), Some(1), "{flag} {value}: {}", stderr(&out));
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{flag} {value}: {}",
+            stderr(&out)
+        );
         assert!(out.stdout.is_empty(), "{flag} {value}");
         assert!(
             stderr(&out).contains("usage: wicked-estate convert"),
