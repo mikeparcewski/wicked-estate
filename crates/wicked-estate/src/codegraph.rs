@@ -1646,8 +1646,10 @@ fn settle(pending: &mut HashMap<DroppedKey, usize>, still: &[UnresolvedRef]) -> 
         .sum()
 }
 
-/// Park a ref no resolver bound: the `codegraph:` prefix keeps every estate resolver, back-fill
-/// included, from name-binding it later (`routed_elsewhere`).
+/// Park a ref no resolver bound: the `codegraph:` prefix keeps every estate resolver from
+/// name-binding it later (`routed_elsewhere`). Only back-fill on a codegraph run takes such a row
+/// back ([`unpark`], estate#596), and it resolves the row through the same fall-through, so a
+/// pick in a file codegraph answers for is still dropped.
 pub(crate) fn park(r: &UnresolvedRef) -> UnresolvedRef {
     let mut parked = r.clone();
     parked.raw_name = format!("{CODEGRAPH_REF_PREFIX}{}", r.raw_name);
@@ -2439,6 +2441,53 @@ mod tests {
         assert!(store.unresolved_refs_for_name(&parked).unwrap().is_empty());
     }
 
+    /// Back-fill resolves a fall-through park through the same fall-through as the main pass: a
+    /// definition that appears in a file codegraph answers for is never its target, and the
+    /// stored row stays exactly as it was (codex round 1 on estate#596).
+    #[test]
+    fn a_back_filled_call_never_binds_into_a_file_codegraph_answers_for_596() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = std::fs::read_to_string(root.join("src/svc.ts")).unwrap();
+        std::fs::write(root.join("src/svc.ts"), format!("{svc}fresh596();\n")).unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
+        let parked = format!("{CODEGRAPH_REF_PREFIX}fresh596");
+        let before = store.unresolved_refs_for_name(&parked).unwrap();
+        assert_eq!(before.len(), 1, "{before:?}");
+
+        // src/same.ts stays a file codegraph answers for, and svc.ts uses nothing in it (an edit
+        // to a file svc.ts calls would re-derive svc.ts's refs on the main pass instead, #220);
+        // it now also defines fresh596.
+        let same = std::fs::read_to_string(root.join("src/same.ts")).unwrap();
+        std::fs::write(
+            root.join("src/same.ts"),
+            format!("{same}export function fresh596() {{}}\n"),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            index(&mut store, &root, Some(&cfg), Some(FIXTURE_SQL));
+            let calls = edges(&store, EdgeKind::Calls);
+            assert!(
+                !calls.iter().any(|(_, t, _)| t.contains("fresh596")),
+                "no edge into a codegraph file: {calls:?}"
+            );
+            let after = store.unresolved_refs_for_name(&parked).unwrap();
+            assert_eq!(
+                after
+                    .iter()
+                    .map(|r| (&r.raw_name, &r.location.file, r.location.span.start_byte))
+                    .collect::<Vec<_>>(),
+                before
+                    .iter()
+                    .map(|r| (&r.raw_name, &r.location.file, r.location.span.start_byte))
+                    .collect::<Vec<_>>(),
+                "the stored row is kept as it was"
+            );
+        }
+    }
+
     /// Codegraph's own unresolved rows (sites no estate ref covered) never go through the
     /// fall-through on the main pass, so back-fill leaves them parked as a full index does.
     #[test]
@@ -2459,11 +2508,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "codegraph's own row parks: {rows:?}");
         assert_eq!(rows[0].location.span.end_byte, 0, "{rows:?}");
 
-        std::fs::write(
-            root.join("src/later.ts"),
-            "export function cgOwn596() {}\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("src/later.ts"), "export function cgOwn596() {}\n").unwrap();
         index(&mut store, &root, Some(&cfg), Some(&sql));
         assert_eq!(
             store.unresolved_refs_for_name(&parked).unwrap().len(),

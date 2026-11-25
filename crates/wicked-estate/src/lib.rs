@@ -59,7 +59,8 @@
 //!
 //! Stored parked rows carry no hints (only the 7 site columns persist), so hint-driven
 //! resolution (`ImportMapResolver`) never fires on back-fill. Those refs self-heal when their
-//! file changes or a full re-index runs (#141).
+//! file changes or a full re-index runs (#141). This holds for a row the codegraph fall-through
+//! parked (`codegraph:<name>`, estate#596) as for any other.
 //!
 //! ## Many repos, one graph
 //!
