@@ -3247,6 +3247,19 @@ enum JsScopeRead {
     Hoisted,
 }
 
+/// Declarations the local-binding path reads (a scope's declarations, then each declaration list
+/// a join scans), counted in tests so a test bounds this work, not the wall-clock time
+/// (wicked-estate#501: each is read once per file, not once per call).
+#[cfg(test)]
+thread_local! {
+    static JS_DECLS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_js_decls_read(n: usize) {
+    JS_DECLS_READ.with(|c| c.set(c.get() + n));
+}
+
 /// A scope's declaring starts, by name, each list shared by every call that binds to it.
 type JsDeclsByName = HashMap<String, std::rc::Rc<[usize]>>;
 
@@ -3275,6 +3288,8 @@ fn js_scope_starts(
                 JsScopeRead::Block => js_scope_decls(n, src),
                 JsScopeRead::Hoisted => js_hoisted_vars(n, src),
             };
+            #[cfg(test)]
+            count_js_decls_read(decls.len());
             let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
             for (name, at) in decls {
                 by_name.entry(name).or_default().push(at);
@@ -3540,6 +3555,8 @@ struct JsBindingJoin<'a, 't> {
 
 impl<'t> JsBindingJoin<'_, 't> {
     fn resolve(&mut self, starts: &[usize], name: &str, depth: usize) -> JsBindingTarget {
+        #[cfg(test)]
+        count_js_decls_read(starts.len());
         if let Some(i) = starts.iter().find_map(|at| {
             self.defs_at
                 .get(at)?
@@ -6753,6 +6770,32 @@ mod tests {
             language: Language::new(lang),
             text: text.into(),
         }
+    }
+
+    /// #501: N nested functions calling a name hoisted N times read the declarations once per
+    /// file: the work is linear in N, counted, not timed (a wall-clock ratio on a shared runner
+    /// failed main at 2.1x). Before #501 each call copied and joined the whole list: N x N.
+    #[test]
+    fn shared_declarations_are_read_once_per_file_501() {
+        let ex = TreeSitterExtractor::for_language("tsx").unwrap();
+        let read = |n: usize, var: &str| {
+            let vars: String = (0..n).map(|_| format!("var {var};\n")).collect();
+            let fns: String = (0..n)
+                .map(|i| format!("function f{i}() {{ return Card(); }}\n"))
+                .collect();
+            let text = format!("export function P() {{ {{\n{vars}}}\n{fns}}}\n");
+            JS_DECLS_READ.with(|c| c.set(0));
+            ex.extract(&sf("src/big.tsx", "tsx", &text)).unwrap();
+            JS_DECLS_READ.with(|c| c.get())
+        };
+        let (one, two) = (read(1_000, "Card"), read(2_000, "Card"));
+        assert!(one >= 1_000, "the bound file reads its declarations: {one}");
+        assert!(one <= 4 * 1_000, "linear in N: {one} for 1000");
+        assert!(
+            two <= 2 * one + 16,
+            "doubling N doubles the work: {one} then {two}"
+        );
+        assert!(read(1_000, "Other") <= 4 * 1_000);
     }
 
     /// #504: nested mutable bindings share one root walk and retain their own writes.

@@ -665,31 +665,6 @@ fn static_for_default() {
     }
 }
 
-/// #501: N nested functions calling a name hoisted N times share one declaration list and one
-/// join, so the file costs what it costs when the name is unbound. Head only: before, each call
-/// copied and joined the whole list.
-#[test]
-fn shared_declarations_size() {
-    if BUILD != Build::Head {
-        return;
-    }
-    let n = 3_000;
-    let file = |var: &str| {
-        let vars: String = (0..n).map(|_| format!("var {var};\n")).collect();
-        let fns: String = (0..n)
-            .map(|i| format!("function f{i}() {{ return Card(); }}\n"))
-            .collect();
-        format!("export function P() {{ {{\n{vars}}}\n{fns}}}\n")
-    };
-    let bound = extract_time(&file("Card"));
-    let unbound = extract_time(&file("Other"));
-    eprintln!("shared_declarations_size: bound {bound:?}, unbound {unbound:?}");
-    assert!(
-        bound < unbound * 2,
-        "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
-    );
-}
-
 /// Guaranteed writes in other syntactic forms replace the arrow too.
 #[test]
 fn paren_write() {
