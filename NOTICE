@@ -50,7 +50,7 @@ COBOL tree-sitter external scanner (patched)
   Origin:    scanner.c and tree_sitter/parser.h copied from the arborium-cobol
              2.18.0 crate (grammar/scanner.c, grammar/src/tree_sitter/parser.h),
              which packages https://github.com/zharinov/tree-sitter-cobol at
-             befb226951b65585617f42ecbe526d00c124100c; three patches, marked
+             befb226951b65585617f42ecbe526d00c124100c; five patches, marked
              WICKED PATCH in scanner.c. The parse tables stay in the crate.
   License:   MIT License (the terms of this product's LICENSE file)
              Copyright (c) 2016 Max Brunsfeld

@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- COBOL: indexing no longer hangs on a file whose last line ends inside the sequence area (columns 1-6), such as a short final line or a DOS end-of-file byte. The vendored scanner's loop over those columns had no end-of-input check; it is now its fifth marked patch (#634)
 - COBOL: the behaviour classifier no longer makes indexing a large program, or a file of many programs, quadratic in its size. It does its per-file work once per file instead of once per definition: one tree walk, the free-format check, and the error scan (#582)
 
 ## [0.36.0] — 2026-11-25
