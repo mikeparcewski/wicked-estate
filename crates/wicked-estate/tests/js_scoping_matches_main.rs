@@ -45,9 +45,9 @@
 //! | many_writes_after_kill | stale arrow | parked |
 //! | nested_pattern_default | stale arrow in inner default | parked in inner default |
 //!
-//! `write_lookup_size` (#497): on `Head` the bound file costs under twice the unbound one; on
-//! `Main493` (the per-call scan) over twice, which shows the test catches it. Not timed on
-//! `Main`, whose unbound path rescans the body per call (#493 memoised it).
+//! The cost tests (#497, #501) are counted-work unit tests in wicked-estate-extract's
+//! treesitter.rs (`write_lookup_is_linear_497`, `lexical_shadow_is_linear_497`,
+//! `shared_declarations_are_read_once_per_file_501`), not wall-clock ratios here.
 
 #[allow(dead_code)]
 #[derive(PartialEq)]
@@ -70,9 +70,7 @@ const BUILD: Build = Build::Head;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
-use wicked_estate_core::{EdgeKind, Extractor, GraphRead, Language, SourceFile};
-use wicked_estate_extract::TreeSitterExtractor;
+use wicked_estate_core::{EdgeKind, GraphRead};
 use wicked_estate_store::SqliteStore;
 
 fn fresh_dir(tag: &str) -> PathBuf {
@@ -461,74 +459,6 @@ fn nested_before_kept() {
     assert_one("nested_before_kept", &g, "ViaJsx", "src/caller/InnerJsx().");
 }
 
-/// The faster of two extractions of `text`.
-fn extract_time(text: &str) -> Duration {
-    let ex = TreeSitterExtractor::for_language("tsx").unwrap();
-    let file = SourceFile {
-        path: "src/big.tsx".into(),
-        language: Language::new("tsx"),
-        text: text.into(),
-    };
-    (0..2)
-        .map(|_| {
-            let t = Instant::now();
-            ex.extract(&file).unwrap();
-            t.elapsed()
-        })
-        .min()
-        .unwrap()
-}
-
-/// #497: a call reads its scope's writes once per file and binary-searches them, so a file of N
-/// writes and N calls to a redeclared parameter costs what the same file costs when the name is
-/// not a parameter (main's path). A per-call copy and scan of every write is quadratic in N.
-#[test]
-fn write_lookup_size() {
-    if BUILD == Build::Main {
-        return;
-    }
-    // At 10k the old per-call scan measured 1.9x on a CI runner (1.60 s vs 0.83 s); its extra
-    // cost grows with n squared, the shared cost with n, so 30k puts it well past 2x.
-    let n = 30_000;
-    let body = "Card = null; Card();\n".repeat(n);
-    let file = |param: &str| {
-        format!("export function P({param}: any) {{ {{ var Card = () => null; }}\n{body}}}\n")
-    };
-    let bound = extract_time(&file("Card"));
-    let unbound = extract_time(&file("Other"));
-    eprintln!("write_lookup_size: bound {bound:?}, unbound {unbound:?}");
-    if BUILD == Build::Main493 {
-        assert!(
-            bound > unbound * 2,
-            "the per-call scan: {bound:?} vs {unbound:?}"
-        );
-    } else {
-        assert!(
-            bound < unbound * 2,
-            "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
-        );
-    }
-}
-
-/// #497: a block of N `let`s around a write costs one pass, not N copies of N names.
-#[test]
-fn lexical_shadow_size() {
-    let n = 10_000;
-    let lets: String = (0..n).map(|i| format!("let z{i}: any;\n")).collect();
-    let file = |param: &str| {
-        format!(
-            "export function P({param}: any) {{ {{ var Card = () => null; }}\n{{\n{lets}Card = null;\nCard();\n}} }}\n"
-        )
-    };
-    let bound = extract_time(&file("Card"));
-    let unbound = extract_time(&file("Other"));
-    eprintln!("lexical_shadow_size: bound {bound:?}, unbound {unbound:?}");
-    assert!(
-        bound < unbound * 2,
-        "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
-    );
-}
-
 // ── #498: a var/let binding in the call's own function is read through its writes ──────────
 // ── #501: a pattern's write takes effect at its element; a right-hand side does not see it ──
 
@@ -663,31 +593,6 @@ fn static_for_default() {
             assert_none(tag, &g, c);
         }
     }
-}
-
-/// #501: N nested functions calling a name hoisted N times share one declaration list and one
-/// join, so the file costs what it costs when the name is unbound. Head only: before, each call
-/// copied and joined the whole list.
-#[test]
-fn shared_declarations_size() {
-    if BUILD != Build::Head {
-        return;
-    }
-    let n = 3_000;
-    let file = |var: &str| {
-        let vars: String = (0..n).map(|_| format!("var {var};\n")).collect();
-        let fns: String = (0..n)
-            .map(|i| format!("function f{i}() {{ return Card(); }}\n"))
-            .collect();
-        format!("export function P() {{ {{\n{vars}}}\n{fns}}}\n")
-    };
-    let bound = extract_time(&file("Card"));
-    let unbound = extract_time(&file("Other"));
-    eprintln!("shared_declarations_size: bound {bound:?}, unbound {unbound:?}");
-    assert!(
-        bound < unbound * 2,
-        "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
-    );
 }
 
 /// Guaranteed writes in other syntactic forms replace the arrow too.

@@ -8,7 +8,9 @@
 //! before the store resolves and opens no graph.
 //!
 //! A refusal leaves stdout empty, writes one `refused <kind>: <reason>` line on stderr and exits
-//! with that kind's code ([`exit_code`]), so a caller branches on the code, not on prose.
+//! with that kind's code ([`exit_code`]), so a caller branches on the code, not on prose. The one
+//! exception is `output` (13): converted Markdown that stdout would not take, of which part may
+//! already be written.
 
 use std::path::Path;
 use std::time::Duration;
@@ -17,8 +19,8 @@ use wicked_estate_extract::doc_convert::{self, Skipped};
 
 use crate::cli_flags;
 
-/// The exit code for each refusal kind ([`Skipped::kind`]). 0 is converted Markdown; 1 is a usage
-/// error (the shared parser's).
+/// The exit code for each refusal kind ([`Skipped::kind`], plus this command's own `output` and
+/// `secret_file`). 0 is converted Markdown; 1 is a usage error (the shared parser's).
 pub const EXIT_CODES: &[(&str, i32)] = &[
     ("too_large", 3),
     ("unsupported", 4),
@@ -30,6 +32,8 @@ pub const EXIT_CODES: &[(&str, i32)] = &[
     ("unreadable", 10),
     ("malformed", 11),
     ("failed", 12),
+    ("output", 13),
+    ("secret_file", 14),
 ];
 
 /// The exit code a refusal of `kind` returns; an unknown kind is a plain failure.
@@ -48,7 +52,7 @@ pub fn print_usage() {
         "  wicked-estate convert <file> [--max-bytes N] [--deadline-ms N]  # one document (pdf, docx, pptx, xlsx, odt, rtf, epub, ...) to Markdown on stdout, secrets masked; stores nothing"
     );
     println!(
-        "    Refusal: empty stdout, one stderr line 'refused <kind>: <reason>', exit {}",
+        "    Refusal: empty stdout (13 output may have written part), one stderr line 'refused <kind>: <reason>', exit {}",
         EXIT_CODES
             .iter()
             .map(|(kind, code)| format!("{code} {kind}"))
@@ -79,15 +83,42 @@ pub fn run(args: &cli_flags::Args) -> std::io::Result<i32> {
         .u64("deadline-ms")
         .map(Duration::from_millis)
         .unwrap_or(doc_convert::CONVERT_DEADLINE);
-    match convert(Path::new(file), max_bytes, deadline) {
+    let path = Path::new(file);
+    // The file read is the one checked: the resolved path, so a link swapped after the check
+    // cannot point the read at a secret file.
+    let resolved = std::fs::canonicalize(path).ok();
+    let read_from = resolved.as_deref().unwrap_or(path);
+    if is_secret_file(path) || is_secret_file(read_from) {
+        eprintln!(
+            "refused secret_file: the file matches the secret-file rule (as knowledge.ingest); not read"
+        );
+        return Ok(exit_code("secret_file"));
+    }
+    match convert(path, read_from, max_bytes, deadline) {
         Ok(md) => {
             let mut out = std::io::stdout().lock();
-            out.write_all(md.as_bytes())?;
-            if !md.ends_with('\n') {
-                out.write_all(b"\n")?;
+            let written = out
+                .write_all(md.as_bytes())
+                .and_then(|()| {
+                    if md.ends_with('\n') {
+                        Ok(())
+                    } else {
+                        out.write_all(b"\n")
+                    }
+                })
+                .and_then(|()| out.flush());
+            match written {
+                Ok(()) => Ok(0),
+                // The caller's pipe closed or its disk filled: not a usage error. Part of the
+                // Markdown may already be on stdout.
+                Err(e) => {
+                    eprintln!(
+                        "refused output: cannot write the Markdown to stdout ({}); stdout may hold part of it",
+                        e.kind()
+                    );
+                    Ok(exit_code("output"))
+                }
             }
-            out.flush()?;
-            Ok(0)
         }
         Err(skip) => {
             let kind = skip.kind();
@@ -97,8 +128,21 @@ pub fn run(args: &cli_flags::Args) -> std::io::Result<i32> {
     }
 }
 
-fn convert(path: &Path, max_bytes: usize, deadline: Duration) -> Result<String, Skipped> {
-    let bytes = doc_convert::read_capped_at(path, max_bytes)?;
+/// `knowledge.ingest`'s secret-file rule (#556 R2), checked on the name as given and on the name
+/// it resolves to, so a link with an innocent name to `credentials.docx` is refused too.
+fn is_secret_file(path: &Path) -> bool {
+    wicked_estate_extract::redact::is_excluded(&path.to_string_lossy())
+}
+
+/// Convert the file at `read_from` (the resolved operand), naming its format by `path`, the name
+/// the caller gave.
+fn convert(
+    path: &Path,
+    read_from: &Path,
+    max_bytes: usize,
+    deadline: Duration,
+) -> Result<String, Skipped> {
+    let bytes = doc_convert::read_capped_at(read_from, max_bytes)?;
     // The file name names the format only when the bytes carry no signature, and only for a
     // document extension: a signatureless `.csv` (text, not a document) is unsupported.
     let name = path
