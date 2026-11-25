@@ -1,6 +1,16 @@
-MIT License
+tree-sitter-vbscript: vendored from https://github.com/JJK96/tree-sitter-vbscript
+at commit 6d9548eab0514e0572a616fd58d5997a93b37415.
+The vendored src/grammar.json, src/parser.c and src/node-types.json are
+byte-identical to that commit's.
 
-Copyright (c) 2023 JJK96
+Upstream ships no LICENSE file and states no copyright notice. Its
+declarations conflict: package.json says ISC and names its author as
+"Jan-Jaap Korpershoek", while Cargo.toml and pyproject.toml say MIT. So that
+either reading is met, this directory is used under both (SPDX: MIT AND ISC).
+Both license texts follow without a copyright line, because upstream states
+none.
+
+MIT License
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +29,19 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+ISC License
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

@@ -1,6 +1,15 @@
-MIT License
+tree-sitter-vb6: vendored from https://github.com/joannefan/tree-sitter-vb6
+at commit 1ee443353ce49f12e39a8e627b557c59e348b729.
+The vendored src/grammar.json, src/parser.c and src/node-types.json are
+byte-identical to that commit's.
 
-Copyright (c) 2023 joannefan
+Upstream ships no LICENSE file and states no copyright notice. It declares
+the MIT License in package.json, Cargo.toml, pyproject.toml and
+tree-sitter.json, and names its author as "joanne".
+This directory is used under those terms. The license text follows without a
+copyright line, because upstream states none.
+
+MIT License
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
