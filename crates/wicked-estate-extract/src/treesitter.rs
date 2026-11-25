@@ -313,6 +313,54 @@ unsafe extern "C" {
 /// free-format source, it is mapped back to the file's own lines ([`crate::cobol_links::LogicalSource::to_file`]).
 pub const COBOL_UNPARSED_SPAN: &str = "cobol_unparsed_span";
 
+/// COBOL `Calls` edge metadata (#585): `true` when control reaches the target by running off the
+/// end of the source paragraph or section (among other ways, perhaps).
+pub const COBOL_FALL_THROUGH: &str = "cobol_fall_through";
+/// COBOL `Calls` edge metadata (#585): `true` when every way the source reaches the target is
+/// conditional: one of the targets of a `GO TO … DEPENDING ON`, or a DECLARATIVES handler an
+/// I/O statement runs when it fails.
+pub const COBOL_CONDITIONAL: &str = "cobol_conditional";
+
+/// How one COBOL unit reaches another.
+#[derive(Clone, Copy, PartialEq)]
+enum CobolHow {
+    /// A statement names it (`PERFORM`, `GO TO`, a SORT procedure), or the program starts there.
+    Statement,
+    Conditional,
+    FallThrough,
+}
+
+/// Every way one COBOL unit (or program) reaches another, folded into one `Calls` edge.
+struct CobolFlowEdge {
+    /// The first statement's span (the fall-through's when nothing else reaches it).
+    span: Span,
+    fall_through: bool,
+    /// Every way is conditional.
+    conditional: bool,
+    /// Some way is a statement (`span` is a statement's).
+    stated: bool,
+}
+
+impl CobolFlowEdge {
+    fn new(span: Span, how: CobolHow) -> Self {
+        Self {
+            span,
+            fall_through: how == CobolHow::FallThrough,
+            conditional: how == CobolHow::Conditional,
+            stated: how != CobolHow::FallThrough,
+        }
+    }
+
+    fn add(&mut self, span: Span, how: CobolHow) {
+        if how != CobolHow::FallThrough && !self.stated {
+            self.span = span;
+            self.stated = true;
+        }
+        self.fall_through |= how == CobolHow::FallThrough;
+        self.conditional &= how == CobolHow::Conditional;
+    }
+}
+
 /// The span of the largest ERROR node in `tree` (an ERROR's own children are not searched), or
 /// `None` when the parse has no error.
 fn cobol_largest_error(tree: &tree_sitter::Tree) -> Option<Span> {
@@ -1793,6 +1841,8 @@ struct CobolFlowCall {
     pos: usize,
     span: Span,
     header: Option<usize>,
+    /// One of several targets, one of which runs (`GO TO … DEPENDING ON`).
+    conditional: bool,
 }
 
 /// The PROCEDURE DIVISION holding `node`, if any.
@@ -1828,7 +1878,13 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
     let mut divisions: HashMap<usize, CobolDivision> = HashMap::new();
     let mut stack = vec![tree.root_node()];
     // Every header from `s` through the last one `e` runs (a section through its last paragraph).
-    let run = |out: &mut Vec<CobolFlowCall>, div: &CobolDivision, s: usize, e: usize, pos, span| {
+    let run = |out: &mut Vec<CobolFlowCall>,
+               div: &CobolDivision,
+               s: usize,
+               e: usize,
+               pos,
+               span,
+               conditional| {
         let h = &div.headers;
         for p in &h[s..=h[e].last] {
             out.push(CobolFlowCall {
@@ -1836,6 +1892,7 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
                 pos,
                 span,
                 header: Some(p.start),
+                conditional,
             });
         }
     };
@@ -1871,18 +1928,22 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
             let at = div.and_then(|d| d.endpoint(&words, own));
             words.into_iter().next().map(|name| (name, at))
         };
+        let depending = is_goto && node.child_by_field_name("depending").is_some();
         let by_name = |out: &mut Vec<CobolFlowCall>, name: String, label| {
             out.push(CobolFlowCall {
                 name,
                 pos,
                 span: ts_span(label),
                 header: None,
+                conditional: depending,
             });
         };
         if is_goto {
             for label in labels {
                 match (endpoint(label), div) {
-                    (Some((_, Some(s))), Some(d)) => run(&mut out, d, s, s, pos, ts_span(label)),
+                    (Some((_, Some(s))), Some(d)) => {
+                        run(&mut out, d, s, s, pos, ts_span(label), depending)
+                    }
                     (Some((name, _)), _) => by_name(&mut out, name, label),
                     (None, _) => {}
                 }
@@ -1900,7 +1961,7 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
         let single = |out: &mut Vec<CobolFlowCall>, name: String, at: Option<usize>, label| match (
             at, div,
         ) {
-            (Some(i), Some(d)) => run(out, d, i, i, pos, ts_span(label)),
+            (Some(i), Some(d)) => run(out, d, i, i, pos, ts_span(label), false),
             _ => by_name(out, name, label),
         };
         match labels.get(1).copied() {
@@ -1915,6 +1976,7 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
                             pos,
                             span: ts_span(first),
                             header: Some(d.headers[s].start),
+                            conditional: false,
                         });
                         let h = &d.headers;
                         for p in &h[s + 1..=h[e].last] {
@@ -1923,6 +1985,7 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
                                 pos,
                                 span: ts_span(last),
                                 header: Some(p.start),
+                                conditional: false,
                             });
                         }
                     }
@@ -1935,6 +1998,495 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
                     }
                 }
             }
+        }
+    }
+    out
+}
+
+/// How control moves between the paragraphs and sections of COBOL PROCEDURE DIVISIONs where no
+/// statement names the target (#585), by header start byte:
+///
+/// - `falls`: control runs off the end of one unit into the next header of the same parent (the
+///   division, or its DECLARATIVES), with the next header's span. A unit falls through unless
+///   its own statements end the run (see [`CobolRun`]). In DECLARATIVES nothing falls into a
+///   section: each section is a handler, entered only on its condition.
+/// - `starts`: the unit where a program starts, the first header after DECLARATIVES, unless the
+///   division's statements before it end the run.
+/// - `handlers`: `(I/O statement start, handler section start)`: a `USE AFTER ERROR` handler
+///   runs when an I/O statement on one of its files fails. `program_handlers`: handlers whose
+///   trigger is no statement this pass reads (`USE FOR DEBUGGING`, `USE BEFORE REPORTING`), or
+///   that a contained program's I/O may run (`USE GLOBAL`).
+#[derive(Default)]
+struct CobolShape {
+    falls: Vec<(usize, usize, Span)>,
+    starts: Vec<usize>,
+    handlers: Vec<(usize, usize)>,
+    program_handlers: Vec<usize>,
+}
+
+/// An open conditional scope of a COBOL sentence, in the grammar's flat statement stream.
+#[derive(Clone, Copy, PartialEq)]
+enum CobolScope {
+    If,
+    Evaluate,
+    Search,
+    /// An inline `PERFORM … END-PERFORM` body (it may run zero times).
+    Loop,
+    /// A statement's `AT END`, `INVALID KEY`, `ON SIZE ERROR`, `ON EXCEPTION`, `ON OVERFLOW` or
+    /// `AT END-OF-PAGE` phrases (and their `NOT` forms), with the `END-` word of the statement
+    /// that owns them (`""`: owner unknown, closed only by an outer scope's end or the period).
+    Phrase(&'static str),
+}
+
+impl CobolScope {
+    fn slot(self) -> usize {
+        match self {
+            CobolScope::If => 0,
+            CobolScope::Evaluate => 1,
+            CobolScope::Search => 2,
+            CobolScope::Loop => 3,
+            CobolScope::Phrase(_) => 4,
+        }
+    }
+}
+
+/// Statements that take a conditional phrase: the `END-` word that ends the statement, and the
+/// phrases it takes (each also in its `NOT` form).
+const COBOL_PHRASE_STATEMENTS: &[(&str, &str, &[&str])] = &[
+    ("read_statement", "END_READ", &["at_end", "invalid_key"]),
+    ("return_statement", "END_RETURN", &["at_end"]),
+    ("write_statement", "END_WRITE", &["invalid_key", "eop"]),
+    ("rewrite_statement", "END_REWRITE", &["invalid_key"]),
+    ("delete_statement", "END_DELETE", &["invalid_key"]),
+    ("start_statement", "END_START", &["invalid_key"]),
+    ("add_statement", "END_ADD", &["on_size_error"]),
+    ("subtract_statement", "END_SUBTRACT", &["on_size_error"]),
+    ("multiply_statement", "END_MULTIPLY", &["on_size_error"]),
+    ("divide_statement", "END_DIVIDE", &["on_size_error"]),
+    ("compute_statement", "END_COMPUTE", &["on_size_error"]),
+    (
+        "call_statement",
+        "END_CALL",
+        &["on_exception", "on_overflow"],
+    ),
+    ("string_statement", "END_STRING", &["on_overflow"]),
+    ("unstring_statement", "END_UNSTRING", &["on_overflow"]),
+    ("accept_statement", "END_ACCEPT", &["on_exception"]),
+    ("display_statement", "END_DISPLAY", &["on_exception"]),
+];
+const COBOL_PHRASES: &[&str] = &[
+    "at_end",
+    "not_at_end",
+    "invalid_key",
+    "not_invalid_key",
+    "on_size_error",
+    "not_on_size_error",
+    "on_exception",
+    "not_on_exception",
+    "on_overflow",
+    "not_on_overflow",
+    "eop",
+    "not_eop",
+];
+
+/// Whether one unit's own statements end its run, read one statement at a time in source order.
+/// A run ends at `GOBACK`, `STOP RUN`, or a `GO TO` with a target and no `DEPENDING`, made
+/// outside every conditional scope of its sentence (a period closes them all), and not after an
+/// `EXIT PARAGRAPH` or `EXIT SECTION` of the unit or a `NEXT SENTENCE` of the sentence (either
+/// may skip it). Anything not known to end the run does not: `EXIT PROGRAM` (ignored in a program
+/// nobody called), `EXEC CICS RETURN` (with `RESP` control comes back), an altered `GO TO.`. A
+/// unit is unsure, so falls through, when it holds a parse error or a bare `EXIT` (the parse
+/// reads a procedure `COPY` as `EXIT`, and the member may hold any statements). A wrong "ends"
+/// would cut the next unit out of the flow; a wrong "falls through" only adds an edge.
+///
+/// Each statement costs O(1) amortized: a scope is pushed once and popped once, and the count of
+/// open scopes of each kind answers whether an `END-` word closes anything.
+#[derive(Default)]
+struct CobolRun {
+    scopes: Vec<CobolScope>,
+    open: [usize; 5],
+    /// The phrase statement just read (its `END-` word and phrases): a phrase it takes opens its
+    /// scope, its `END-` word ends it.
+    pending: Option<(&'static str, &'static [&'static str])>,
+    skipped: bool,
+    exited: bool,
+    ended: bool,
+    unsure: bool,
+}
+
+impl CobolRun {
+    fn push(&mut self, scope: CobolScope) {
+        self.open[scope.slot()] += 1;
+        self.scopes.push(scope);
+    }
+
+    /// Close the innermost open `scope` kind and every scope inside it; nothing when none is open.
+    fn close(&mut self, scope: CobolScope) {
+        if self.open[scope.slot()] == 0 {
+            return;
+        }
+        while let Some(top) = self.scopes.pop() {
+            self.open[top.slot()] -= 1;
+            if top.slot() == scope.slot() {
+                break;
+            }
+        }
+    }
+
+    fn step(&mut self, n: tree_sitter::Node) {
+        // Error recovery marks the ERROR nodes it builds as extras: check them first.
+        if n.is_error() || n.is_missing() || n.has_error() {
+            self.unsure = true;
+            return;
+        }
+        if n.is_extra() {
+            return;
+        }
+        let pending = self.pending.take();
+        let kind = n.kind();
+        if COBOL_PHRASES.contains(&kind) {
+            let phrase = kind.strip_prefix("not_").unwrap_or(kind);
+            match pending {
+                // The statement just read takes this phrase: it opens the statement's scope.
+                Some((end, phrases)) if phrases.contains(&phrase) => {
+                    self.push(CobolScope::Phrase(end))
+                }
+                // `NOT AT END` after the `AT END` statements continues their scope.
+                _ if matches!(self.scopes.last(), Some(CobolScope::Phrase(_))) => {}
+                _ => self.push(CobolScope::Phrase("")),
+            }
+            return;
+        }
+        if let Some(&(_, end, phrases)) = COBOL_PHRASE_STATEMENTS.iter().find(|(k, ..)| *k == kind)
+        {
+            self.pending = Some((end, phrases));
+            return;
+        }
+        if kind.starts_with("END_") {
+            if pending.is_some_and(|(end, _)| end == kind) {
+                return;
+            }
+            match kind {
+                "END_IF" => self.close(CobolScope::If),
+                "END_EVALUATE" => self.close(CobolScope::Evaluate),
+                "END_SEARCH" => self.close(CobolScope::Search),
+                "END_PERFORM" => self.close(CobolScope::Loop),
+                _ => {
+                    if self.scopes.last() == Some(&CobolScope::Phrase(kind)) {
+                        self.close(CobolScope::Phrase(kind));
+                    }
+                }
+            }
+            return;
+        }
+        match kind {
+            "period" => {
+                self.scopes.clear();
+                self.open = [0; 5];
+                self.skipped = false;
+            }
+            // `ELSE IF` is a nested IF with its own END-IF.
+            "if_header" | "else_if_header" => self.push(CobolScope::If),
+            "evaluate_header" => self.push(CobolScope::Evaluate),
+            "search_statement" => self.push(CobolScope::Search),
+            "perform_statement_loop" => self.push(CobolScope::Loop),
+            "next_sentence_statement" => self.skipped = true,
+            "exit_statement" => {
+                let mut cursor = n.walk();
+                let words: Vec<&str> = n.children(&mut cursor).map(|c| c.kind()).collect();
+                if words.iter().any(|w| matches!(*w, "PARAGRAPH" | "SECTION")) {
+                    self.exited = true;
+                } else if words == ["EXIT"] {
+                    self.unsure = true;
+                }
+            }
+            "goback_statement" => self.end(),
+            "stop_statement" => {
+                let mut cursor = n.walk();
+                if n.children(&mut cursor).any(|c| c.kind() == "RUN") {
+                    self.end();
+                }
+            }
+            "goto_statement" => {
+                let mut cursor = n.walk();
+                let targets = n.children_by_field_name("to", &mut cursor).count();
+                if targets > 0 && n.child_by_field_name("depending").is_none() {
+                    self.end();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn end(&mut self) {
+        if self.scopes.is_empty() && !self.skipped && !self.exited {
+            self.ended = true;
+        }
+    }
+
+    /// The run ends in this unit for sure.
+    fn ends(&self) -> bool {
+        self.ended && !self.unsure
+    }
+}
+
+/// An I/O statement's operand for a `USE` handler: a file, or a record (`WRITE`, `REWRITE`).
+enum CobolIo {
+    File(String),
+    Record(String),
+}
+
+/// What a `USE` statement's handler runs on.
+enum CobolUse {
+    Files(Vec<String>),
+    /// `USE … ON INPUT | OUTPUT | I-O | EXTEND`: any file opened that way.
+    Mode,
+    /// `USE FOR DEBUGGING`, `USE BEFORE REPORTING`: no I/O statement triggers it.
+    Other,
+}
+
+fn cobol_shape(tree: &tree_sitter::Tree, src: &[u8]) -> CobolShape {
+    let mut shape = CobolShape::default();
+    let word = |n: tree_sitter::Node| cobol_label_words(n, src).into_iter().next();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() != "procedure_division" {
+            push_children(&mut stack, node);
+            continue;
+        }
+        // (statement start, operand, the DECLARATIVES section it is in)
+        let mut ios: Vec<(usize, CobolIo, Option<usize>)> = Vec::new();
+        let mut uses: Vec<(usize, CobolUse)> = Vec::new();
+        let declaratives: Vec<tree_sitter::Node> = {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .filter(|c| c.kind() == "procedure_declaratives")
+                .collect()
+        };
+        let parents =
+            std::iter::once((node, false)).chain(declaratives.into_iter().map(|d| (d, true)));
+        for (parent, declaratives) in parents {
+            // The header whose statements are being read (`None`: those before the first), and
+            // the section a DECLARATIVES statement is in.
+            let mut owner: Option<tree_sitter::Node> = None;
+            let mut section: Option<usize> = None;
+            let mut run = CobolRun::default();
+            let mut cursor = parent.walk();
+            for n in parent.children(&mut cursor) {
+                if n.kind() == "procedure_declaratives" {
+                    continue;
+                }
+                if is_cobol_header(n) {
+                    match owner {
+                        Some(h) if !run.ends() => {
+                            if !(declaratives && n.kind() == "section_header") {
+                                shape
+                                    .falls
+                                    .push((h.start_byte(), n.start_byte(), ts_span(n)));
+                            }
+                        }
+                        None if !declaratives && !run.ends() => shape.starts.push(n.start_byte()),
+                        _ => {}
+                    }
+                    if n.kind() == "section_header" {
+                        section = Some(n.start_byte());
+                    }
+                    owner = Some(n);
+                    run = CobolRun::default();
+                    continue;
+                }
+                run.step(n);
+                if declaratives && n.kind() == "use_statement" {
+                    if let Some(section) = section {
+                        let mut cursor = n.walk();
+                        if n.children(&mut cursor).any(|c| c.kind() == "GLOBAL") {
+                            shape.program_handlers.push(section);
+                        }
+                        uses.push((section, cobol_use(n, &word)));
+                    }
+                    continue;
+                }
+                let at = section.filter(|_| declaratives);
+                cobol_ios(n, &word, &mut |pos, io| ios.push((pos, io, at)));
+            }
+        }
+        if uses.is_empty() {
+            continue;
+        }
+        let records = cobol_fd_records(node, src);
+        // Handlers by file, of any file (a record of no FD), and of every I/O statement (mode).
+        let mut by_file: HashMap<String, Vec<usize>> = HashMap::new();
+        let (mut any_file, mut every) = (Vec::new(), Vec::new());
+        for (handler, use_) in uses {
+            match use_ {
+                CobolUse::Other => shape.program_handlers.push(handler),
+                CobolUse::Mode => every.push(handler),
+                CobolUse::Files(files) => {
+                    let files: HashSet<String> = files.into_iter().collect();
+                    for file in files {
+                        by_file.entry(file).or_default().push(handler);
+                    }
+                    any_file.push(handler);
+                }
+            }
+        }
+        let no_handlers: Vec<usize> = Vec::new();
+        for (pos, io, own) in &ios {
+            let file = match io {
+                CobolIo::File(f) => Some(f),
+                CobolIo::Record(r) => records.get(r).and_then(Option::as_ref),
+            };
+            // A record of no FD this pass reads (one from a copybook, say), or of two, may be any
+            // file's.
+            let matched = match file {
+                Some(f) => by_file.get(f).unwrap_or(&no_handlers),
+                None => &any_file,
+            };
+            for &handler in matched.iter().chain(&every) {
+                // A handler's own I/O does not run it again.
+                if *own != Some(handler) {
+                    shape.handlers.push((*pos, handler));
+                }
+            }
+        }
+    }
+    shape
+}
+
+/// The handler a `USE` statement declares.
+fn cobol_use(
+    n: tree_sitter::Node,
+    word: &impl Fn(tree_sitter::Node) -> Option<String>,
+) -> CobolUse {
+    let mut cursor = n.walk();
+    let files: Vec<String> = n
+        .children_by_field_name("file_name_list", &mut cursor)
+        .filter_map(word)
+        .collect();
+    if !files.is_empty() {
+        return CobolUse::Files(files);
+    }
+    let mut cursor = n.walk();
+    if n.children(&mut cursor)
+        .any(|c| matches!(c.kind(), "INPUT" | "OUTPUT" | "I_O" | "EXTEND"))
+    {
+        CobolUse::Mode
+    } else {
+        CobolUse::Other
+    }
+}
+
+/// The files (or records) an I/O statement acts on, with the statement's start: OPEN, CLOSE,
+/// READ, START, DELETE, WRITE, REWRITE, and a SORT or MERGE's USING and GIVING files.
+fn cobol_ios(
+    n: tree_sitter::Node,
+    word: &impl Fn(tree_sitter::Node) -> Option<String>,
+    out: &mut impl FnMut(usize, CobolIo),
+) {
+    let pos = n.start_byte();
+    let field = |name: &str| n.child_by_field_name(name).and_then(word);
+    // The operand words of `args`: their field `name`, or (`None`) every named child.
+    let operands = |args: Vec<tree_sitter::Node>, name: Option<&str>| {
+        let mut files = Vec::new();
+        for a in args {
+            let mut inner = a.walk();
+            let nodes: Vec<tree_sitter::Node> = match name {
+                Some(name) => a.children_by_field_name(name, &mut inner).collect(),
+                None => a.named_children(&mut inner).collect(),
+            };
+            files.extend(nodes.into_iter().filter_map(word));
+        }
+        files
+    };
+    let mut cursor = n.walk();
+    let files = match n.kind() {
+        "read_statement" | "delete_statement" | "start_statement" => {
+            field("file_name").into_iter().collect()
+        }
+        "write_statement" | "rewrite_statement" => {
+            let name = if n.kind() == "write_statement" {
+                "record_name"
+            } else {
+                "record"
+            };
+            if let Some(r) = field(name) {
+                out(pos, CobolIo::Record(r));
+            }
+            Vec::new()
+        }
+        "open_statement" => operands(
+            n.named_children(&mut cursor)
+                .filter(|c| c.kind() == "open_arg")
+                .collect(),
+            Some("file_name_list"),
+        ),
+        "close_statement" => operands(
+            n.named_children(&mut cursor)
+                .filter(|c| c.kind() == "close_arg")
+                .collect(),
+            Some("file_handler"),
+        ),
+        "sort_statement" | "merge_statement" => {
+            let mut using = n.walk();
+            operands(
+                n.children_by_field_name("input", &mut cursor)
+                    .chain(n.children_by_field_name("output", &mut using))
+                    .filter(|c| matches!(c.kind(), "sort_input_using" | "sort_output_giving"))
+                    .collect(),
+                None,
+            )
+        }
+        _ => Vec::new(),
+    };
+    for f in files {
+        out(pos, CobolIo::File(f));
+    }
+}
+
+/// The FD each record name of the program holding `division` belongs to: every name in an FD's
+/// record descriptions maps to the FD's file name (the first word of its entry, or of the FD
+/// itself in the `FD name COPY member` form), or to `None` when two FDs declare it (a `WRITE`
+/// of it may be either file's).
+fn cobol_fd_records(division: tree_sitter::Node, src: &[u8]) -> HashMap<String, Option<String>> {
+    let mut out = HashMap::new();
+    let Some(program) = division.parent() else {
+        return out;
+    };
+    let first_word = |n: tree_sitter::Node| {
+        let mut cursor = n.walk();
+        n.named_children(&mut cursor)
+            .find(|c| c.kind() == "WORD")
+            .and_then(|w| cobol_label_words(w, src).into_iter().next())
+    };
+    let mut stack = vec![program];
+    while let Some(n) = stack.pop() {
+        // Not the statements, and not a nested program's files.
+        if n.kind() == "procedure_division" || (n.kind() == "program_definition" && n != program) {
+            continue;
+        }
+        if n.kind() != "file_description" {
+            push_children(&mut stack, n);
+            continue;
+        }
+        let mut cursor = n.walk();
+        let entry = n
+            .named_children(&mut cursor)
+            .find(|c| c.kind() == "file_description_entry");
+        let Some(file) = entry.and_then(first_word).or_else(|| first_word(n)) else {
+            continue;
+        };
+        let mut names = vec![n];
+        while let Some(m) = names.pop() {
+            if m.kind() == "entry_name" {
+                if let Some(name) = cobol_label_words(m, src).into_iter().next() {
+                    let owner = out.entry(name).or_insert_with(|| Some(file.clone()));
+                    if owner.as_ref() != Some(&file) {
+                        *owner = None;
+                    }
+                }
+                continue;
+            }
+            push_children(&mut names, m);
         }
     }
     out
@@ -2004,60 +2556,6 @@ fn cobol_program_steps<'d>(
     }
     close(&mut open, &mut steps, usize::MAX);
     steps
-}
-
-/// The strongly connected component of each vertex of a graph given as adjacency lists, as an id
-/// below the vertex count (Tarjan's algorithm, iterative: linear in vertices and edges).
-fn strongly_connected(next: &[Vec<usize>]) -> Vec<usize> {
-    const NONE: usize = usize::MAX;
-    let n = next.len();
-    let (mut index, mut low) = (vec![NONE; n], vec![0; n]);
-    let mut on_stack = vec![false; n];
-    let mut component = vec![NONE; n];
-    let (mut stack, mut work) = (Vec::new(), Vec::<(usize, usize)>::new());
-    let (mut count, mut components) = (0, 0);
-    for root in 0..n {
-        if index[root] != NONE {
-            continue;
-        }
-        index[root] = count;
-        low[root] = count;
-        count += 1;
-        stack.push(root);
-        on_stack[root] = true;
-        work.push((root, 0));
-        while let Some(&(v, i)) = work.last() {
-            if let Some(&w) = next[v].get(i) {
-                work.last_mut().expect("non-empty").1 += 1;
-                if index[w] == NONE {
-                    index[w] = count;
-                    low[w] = count;
-                    count += 1;
-                    stack.push(w);
-                    on_stack[w] = true;
-                    work.push((w, 0));
-                } else if on_stack[w] {
-                    low[v] = low[v].min(index[w]);
-                }
-                continue;
-            }
-            work.pop();
-            if let Some(&(u, _)) = work.last() {
-                low[u] = low[u].min(low[v]);
-            }
-            if low[v] == index[v] {
-                while let Some(w) = stack.pop() {
-                    on_stack[w] = false;
-                    component[w] = components;
-                    if w == v {
-                        break;
-                    }
-                }
-                components += 1;
-            }
-        }
-    }
-    component
 }
 
 /// Give the next header its whole line, then trim the preceding paragraph's trailing whitespace.
@@ -5652,10 +6150,9 @@ impl TreeSitterExtractor {
         // The grammar has no paragraph wrapper, so we compute boundaries post-extraction.
         // `cobol_units`: the indexes in `defs` of the paragraphs and sections.
         let mut cobol_units: Vec<usize> = Vec::new();
-        // (program, paragraph or section) pairs the program runs itself, and the flow calls bound
-        // to a header of their own division: local `Calls` edges.
-        let mut cobol_runs: Vec<(SymbolId, SymbolId)> = Vec::new();
-        let mut cobol_flow_edges: Vec<(SymbolId, SymbolId, Span)> = Vec::new();
+        // Control flow between a program and its paragraphs and sections, bound by symbol: local
+        // `Calls` edges, one per (from, to) pair (see `CobolFlowEdge`).
+        let mut cobol_flow_edges: Vec<((SymbolId, SymbolId), CobolFlowEdge)> = Vec::new();
         if self.lang_name == "cobol" {
             let end_map = cobol_paragraph_end_map(&tree);
             // Attribution ranges too: a PERFORM, GO TO, CALL or data use inside a paragraph is
@@ -5694,9 +6191,26 @@ impl TreeSitterExtractor {
                 let i = steps.partition_point(|s| s.0 <= pos).checked_sub(1)?;
                 steps[i].1.cloned()
             };
-            // The flow graph between units, for which units the program runs itself.
-            let mut next: Vec<Vec<usize>> = vec![Vec::new(); units.len()];
-            let mut from_program: Vec<usize> = Vec::new();
+            // The store keeps one edge per (from, to, kind): every way one unit reaches another
+            // is folded into one edge, in first-seen order.
+            let mut flow: HashMap<(SymbolId, SymbolId), CobolFlowEdge> = HashMap::new();
+            let mut order: Vec<(SymbolId, SymbolId)> = Vec::new();
+            let mut add = |from: SymbolId, to: SymbolId, span: Span, how: CobolHow| {
+                // Two headers that still share one id: a name repeated within one section (which
+                // COBOL rejects), or a section and a paragraph of one name (#580 qualifies only
+                // paragraph names repeated across sections). No self-edge.
+                if from == to {
+                    return;
+                }
+                let key = (from, to);
+                match flow.get_mut(&key) {
+                    Some(edge) => edge.add(span, how),
+                    None => {
+                        order.push(key.clone());
+                        flow.insert(key, CobolFlowEdge::new(span, how));
+                    }
+                }
+            };
             for call in cobol_flow_calls(&tree, src) {
                 let name = fold_cobol_name(&self.lang_name, call.name);
                 let source = unit_at(call.pos);
@@ -5706,20 +6220,18 @@ impl TreeSitterExtractor {
                     (Some(_), None) => program_at(call.pos),
                     (None, _) => None,
                 };
+                let how = if call.conditional {
+                    CobolHow::Conditional
+                } else {
+                    CobolHow::Statement
+                };
                 match (target, from) {
                     (Some(t), _) if source == Some(t) => {}
-                    // Two headers that still share one id: a name repeated within one section (which
-                    // COBOL rejects), or a section and a paragraph of one name (#580 qualifies only
-                    // paragraph names repeated across sections). No self-edge.
-                    (Some(t), Some(from)) if from == defs[units[t]].symbol => {}
                     (Some(t), Some(from)) => {
-                        cobol_flow_edges.push((from, defs[units[t]].symbol.clone(), call.span));
-                        match source {
-                            Some(k) => next[k].push(t),
-                            None => from_program.push(t),
-                        }
+                        add(from, defs[units[t]].symbol.clone(), call.span, how)
                     }
-                    _ => {
+                    (Some(_), None) => {}
+                    (None, _) => {
                         if source.is_some_and(|k| defs[units[k]].name.eq_ignore_ascii_case(&name)) {
                             continue;
                         }
@@ -5727,46 +6239,66 @@ impl TreeSitterExtractor {
                     }
                 }
             }
-            // A paragraph or section that no flow statement of its program reaches is run by the
-            // program itself: where the program starts, one that control falls into from the
-            // paragraph before it, a DECLARATIVES handler, or dead code (the graph cannot tell
-            // these apart without flow analysis). The program calls it, bound by symbol: the first
-            // unit, in source order, of each strongly connected component of the flow graph that
-            // no other unit calls (a unit nothing calls, or a cycle nothing outside it enters),
-            // unless a statement before the first paragraph reaches it. Lineage from a program so
-            // reaches every paragraph's calls, and a unit another unit reaches keeps that caller
-            // only.
-            let mut seen = vec![false; units.len()];
-            let mut stack = from_program;
-            while let Some(k) = stack.pop() {
-                if !std::mem::replace(&mut seen[k], true) {
-                    stack.extend(next[k].iter().copied());
+            // What no statement names (#585): control falling from one paragraph or section into
+            // the next, where each program starts, and the DECLARATIVES handlers an I/O statement
+            // can run. A unit none of these reaches is dead code: nothing calls it.
+            let shape = cobol_shape(&tree, src);
+            let unit = |start: &usize| {
+                unit_by_start
+                    .get(start)
+                    .map(|&k| defs[units[k]].symbol.clone())
+            };
+            // A header with no node (an integer-named paragraph) is passed through: control
+            // that falls into it lands on the first noded header it falls into.
+            let falls_from: HashMap<usize, usize> = shape
+                .falls
+                .iter()
+                .map(|&(from, to, _)| (from, to))
+                .collect();
+            let landing = |mut h: usize| loop {
+                if unit_by_start.contains_key(&h) {
+                    return Some(h);
                 }
-            }
-            let component = strongly_connected(&next);
-            let mut entered = vec![false; units.len()];
-            for (k, targets) in next.iter().enumerate() {
-                for &t in targets {
-                    if component[t] != component[k] {
-                        entered[component[t]] = true;
-                    }
-                }
-            }
-            let mut runs: HashSet<(SymbolId, SymbolId)> = HashSet::new();
-            for (k, &unit) in units.iter().enumerate() {
-                if seen[k] || std::mem::replace(&mut entered[component[k]], true) {
+                h = *falls_from.get(&h)?;
+            };
+            for (from, to, span) in &shape.falls {
+                // Only from a noded unit: a chain of unnoded headers is walked once, by the unit
+                // that falls into it.
+                let Some(from) = unit(from) else {
                     continue;
-                }
-                if let Some(program) = program_at(defs[unit].start) {
-                    let run = (program, defs[unit].symbol.clone());
-                    if runs.insert(run.clone()) {
-                        cobol_runs.push(run);
-                    }
+                };
+                if let Some(to) = landing(*to).and_then(|t| unit(&t)) {
+                    add(from, to, *span, CobolHow::FallThrough);
                 }
             }
+            for start in &shape.starts {
+                if let (Some(program), Some(to)) =
+                    (program_at(*start), landing(*start).and_then(|t| unit(&t)))
+                {
+                    add(program, to, Span::ZERO, CobolHow::Statement);
+                }
+            }
+            for (pos, handler) in &shape.handlers {
+                let from = match unit_at(*pos) {
+                    Some(k) => Some(defs[units[k]].symbol.clone()),
+                    None => program_at(*pos),
+                };
+                if let (Some(from), Some(to)) = (from, unit(handler)) {
+                    add(from, to, Span::ZERO, CobolHow::Conditional);
+                }
+            }
+            for handler in &shape.program_handlers {
+                if let (Some(program), Some(to)) = (program_at(*handler), unit(handler)) {
+                    add(program, to, Span::ZERO, CobolHow::Conditional);
+                }
+            }
+            cobol_flow_edges = order
+                .into_iter()
+                .filter_map(|key| flow.remove(&key).map(|edge| (key, edge)))
+                .collect();
             // A call starts from the paragraph or section it is in, never also from its program:
             // a program twin would be one call site counted as two callers. A program's callee
-            // programs are reached through the paragraphs it runs (`cobol_runs` above).
+            // programs are reached through the paragraph where it starts and the flow from it.
             let program_of_call = cobol_call_programs(&tree, src);
             // A literal CALL of the program itself made before its first paragraph starts from
             // the program: a self-edge, so no ref (one made in a paragraph is kept above).
@@ -5874,29 +6406,26 @@ impl TreeSitterExtractor {
                 );
             }
         }
-        for (from, to, span) in cobol_flow_edges {
-            local_edges.push(
-                Edge::new(
-                    from,
-                    to,
-                    EdgeKind::Calls,
-                    ResolutionTier::Parsed,
-                    "tree-sitter",
-                )
-                .with_location(Location::new(&file.path, span)),
-            );
-        }
-        for (program, unit) in cobol_runs {
-            local_edges.push(
-                Edge::new(
-                    program,
-                    unit,
-                    EdgeKind::Calls,
-                    ResolutionTier::Parsed,
-                    "tree-sitter",
-                )
-                .with_location(Location::new(&file.path, Span::ZERO)),
-            );
+        for ((from, to), flow) in cobol_flow_edges {
+            let mut edge = Edge::new(
+                from,
+                to,
+                EdgeKind::Calls,
+                ResolutionTier::Parsed,
+                "tree-sitter",
+            )
+            .with_location(Location::new(&file.path, flow.span));
+            if flow.fall_through {
+                edge.metadata.insert(
+                    COBOL_FALL_THROUGH.to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+            if flow.conditional {
+                edge.metadata
+                    .insert(COBOL_CONDITIONAL.to_string(), serde_json::Value::Bool(true));
+            }
+            local_edges.push(edge);
         }
         nodes.extend(def_nodes);
 

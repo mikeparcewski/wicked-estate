@@ -613,9 +613,9 @@ fn a_paragraph_jumping_to_itself_binds_to_no_same_named_paragraph_elsewhere() {
 
 #[test]
 fn lineage_of_a_program_reaches_calls_in_paragraphs_no_statement_names() {
-    // FALLPGM falls from MAIN-PARA into NEXT-PARA, and its DECLARATIVES handler runs on an I/O
-    // error: no statement names either paragraph, so the program runs them itself. CYCPGM's two
-    // paragraphs jump to each other. TWO.cbl holds two programs that both PERFORM a WORK-PARA of
+    // FALLPGM falls from MAIN-PARA into NEXT-PARA, and its DECLARATIVES handler runs when
+    // MAIN-PARA's READ of INFILE fails: no statement names either paragraph, and lineage reaches
+    // both through the flow (#585). CYCPGM's two paragraphs jump to each other. TWO.cbl holds two programs that both PERFORM a WORK-PARA of
     // their own: each binds to its own, by symbol.
     let tmp = scratch("runs");
     let root = tmp.0.join("repo");
@@ -630,6 +630,7 @@ fn lineage_of_a_program_reaches_calls_in_paragraphs_no_statement_names() {
             "    CALL 'LOGGER'.",
             "END DECLARATIVES.",
             "MAIN-PARA.",
+            "    READ INFILE",
             "    DISPLAY 'START'.",
             "NEXT-PARA.",
             "    CALL 'SUBPGM'.",

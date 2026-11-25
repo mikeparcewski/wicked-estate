@@ -404,7 +404,8 @@ fn perform_thru_with_an_unknown_end_calls_the_named_paragraphs_only() {
 #[test]
 fn go_to_targets_become_calls_from_the_paragraph() {
     let ex = extract("THRUPGM", &program("THRUPGM", DATA, THRU));
-    assert_eq!(calls_from(&ex, "1000-A"), ["1000-EXIT"]);
+    // 1000-A's GO TO is under an IF, so 1000-A also falls into 1000-B (#585).
+    assert_eq!(calls_from(&ex, "1000-A"), ["1000-B", "1000-EXIT"]);
     assert_eq!(calls_from(&ex, "2000-B"), ["2000-EXIT", "2000-X"]);
 }
 
@@ -547,7 +548,8 @@ fn a_copy_without_its_own_period_hides_only_copy_and_member() {
     let ex = extract("COPYNOP", &text);
     assert_eq!(function_names(&ex), ["MAIN-PARA", "AFTER-PARA"]);
     assert_eq!(calls_from(&ex, "AFTER-PARA"), ["SUBPGM"]);
-    assert!(calls_from(&ex, "MAIN-PARA").is_empty());
+    // No call from the hidden COPY; MAIN-PARA falls into AFTER-PARA (#585).
+    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["AFTER-PARA"]);
 }
 
 #[test]
@@ -774,28 +776,7 @@ fn a_program_runs_its_first_paragraph_and_only_paragraphs_nothing_else_calls() {
 }
 
 #[test]
-fn a_paragraph_control_falls_into_is_run_by_the_program() {
-    // No statement names NEXT-PARA: control falls into it from MAIN-PARA. Its CALL must stay in
-    // the program's lineage.
-    let ex = extract(
-        "FALLPGM",
-        &program(
-            "FALLPGM",
-            DATA,
-            &[
-                "MAIN-PARA.",
-                "    DISPLAY 'START'.",
-                "NEXT-PARA.",
-                "    CALL 'SUBPGM'.",
-            ],
-        ),
-    );
-    assert_eq!(calls_from(&ex, "FALLPGM"), ["MAIN-PARA", "NEXT-PARA"]);
-    assert_eq!(callers_of(&ex, "SUBPGM"), ["NEXT-PARA"]);
-}
-
-#[test]
-fn using_comments_declaratives_and_sections_are_run_by_the_program() {
+fn using_comments_declaratives_and_sections_start_where_the_program_starts() {
     let using = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. USINGPGM.\n       \
                  DATA DIVISION.\n       LINKAGE SECTION.\n       01  LK-A PIC X.\n       \
                  PROCEDURE DIVISION USING LK-A.\n      * the entry\n       MAIN-PARA.\n           \
@@ -804,7 +785,8 @@ fn using_comments_declaratives_and_sections_are_run_by_the_program() {
         calls_from(&extract("USINGPGM", using), "USINGPGM"),
         ["MAIN-PARA"]
     );
-    // A DECLARATIVES handler runs on an I/O condition, which no statement names.
+    // A DECLARATIVES handler runs on an I/O condition: with no I/O statement on INFILE, nothing
+    // runs it, and the program starts after END DECLARATIVES (#585).
     let decl = program(
         "DECLPGM",
         DATA,
@@ -820,10 +802,9 @@ fn using_comments_declaratives_and_sections_are_run_by_the_program() {
         ],
     );
     let ex = extract("DECLPGM", &decl);
-    assert_eq!(
-        calls_from(&ex, "DECLPGM"),
-        ["ERR-PARA", "ERR-SECTION", "MAIN-PARA"]
-    );
+    assert_eq!(calls_from(&ex, "DECLPGM"), ["MAIN-PARA"]);
+    assert_eq!(callers_of(&ex, "ERR-SECTION"), Vec::<String>::new());
+    assert_eq!(callers_of(&ex, "ERR-PARA"), ["ERR-SECTION"]);
     assert_eq!(callers_of(&ex, "LOGGER"), ["ERR-PARA"]);
     let section = program(
         "SECTPGM",
@@ -838,11 +819,11 @@ fn using_comments_declaratives_and_sections_are_run_by_the_program() {
             "    EXIT.",
         ],
     );
-    // WORK-SECTION and its paragraph are performed; the rest is the program's.
-    assert_eq!(
-        calls_from(&extract("SECTPGM", &section), "SECTPGM"),
-        ["MAIN-PARA", "MAIN-SECTION"]
-    );
+    // WORK-SECTION and its paragraph are performed; the program starts at MAIN-SECTION, which
+    // falls into MAIN-PARA.
+    let ex = extract("SECTPGM", &section);
+    assert_eq!(calls_from(&ex, "SECTPGM"), ["MAIN-SECTION"]);
+    assert_eq!(callers_of(&ex, "MAIN-PARA"), ["MAIN-SECTION"]);
 }
 
 #[test]
@@ -862,9 +843,11 @@ fn statements_before_the_first_paragraph_keep_their_own_calls() {
             ],
         ),
     );
-    // 2000-B by the PERFORM; 1000-A is named by nothing (dead here, but the graph cannot tell).
-    assert_eq!(calls_from(&ex, "TOPPGM"), ["1000-A", "2000-B"]);
-    assert_eq!(callers_of(&ex, "2000-B"), ["TOPPGM"]);
+    // 2000-B by the PERFORM. The GOBACK ends the run before 1000-A, which nothing names: dead
+    // code, so no caller (#585). 1000-A falls into 2000-B.
+    assert_eq!(calls_from(&ex, "TOPPGM"), ["2000-B"]);
+    assert_eq!(callers_of(&ex, "1000-A"), Vec::<String>::new());
+    assert_eq!(callers_of(&ex, "2000-B"), ["1000-A", "TOPPGM"]);
 }
 
 #[test]
@@ -1164,11 +1147,10 @@ fn an_unterminated_copy_hides_its_whole_last_pseudo_text_operand() {
         function_names(&ex),
         ["MAIN-PARA", "AFTER-PARA", "1000-WORK"]
     );
-    assert!(
-        calls_from(&ex, "MAIN-PARA").is_empty(),
-        "replacement text is not code"
-    );
-    assert_eq!(calls_from(&ex, "AFTER-PARA"), ["SUBPGM"]);
+    // Replacement text is not code: no PERFORM 1000-WORK. Each paragraph falls into the next
+    // (#585).
+    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["AFTER-PARA"]);
+    assert_eq!(calls_from(&ex, "AFTER-PARA"), ["1000-WORK", "SUBPGM"]);
 }
 
 #[test]
@@ -1190,7 +1172,8 @@ fn copy_and_exec_words_are_never_copy_operands() {
     );
     let ex = extract("COPYKW", &text);
     assert_eq!(function_names(&ex), ["MAIN-PARA", "NEXT-PARA"]);
-    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["SUBPGM"]);
+    // SUBPGM, and NEXT-PARA by fall-through (#585).
+    assert_eq!(calls_from(&ex, "MAIN-PARA"), ["NEXT-PARA", "SUBPGM"]);
 }
 
 #[test]
@@ -1315,7 +1298,8 @@ fn a_cycle_no_unnamed_paragraph_reaches_is_run_from_its_first_paragraph() {
     );
     assert_eq!(calls_from(&ex, "LOOPPGM"), ["MAIN-PARA"]);
     assert_eq!(callers_of(&ex, "SUBPGM"), ["MAIN-PARA"]);
-    // A loop that control falls into: the program runs 0000-INIT, and 1000-READ starts the loop.
+    // A loop that control falls into: the program starts at 0000-INIT, which falls into
+    // 1000-READ (#585).
     let ex = extract(
         "READPGM",
         &program(
@@ -1332,7 +1316,8 @@ fn a_cycle_no_unnamed_paragraph_reaches_is_run_from_its_first_paragraph() {
             ],
         ),
     );
-    assert_eq!(calls_from(&ex, "READPGM"), ["0000-INIT", "1000-READ"]);
+    assert_eq!(calls_from(&ex, "READPGM"), ["0000-INIT"]);
+    assert_eq!(callers_of(&ex, "1000-READ"), ["0000-INIT", "2000-PROC"]);
     assert_eq!(callers_of(&ex, "2000-PROC"), ["1000-READ"]);
 }
 
@@ -1360,8 +1345,7 @@ fn edges_from<'a>(
 fn same_named_paragraphs_of_two_sections_are_two_nodes_580() {
     // FIRST-SECTION's A-PARA performs SECOND-SECTION's A-PARA. A paragraph name that repeats in
     // two sections of one program is qualified by its section, `A-PARA(FIRST-SECTION).` (#580):
-    // two nodes, and the
-    // qualified PERFORM is a call from one to the other, bound by identity.
+    // two nodes, and the qualified PERFORM is a call from one to the other, bound by identity.
     let ex = extract(
         "QUALPGM",
         &program(
@@ -1399,8 +1383,8 @@ fn same_named_paragraphs_of_two_sections_are_two_nodes_580() {
             .collect();
         assert_eq!(held, [para], "{section}");
     }
-    // The CALL is the second A-PARA's alone, and the program runs the first, which nothing
-    // performs, not the second.
+    // The CALL is the second A-PARA's alone. The program starts at FIRST-SECTION (#585), which
+    // falls into the first A-PARA; the second is reached only by the qualified PERFORM.
     let calls_of = |sym| {
         ex.refs
             .iter()
@@ -1410,8 +1394,11 @@ fn same_named_paragraphs_of_two_sections_are_two_nodes_580() {
     };
     assert_eq!(calls_of(first), Vec::<&str>::new());
     assert_eq!(calls_of(second), ["SUBPGM"]);
-    let runs = edges_from(&ex, &node(&ex, "QUALPGM").symbol, EdgeKind::Calls);
-    assert!(runs.contains(&first) && !runs.contains(&second), "{runs:?}");
+    assert_eq!(calls_from(&ex, "QUALPGM"), ["FIRST-SECTION"]);
+    assert_eq!(
+        edges_from(&ex, &node(&ex, "FIRST-SECTION").symbol, EdgeKind::Calls),
+        [first]
+    );
 
     // A differently named paragraph of FIRST-SECTION performs A-PARA OF SECOND-SECTION: a local
     // call from it on the PERFORM line to SECOND-SECTION's A-PARA, though FIRST-SECTION has an
@@ -1609,7 +1596,7 @@ fn a_section_qualified_paragraph_never_takes_a_nested_programs_id_580() {
 #[test]
 fn a_paragraph_a_cycle_performs_is_not_run_by_the_program() {
     // LOOP-A and LOOP-B jump to each other, and LOOP-A performs HELPER, defined before them. The
-    // program runs INIT and the cycle's first paragraph; HELPER's one caller is LOOP-A.
+    // program starts at INIT, which falls into HELPER, which falls into the cycle (#585).
     let ex = extract(
         "HELPPGM",
         &program(
@@ -1628,8 +1615,9 @@ fn a_paragraph_a_cycle_performs_is_not_run_by_the_program() {
             ],
         ),
     );
-    assert_eq!(calls_from(&ex, "HELPPGM"), ["INIT", "LOOP-A"]);
-    assert_eq!(callers_of(&ex, "HELPER"), ["LOOP-A"]);
+    assert_eq!(calls_from(&ex, "HELPPGM"), ["INIT"]);
+    assert_eq!(callers_of(&ex, "HELPER"), ["INIT", "LOOP-A"]);
+    assert_eq!(callers_of(&ex, "LOOP-A"), ["HELPER", "LOOP-B"]);
     assert_eq!(callers_of(&ex, "SUBPGM"), ["HELPER"]);
 }
 
@@ -1919,4 +1907,473 @@ fn a_block_of_unreadable_lines_inside_a_program_still_resyncs() {
     );
     assert_eq!(callers_of(&ex, "SUBPGM"), ["NEXT-PARA"]);
     assert_eq!(unparsed_lines(&ex), None);
+}
+
+// ── control flow no statement names (#585) ────────────────────────────────────────────────────
+
+/// The one local `Calls` edge from `from` to `to`, by node name.
+fn flow_edge<'a>(ex: &'a Extraction, from: &str, to: &str) -> &'a wicked_estate_core::Edge {
+    let (from, to) = (&node(ex, from).symbol, &node(ex, to).symbol);
+    let edges: Vec<_> = ex
+        .local_edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Calls && &e.source == from && &e.target == to)
+        .collect();
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    edges[0]
+}
+
+/// `(fall-through, conditional)` metadata of the edge from `from` to `to`.
+fn flow_tags(ex: &Extraction, from: &str, to: &str) -> (bool, bool) {
+    let edge = flow_edge(ex, from, to);
+    let tag = |key: &str| edge.metadata.get(key).and_then(|v| v.as_bool()) == Some(true);
+    (tag("cobol_fall_through"), tag("cobol_conditional"))
+}
+
+#[test]
+fn control_falls_from_a_paragraph_into_the_next_and_the_program_starts_only_its_first() {
+    let ex = extract(
+        "FALLPGM",
+        &program(
+            "FALLPGM",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    DISPLAY 'START'.",
+                "NEXT-PARA.",
+                "    CALL 'SUBPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(calls_from(&ex, "FALLPGM"), ["MAIN-PARA"]);
+    assert_eq!(callers_of(&ex, "NEXT-PARA"), ["MAIN-PARA"]);
+    assert_eq!(flow_tags(&ex, "MAIN-PARA", "NEXT-PARA"), (true, false));
+    assert_eq!(flow_tags(&ex, "FALLPGM", "MAIN-PARA"), (false, false));
+    assert_eq!(callers_of(&ex, "SUBPGM"), ["NEXT-PARA"]);
+}
+
+/// MAIN-PARA ends with `last` (and whatever comes before it); NEXT-PARA follows and nothing
+/// names it. Its callers: MAIN-PARA when control falls into it, else none.
+fn next_callers(last: &[&str]) -> Vec<String> {
+    let mut body = vec!["MAIN-PARA.", "    DISPLAY 'START'"];
+    body.extend(last);
+    body.extend(["NEXT-PARA.", "    CALL 'SUBPGM'."]);
+    let ex = extract("ENDPGM", &program("ENDPGM", DATA, &body));
+    assert_eq!(calls_from(&ex, "ENDPGM"), ["MAIN-PARA"], "{last:?}");
+    callers_of(&ex, "NEXT-PARA")
+}
+
+#[test]
+fn goback_stop_run_and_an_unconditional_go_to_end_a_run() {
+    let none: Vec<String> = Vec::new();
+    for last in [
+        &["    GOBACK."][..],
+        &["    STOP RUN."],
+        // After a closed IF, the GOBACK runs whatever the condition.
+        &[
+            "    IF WS-FLAG = 'Y'",
+            "        DISPLAY 'Y'",
+            "    END-IF",
+            "    GOBACK.",
+        ],
+        // In a later sentence of the paragraph.
+        &["    IF WS-FLAG = 'Y' DISPLAY 'Y'.", "    GOBACK."],
+        // After a READ's AT END phrase, closed by END-READ.
+        &[
+            "    READ INFILE AT END MOVE 'Y' TO WS-FLAG END-READ",
+            "    GOBACK.",
+        ],
+    ] {
+        assert_eq!(next_callers(last), none, "{last:?}");
+    }
+    // An unconditional GO TO: NEXT-PARA right after MAIN-PARA gets no fall-through caller.
+    let ex = extract(
+        "GOTOPGM",
+        &program(
+            "GOTOPGM",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    GO TO OTHER-PARA.",
+                "NEXT-PARA.",
+                "    CALL 'SUBPGM'.",
+                "OTHER-PARA.",
+                "    GOBACK.",
+            ],
+        ),
+    );
+    assert_eq!(callers_of(&ex, "NEXT-PARA"), none);
+    assert_eq!(flow_tags(&ex, "MAIN-PARA", "OTHER-PARA"), (false, false));
+}
+
+#[test]
+fn a_run_ending_statement_under_a_condition_or_unknown_does_not_end_the_run() {
+    let main = vec!["MAIN-PARA".to_string()];
+    for last in [
+        // Flat IFs: the terminator is inside the IF, until END-IF or the period.
+        &["    IF WS-FLAG = 'Y'", "        GOBACK", "    END-IF."][..],
+        &["    IF WS-FLAG = 'Y' GOBACK."],
+        &["    IF WS-FLAG = 'Y' DISPLAY 'Y' ELSE STOP RUN END-IF."],
+        &[
+            "    EVALUATE WS-FLAG",
+            "        WHEN 'Y' GOBACK",
+            "    END-EVALUATE.",
+        ],
+        &["    READ INFILE AT END GOBACK END-READ."],
+        &["    READ INFILE AT END DISPLAY 'E' NOT AT END GOBACK."],
+        &[
+            "    PERFORM UNTIL WS-FLAG = 'Y'",
+            "        GOBACK",
+            "    END-PERFORM.",
+        ],
+        // GO TO DEPENDING falls through when the index is out of range.
+        &["    GO TO OTHER-PARA DEPENDING ON WS-FLAG."],
+        // EXIT PROGRAM is ignored in a program nobody called; CICS RETURN with RESP returns.
+        &["    EXIT PROGRAM."],
+        &["    EXEC CICS RETURN END-EXEC."],
+        // The rest of a sentence after NEXT SENTENCE may be skipped.
+        &["    IF WS-FLAG = 'Y' NEXT SENTENCE END-IF", "    GOBACK."],
+        // STOP with a literal is not STOP RUN.
+        &["    STOP 'END'."],
+    ] {
+        if last[0].contains("DEPENDING") {
+            // NEXT-PARA right after MAIN-PARA; the DEPENDING target comes after it.
+            let mut body = vec!["MAIN-PARA.", "    DISPLAY 'START'"];
+            body.extend(last);
+            body.extend(["NEXT-PARA.", "    GOBACK.", "OTHER-PARA.", "    GOBACK."]);
+            let ex = extract("ENDPGM", &program("ENDPGM", DATA, &body));
+            assert_eq!(flow_tags(&ex, "MAIN-PARA", "NEXT-PARA"), (true, false));
+            assert_eq!(flow_tags(&ex, "MAIN-PARA", "OTHER-PARA"), (false, true));
+            continue;
+        }
+        assert_eq!(next_callers(last), main, "{last:?}");
+    }
+}
+
+#[test]
+fn stop_run_split_by_a_sequence_number_still_ends_the_run() {
+    let text = [
+        "000100 IDENTIFICATION DIVISION.",
+        "000200 PROGRAM-ID. SEQPGM.",
+        "000300 PROCEDURE DIVISION.",
+        "000400 MAIN-PARA.",
+        "000500     DISPLAY 'START'",
+        "000600     STOP",
+        "000700     RUN.",
+        "000800 NEXT-PARA.",
+        "000900     CALL 'SUBPGM'.",
+    ]
+    .join("\n")
+        + "\n";
+    let ex = extract("SEQPGM", &text);
+    assert_eq!(calls_from(&ex, "SEQPGM"), ["MAIN-PARA"]);
+    assert_eq!(callers_of(&ex, "NEXT-PARA"), Vec::<String>::new());
+}
+
+#[test]
+fn go_to_depending_targets_are_conditional_unless_also_reached_another_way() {
+    let ex = extract(
+        "DEPPGM",
+        &program(
+            "DEPPGM",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    PERFORM B-PARA",
+                "    GO TO A-PARA B-PARA DEPENDING ON WS-FLAG",
+                "    GOBACK.",
+                "A-PARA.",
+                "    GOBACK.",
+                "B-PARA.",
+                "    GOBACK.",
+            ],
+        ),
+    );
+    assert_eq!(flow_tags(&ex, "MAIN-PARA", "A-PARA"), (false, true));
+    assert_eq!(flow_tags(&ex, "MAIN-PARA", "B-PARA"), (false, false));
+    // In the THRU fixture, 2000-B's DEPENDING target 2000-X is also where it falls: not
+    // conditional, since falling is not; 2000-EXIT is reached only by the DEPENDING.
+    let ex = extract("THRUPGM", &program("THRUPGM", DATA, THRU));
+    assert_eq!(flow_tags(&ex, "2000-B", "2000-X"), (true, false));
+    assert_eq!(flow_tags(&ex, "2000-B", "2000-EXIT"), (false, true));
+}
+
+#[test]
+fn nested_ifs_owned_phrases_and_exits_are_read_as_scopes() {
+    let main = vec!["MAIN-PARA".to_string()];
+    let none: Vec<String> = Vec::new();
+    for (last, falls) in [
+        // ELSE IF opens a nested IF: the inner END-IF leaves the GOBACK under the outer one.
+        (
+            &[
+                "    IF WS-FLAG = 'Y' CONTINUE",
+                "    ELSE IF WS-A = 'B' CONTINUE END-IF",
+                "    GOBACK END-IF.",
+            ][..],
+            true,
+        ),
+        // END-CALL ends the CALL inside AT END, not the READ's phrase.
+        (
+            &["    READ INFILE AT END CALL 'X' END-CALL GOBACK END-READ."],
+            true,
+        ),
+        // An inner READ with no phrase ends with its own END-READ.
+        (
+            &["    READ INFILE AT END READ OUTFILE END-READ GOBACK END-READ."],
+            true,
+        ),
+        // NOT AT END after the AT END statements is the same scope: END-READ closes it.
+        (
+            &[
+                "    READ INFILE AT END DISPLAY 'EOF' NOT AT END CONTINUE END-READ",
+                "    GOBACK.",
+            ],
+            false,
+        ),
+        // EXIT PARAGRAPH (taken under an IF) skips the GOBACK after it.
+        (
+            &["    IF WS-FLAG = 'Y' EXIT PARAGRAPH END-IF", "    GOBACK."],
+            true,
+        ),
+    ] {
+        let want = if falls { &main } else { &none };
+        assert_eq!(&next_callers(last), want, "{last:?}");
+    }
+}
+
+#[test]
+fn a_procedure_copy_or_an_integer_named_paragraph_keeps_the_flow() {
+    // The member of a procedure COPY may hold any statements: the run is not known to end.
+    let ex = extract(
+        "COPYFALL",
+        &program(
+            "COPYFALL",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    IF WS-FLAG = 'Y' COPY BODY.",
+                "    GOBACK.",
+                "NEXT-PARA.",
+                "    CALL 'SUBPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(callers_of(&ex, "NEXT-PARA"), ["MAIN-PARA"]);
+    // An integer-named paragraph has no node: control falls through it to NEXT-PARA, and a
+    // program that starts there starts at NEXT-PARA.
+    let ex = extract(
+        "NUMFALL",
+        &program(
+            "NUMFALL",
+            DATA,
+            &[
+                "1000.",
+                "    DISPLAY 'X'.",
+                "NEXT-PARA.",
+                "    CALL 'SUBPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(calls_from(&ex, "NUMFALL"), ["NEXT-PARA"]);
+}
+
+#[test]
+fn a_cycle_nothing_reaches_is_dead_code() {
+    let ex = extract(
+        "DEADPGM",
+        &program(
+            "DEADPGM",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    GOBACK.",
+                "LOOP-A.",
+                "    GO TO LOOP-B.",
+                "LOOP-B.",
+                "    CALL 'SUBPGM'",
+                "    GO TO LOOP-A.",
+            ],
+        ),
+    );
+    assert_eq!(calls_from(&ex, "DEADPGM"), ["MAIN-PARA"]);
+    assert_eq!(callers_of(&ex, "LOOP-A"), ["LOOP-B"]);
+    assert_eq!(callers_of(&ex, "LOOP-B"), ["LOOP-A"]);
+}
+
+#[test]
+fn a_section_falls_into_its_paragraphs_and_into_the_next_section() {
+    let ex = extract(
+        "SECFALL",
+        &program(
+            "SECFALL",
+            DATA,
+            &[
+                "A-SECTION SECTION.",
+                "A1.",
+                "    DISPLAY 'A1'.",
+                "B-SECTION SECTION.",
+                "B1.",
+                "    GOBACK.",
+            ],
+        ),
+    );
+    assert_eq!(calls_from(&ex, "SECFALL"), ["A-SECTION"]);
+    assert_eq!(flow_tags(&ex, "A-SECTION", "A1"), (true, false));
+    assert_eq!(flow_tags(&ex, "A1", "B-SECTION"), (true, false));
+    assert_eq!(flow_tags(&ex, "B-SECTION", "B1"), (true, false));
+}
+
+/// A program with two files (INFILE with record IN-REC, OUTFILE with OUT-REC) and DECLARATIVES
+/// `handlers` before MAIN-PARA's `main` statements.
+fn with_files(id: &str, handlers: &[&str], main: &[&str]) -> String {
+    let mut out: Vec<String> = [
+        "IDENTIFICATION DIVISION.",
+        &format!("PROGRAM-ID. {id}."),
+        "ENVIRONMENT DIVISION.",
+        "INPUT-OUTPUT SECTION.",
+        "FILE-CONTROL.",
+        "    SELECT INFILE ASSIGN TO 'IN'.",
+        "    SELECT OUTFILE ASSIGN TO 'OUT'.",
+        "DATA DIVISION.",
+        "FILE SECTION.",
+        "FD  INFILE.",
+        "01  IN-REC        PIC X(80).",
+        "FD  OUTFILE.",
+        "01  OUT-REC       PIC X(80).",
+        "WORKING-STORAGE SECTION.",
+        "01  WS-REC        PIC X(80).",
+        "PROCEDURE DIVISION.",
+        "DECLARATIVES.",
+    ]
+    .iter()
+    .map(|l| l.to_string())
+    .collect();
+    out.extend(handlers.iter().map(|l| l.to_string()));
+    out.push("END DECLARATIVES.".to_string());
+    out.push("MAIN-SECTION SECTION.".to_string());
+    out.push("MAIN-PARA.".to_string());
+    out.extend(main.iter().map(|l| l.to_string()));
+    out.iter()
+        .map(|l| format!("       {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+#[test]
+fn a_use_handler_is_run_by_the_io_statements_on_its_files() {
+    let text = with_files(
+        "USEPGM",
+        &[
+            "IN-ERR SECTION.",
+            "    USE AFTER STANDARD ERROR PROCEDURE ON INFILE.",
+            "IN-ERR-PARA.",
+            "    CALL 'LOGGER'.",
+            "OUT-ERR SECTION.",
+            "    USE AFTER STANDARD ERROR PROCEDURE ON OUTFILE.",
+            "OUT-ERR-PARA.",
+            "    DISPLAY 'OUT'.",
+        ],
+        &[
+            "    OPEN INPUT INFILE",
+            "    PERFORM READ-PARA",
+            "    PERFORM WRITE-PARA",
+            "    GOBACK.",
+            "READ-PARA.",
+            "    READ INFILE.",
+            "WRITE-PARA.",
+            "    WRITE OUT-REC.",
+        ],
+    );
+    let ex = extract("USEPGM", &text);
+    // The program starts at MAIN-SECTION, never at a handler.
+    assert_eq!(calls_from(&ex, "USEPGM"), ["MAIN-SECTION"]);
+    assert_eq!(callers_of(&ex, "IN-ERR"), ["MAIN-PARA", "READ-PARA"]);
+    assert_eq!(flow_tags(&ex, "READ-PARA", "IN-ERR"), (false, true));
+    // WRITE names OUT-REC, OUTFILE's record.
+    assert_eq!(callers_of(&ex, "OUT-ERR"), ["WRITE-PARA"]);
+    // A handler section falls into its paragraph, never into the next handler or past END
+    // DECLARATIVES.
+    // DECLARATIVES (OUT-ERR's one caller above is WRITE-PARA, not IN-ERR-PARA).
+    assert_eq!(flow_tags(&ex, "IN-ERR", "IN-ERR-PARA"), (true, false));
+    assert_eq!(callers_of(&ex, "MAIN-SECTION"), ["USEPGM"]);
+    assert_eq!(callers_of(&ex, "LOGGER"), ["IN-ERR-PARA"]);
+}
+
+#[test]
+fn a_use_on_an_open_mode_or_on_a_record_of_no_fd_is_run_by_every_matching_io_statement() {
+    let text = with_files(
+        "MODEPGM",
+        &[
+            "ANY-ERR SECTION.",
+            "    USE AFTER ERROR PROCEDURE ON INPUT.",
+            "ANY-ERR-PARA.",
+            "    DISPLAY 'ERR'.",
+            "IN-ERR SECTION.",
+            "    USE AFTER ERROR PROCEDURE ON INFILE.",
+            "IN-ERR-PARA.",
+            "    DISPLAY 'IN'.",
+        ],
+        &[
+            "    PERFORM WRITE-PARA",
+            "    PERFORM CLOSE-PARA",
+            "    GOBACK.",
+            "WRITE-PARA.",
+            "    WRITE WS-REC.",
+            "    GOBACK.",
+            "CLOSE-PARA.",
+            "    CLOSE OUTFILE.",
+        ],
+    );
+    let ex = extract("MODEPGM", &text);
+    assert_eq!(callers_of(&ex, "ANY-ERR"), ["CLOSE-PARA", "WRITE-PARA"]);
+    // WS-REC is no FD's record, so it may be any file's: INFILE's handler may run.
+    assert_eq!(callers_of(&ex, "IN-ERR"), ["WRITE-PARA"]);
+}
+
+#[test]
+fn sort_files_declaratives_io_and_global_handlers_run_handlers() {
+    let text = with_files(
+        "SORTPGM",
+        &[
+            "IN-ERR SECTION.",
+            "    USE GLOBAL AFTER STANDARD ERROR PROCEDURE ON INFILE.",
+            "IN-ERR-PARA.",
+            "    WRITE OUT-REC.",
+            "OUT-ERR SECTION.",
+            "    USE AFTER STANDARD ERROR PROCEDURE ON OUTFILE.",
+            "OUT-ERR-PARA.",
+            "    DISPLAY 'OUT'.",
+        ],
+        &[
+            "    PERFORM SORT-PARA",
+            "    GOBACK.",
+            "SORT-PARA.",
+            "    SORT WS-REC ON ASCENDING KEY WS-REC",
+            "        USING INFILE GIVING OUTFILE.",
+        ],
+    );
+    let ex = extract("SORTPGM", &text);
+    // SORT reads INFILE and writes OUTFILE.
+    assert_eq!(callers_of(&ex, "OUT-ERR"), ["IN-ERR-PARA", "SORT-PARA"]);
+    // GLOBAL: a contained program's I/O may run it, so the program calls it too.
+    assert_eq!(callers_of(&ex, "IN-ERR"), ["SORT-PARA", "SORTPGM"]);
+    assert_eq!(flow_tags(&ex, "SORTPGM", "IN-ERR"), (false, true));
+}
+
+#[test]
+fn a_use_for_debugging_handler_is_run_by_the_program_conditionally() {
+    let text = with_files(
+        "DBGPGM",
+        &[
+            "DBG SECTION.",
+            "    USE FOR DEBUGGING ON ALL PROCEDURES.",
+            "DBG-PARA.",
+            "    DISPLAY 'DBG'.",
+        ],
+        &["    GOBACK."],
+    );
+    let ex = extract("DBGPGM", &text);
+    assert_eq!(calls_from(&ex, "DBGPGM"), ["DBG", "MAIN-SECTION"]);
+    assert_eq!(flow_tags(&ex, "DBGPGM", "DBG"), (false, true));
 }
