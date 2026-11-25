@@ -1727,6 +1727,50 @@ fn assert_extracts_within(name: &str, text: &str, bound: std::time::Duration) {
 }
 
 #[test]
+fn a_file_that_ends_inside_the_sequence_area_extracts() {
+    // The scanner's sequence-area loop (columns 1-6) advanced until column 6 with no end-of-input
+    // check: at the end of the file the column stops moving, so the parse never returned
+    // (wicked-estate#634). The parse runs on its own thread, so a regression fails this test
+    // after the bound instead of hanging the run; the spinning thread ends with the test process.
+    let base = program("SEQEND", DATA, &["MAIN-PARA.", "    CALL 'SUB01'."]);
+    let shapes = [
+        (
+            "a last line shorter than the sequence area",
+            format!("{base}AB"),
+        ),
+        ("the same line ending in a newline", format!("{base}AB\n")),
+        (
+            "a DOS end-of-file byte after the last line",
+            format!("{base}\u{1a}"),
+        ),
+    ];
+    let pending: Vec<_> = shapes
+        .into_iter()
+        .map(|(shape, text)| {
+            let (done, result) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let ex = extract("SEQEND", &text);
+                let _ = done.send(function_names(&ex).contains(&"MAIN-PARA"));
+            });
+            (shape, result)
+        })
+        .collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    for (shape, result) in pending {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match result.recv_timeout(left) {
+            Ok(found) => assert!(found, "{shape}: MAIN-PARA has no node"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{shape}: the extraction did not return within 30 s")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("{shape}: the extraction panicked")
+            }
+        }
+    }
+}
+
+#[test]
 fn a_rust_source_saved_as_cbl_does_not_walk_error_children_quadratically() {
     // Error recovery gives one ERROR node a child per token in text the grammar rejects; walking a
     // node's children by index (`Node::child(i)` is O(i)) was quadratic: about a minute for these
