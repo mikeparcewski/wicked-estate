@@ -50,6 +50,151 @@ def provenance_problems(vendor, notice):
     return problems
 
 
+# The intake record (#322): what each tree's upstream declares, read at the upstream commit whose
+# files the vendored ones match by git blob. A copyright line is listed only when upstream states
+# one; we never supply a line upstream does not state. Add an entry when you vendor upstream code.
+UPSTREAM_DECLARATIONS = {
+    "tree-sitter-cfml": {
+        # LICENSE (blob-identical to ours); package.json, Cargo.toml, tree-sitter.json: MIT.
+        "repo": "https://github.com/cfmleditor/tree-sitter-cfml",
+        "commit": "6b4a43943c191950ee2c77f7b94cec5e903318a4",
+        "licenses": ("MIT",),
+        "spdx": "MIT",
+        "copyrights": ("Copyright (c) 2014 Gareth Edwards & Gavin Baumanis",),
+        "author": None,
+    },
+    "tree-sitter-vb6": {
+        # No LICENSE file. package.json, Cargo.toml, pyproject.toml, tree-sitter.json: MIT, author
+        # "joanne".
+        "repo": "https://github.com/joannefan/tree-sitter-vb6",
+        "commit": "1ee443353ce49f12e39a8e627b557c59e348b729",
+        "licenses": ("MIT",),
+        "spdx": "MIT",
+        "copyrights": (),
+        "author": "joanne",
+    },
+    "tree-sitter-vba": {
+        # No LICENSE file. package.json, Cargo.toml, tree-sitter.json: MIT; tree-sitter.json
+        # author "Todd Epple".
+        "repo": "https://github.com/tmepple/tree-sitter-vba",
+        "commit": "c691f237b2a703732d4b6a1f01d5b4f73f94d41e",
+        "licenses": ("MIT",),
+        "spdx": "MIT",
+        "copyrights": (),
+        "author": "Todd Epple",
+    },
+    "tree-sitter-vbscript": {
+        # No LICENSE file. package.json: ISC, author "Jan-Jaap Korpershoek"; Cargo.toml and
+        # pyproject.toml: MIT. The declarations conflict, so the tree ships under both.
+        "repo": "https://github.com/JJK96/tree-sitter-vbscript",
+        "commit": "6d9548eab0514e0572a616fd58d5997a93b37415",
+        "licenses": ("MIT", "ISC"),
+        "spdx": "MIT AND ISC",
+        "copyrights": (),
+        "author": "Jan-Jaap Korpershoek",
+    },
+    "tree-sitter-cobol-scanner": {
+        # LICENSE at that commit (the vendored scanner comes through the arborium-cobol crate).
+        "repo": "https://github.com/zharinov/tree-sitter-cobol",
+        "commit": "befb226951b65585617f42ecbe526d00c124100c",
+        "licenses": ("MIT",),
+        "spdx": None,
+        "copyrights": ("Copyright (c) 2016 Max Brunsfeld",),
+        "author": None,
+    },
+    "tree-sitter-apexlang": {
+        # LICENSE.txt at that commit; the grammar is authored here from its EBNF.
+        "repo": "https://github.com/oracle/skills",
+        "commit": "014cdb29f12dfa6a689bbe8a80ee1c5f0bf15be1",
+        "licenses": ("Universal Permissive License (UPL), Version 1.0",),
+        "spdx": None,
+        "copyrights": ("Copyright (c) 2025 Oracle and/or its affiliates.",),
+        "author": None,
+    },
+}
+
+NO_COPYRIGHT = "states no copyright notice"
+
+
+def notice_block(notice, tree):
+    """The NOTICE entry (between separator lines) that names `tree`'s path."""
+    path = f"crates/wicked-estate-extract/vendor/{tree}/"
+    for block in re.split(r"\n-{20,}\n", notice):
+        if path in block:
+            return block
+    return ""
+
+
+def declaration_problems(vendor, notice, declarations=UPSTREAM_DECLARATIONS):
+    """Every way a tree's PROVENANCE row, LICENSE, NOTICE entry or crate license differs from what
+    its upstream declares; empty when they match."""
+    problems = []
+    rows = {sub: line for line in (vendor / "PROVENANCE.md").read_text().splitlines()
+            for sub in [m.group(1) for m in [re.search(r"\| `(tree-sitter-[\w-]+)/` \|", line)] if m]}
+    for tree, d in sorted(declarations.items()):
+        row = rows.get(tree, "")
+        if d["repo"] not in row or d["commit"] not in row:
+            problems.append(f"{tree}: PROVENANCE row does not name {d['repo']} at {d['commit']}")
+        license_file = vendor / tree / "LICENSE"
+        text = license_file.read_text() if license_file.exists() else ""
+        copyrights = tuple(line.strip() for line in text.splitlines() if line.strip().startswith("Copyright"))
+        if copyrights != d["copyrights"]:
+            problems.append(f"{tree}: LICENSE copyright lines {copyrights} != upstream's {d['copyrights']}")
+        block = notice_block(notice, tree)
+        for name in d["licenses"] + d["copyrights"]:
+            if name not in block:
+                problems.append(f"{tree}: NOTICE entry lacks {name!r}")
+        if not d["copyrights"]:
+            for where, body in (("LICENSE", text), ("NOTICE entry", block)):
+                if NO_COPYRIGHT not in body or d["author"] not in body:
+                    problems.append(f"{tree}: {where} does not say upstream {NO_COPYRIGHT} and name {d['author']!r}")
+        cargo = vendor / tree / "Cargo.toml"
+        if d["spdx"] is not None:
+            m = re.search(r'^license = "([^"]*)"', cargo.read_text(), re.M) if cargo.exists() else None
+            if not m or m.group(1) != d["spdx"]:
+                problems.append(f"{tree}: Cargo.toml license {m and m.group(1)!r} != {d['spdx']!r}")
+            # The published crate carries upstream's terms: its `include` lists the LICENSE.
+            inc = re.search(r"^include = \[([^\]]*)\]", cargo.read_text(), re.M) if cargo.exists() else None
+            if inc and '"LICENSE"' not in inc.group(1):
+                problems.append(f"{tree}: Cargo.toml include leaves out LICENSE")
+    return problems
+
+
+class UpstreamDeclarationTests(unittest.TestCase):
+    """#322 (operator ruling): each vendored tree states exactly what its upstream declares."""
+
+    def test_every_upstream_derived_tree_matches_its_declaration(self):
+        self.assertEqual(declaration_problems(VENDOR, (ROOT / "NOTICE").read_text()), [])
+
+    def test_every_third_party_tree_has_a_declaration(self):
+        third_party = {sub for sub, source, lic in provenance_rows(VENDOR)
+                       if not source.startswith("In-house") or f"`{sub}/LICENSE`" in lic}
+        self.assertEqual(sorted(third_party), sorted(UPSTREAM_DECLARATIONS))
+
+    def test_an_invented_copyright_line_is_caught(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vendor = Path(tmp) / "vendor"
+            shutil.copytree(VENDOR, vendor, ignore=shutil.ignore_patterns("*.c", "*.h", "*.json", "corpus"))
+            lic = vendor / "tree-sitter-vba" / "LICENSE"
+            lic.write_text("Copyright (c) 2023 tmepple\n" + lic.read_text())
+            problems = declaration_problems(vendor, (ROOT / "NOTICE").read_text())
+            self.assertIn("tree-sitter-vba: LICENSE copyright lines ('Copyright (c) 2023 tmepple',) != upstream's ()",
+                          problems)
+
+    def test_a_dropped_declaration_or_commit_is_caught(self):
+        notice = (ROOT / "NOTICE").read_text().replace("ISC", "")
+        problems = declaration_problems(VENDOR, notice)
+        self.assertIn("tree-sitter-vbscript: NOTICE entry lacks 'ISC'", problems)
+        with tempfile.TemporaryDirectory() as tmp:
+            vendor = Path(tmp) / "vendor"
+            shutil.copytree(VENDOR, vendor, ignore=shutil.ignore_patterns("*.c", "*.h", "*.json", "corpus"))
+            prov = vendor / "PROVENANCE.md"
+            prov.write_text(prov.read_text().replace("1ee443353ce49f12e39a8e627b557c59e348b729", "unknown"))
+            self.assertEqual(declaration_problems(vendor, (ROOT / "NOTICE").read_text()),
+                             ["tree-sitter-vb6: PROVENANCE row does not name "
+                              "https://github.com/joannefan/tree-sitter-vb6 at 1ee443353ce49f12e39a8e627b557c59e348b729"])
+
+
 class VendoredGrammarProvenanceTests(unittest.TestCase):
     def test_trees_are_found(self):
         self.assertGreaterEqual(len(vendored_trees(VENDOR)), 12)
