@@ -767,6 +767,9 @@ pub struct Prepared {
     consumed: Mutex<HashSet<usize>>,
     /// Per-file facts the merge step dropped, reported once per run.
     pub dropped_edges: Mutex<usize>,
+    /// Facts not imported for refs that went on to the fall-through, by site, until it settles
+    /// them ([`Prepared::settle_dropped`]).
+    pending_dropped: Mutex<HashMap<DroppedKey, usize>>,
 }
 
 /// Inputs from the caller for [`prepare`].
@@ -910,6 +913,7 @@ impl Prepared {
                 fingerprints,
                 consumed: Mutex::new(HashSet::new()),
                 dropped_edges: Mutex::new(0),
+                pending_dropped: Mutex::new(HashMap::new()),
             },
             forced,
         )
@@ -1407,6 +1411,10 @@ impl Prepared {
         let mut unresolved = Vec::new();
         let mut covered: HashSet<(String, u32, String)> = HashSet::new();
         let mut dropped = 0usize;
+        let mut pending = self
+            .pending_dropped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let key_of = |r: &UnresolvedRef| {
             (
                 r.location.file.clone(),
@@ -1444,10 +1452,11 @@ impl Prepared {
                 hits = exact;
             }
             let mut bound = false;
+            let mut site_dropped = 0usize;
             for i in hits {
                 let e = &self.snap.edges[i];
                 let Some(target) = ids.ids.get(&e.target) else {
-                    dropped += 1;
+                    site_dropped += 1;
                     continue;
                 };
                 if *target == r.from {
@@ -1463,7 +1472,13 @@ impl Prepared {
                 ));
                 bound = true;
             }
-            if !bound {
+            if bound {
+                dropped += site_dropped;
+            } else {
+                // Counted once the fall-through settles the ref ([`Self::settle_dropped`]).
+                if site_dropped > 0 {
+                    *pending.entry(dropped_key(r)).or_default() += site_dropped;
+                }
                 unbound.push(r.clone());
             }
         }
@@ -1545,6 +1560,41 @@ impl Prepared {
         *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) += dropped;
         (edges, unbound, unresolved)
     }
+
+    /// Count the facts [`Self::resolve`] could not import for refs the fall-through left
+    /// unbound (`still`), and forget the rest: a ref estate's resolvers bound lost nothing.
+    pub(crate) fn settle_dropped(&self, still: &[UnresolvedRef]) {
+        let mut pending = self
+            .pending_dropped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let counted = settle(&mut pending, still);
+        *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) += counted;
+    }
+}
+
+/// The site a ref was written at, as [`Prepared::settle_dropped`] matches it.
+type DroppedKey = (String, String, String, u32, u32, u32);
+
+fn dropped_key(r: &UnresolvedRef) -> DroppedKey {
+    (
+        r.from.0.clone(),
+        r.raw_name.clone(),
+        r.location.file.clone(),
+        r.location.span.start_line,
+        r.location.span.start_byte,
+        r.location.span.end_byte,
+    )
+}
+
+/// The pending drop counts of the refs in `still`, summed; `pending` is emptied.
+fn settle(pending: &mut HashMap<DroppedKey, usize>, still: &[UnresolvedRef]) -> usize {
+    let still: HashSet<DroppedKey> = still.iter().map(dropped_key).collect();
+    pending
+        .drain()
+        .filter(|(k, _)| still.contains(k))
+        .map(|(_, n)| n)
+        .sum()
 }
 
 /// Park a ref no resolver bound: the `codegraph:` prefix keeps every estate resolver, back-fill
@@ -2068,6 +2118,36 @@ mod tests {
             parked.iter().any(|r| r.from.0 == GET),
             "the call parks: {parked:?}"
         );
+    }
+
+    #[test]
+    fn a_fact_not_imported_counts_only_when_the_fall_through_left_its_ref_unbound() {
+        // #584 fold: the `not imported` count no longer counts a site the fall-through binds.
+        let at = |line: u32| {
+            UnresolvedRef::new(
+                SymbolId("ts . src/a/f().".into()),
+                "helper",
+                EdgeKind::Calls,
+                Location::new(
+                    "src/a.ts",
+                    Span {
+                        start_byte: line * 10,
+                        end_byte: line * 10 + 6,
+                        start_line: line,
+                        start_col: 0,
+                        end_line: line,
+                        end_col: 6,
+                    },
+                ),
+            )
+        };
+        let mut pending: HashMap<DroppedKey, usize> = HashMap::new();
+        pending.insert(dropped_key(&at(1)), 2);
+        pending.insert(dropped_key(&at(2)), 1);
+        // The fall-through bound line 1's ref; line 2's stays unbound.
+        assert_eq!(settle(&mut pending, &[at(2)]), 1);
+        assert!(pending.is_empty(), "settled once");
+        assert_eq!(settle(&mut pending, &[at(2)]), 0);
     }
 
     #[test]
