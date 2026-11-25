@@ -7,7 +7,7 @@ repository = "https://github.com/mikeparcewski/wicked-estate"
 description = "CFML (ColdFusion) grammar for tree-sitter — vendored from cfmleditor/tree-sitter-cfml (cfml tag + cfscript; cfquery SQL dialect omitted)"
 readme = "README.md"
 build = "bindings/rust/build.rs"
-include = ["LICENSE", "README.md", "bindings/rust/*.rs", "common/**/*", "cfml/grammar.js", "cfml/src/**/*", "cfscript/grammar.js", "cfscript/src/**/*"]
+include = ["LICENSE", "README.md", "bindings/rust/*.rs", "common/**/*", "cfml/grammar.js", "cfml/src/**/*", "cfscript/grammar.js", "cfscript/src/**/*", "tree-sitter.json"]
 
 [lib]
 path = "bindings/rust/lib.rs"
