@@ -760,6 +760,9 @@ thread_local! {
     /// `"FAIL"` makes the run fail.
     pub(crate) static TEST_DATABASE_SQL: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+    /// The last run's `not imported` count on this thread, for tests.
+    pub(crate) static LAST_DROPPED: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// A test build (`--features codegraph-fixture`, never a release) reads the codegraph database
