@@ -453,6 +453,56 @@ class UpstreamDeclarationTests(unittest.TestCase):
                               "tree-sitter-vb6: src/parser.c is not upstream's blob "
                               + UPSTREAM_DECLARATIONS["tree-sitter-vb6"]["files"]["src/parser.c"]])
 
+    def test_a_marked_local_patch_is_upstream_plus_that_patch_only(self):
+        # #636: two fixes in cfml's shared scanner. The file stays pinned to upstream's blob; the
+        # record holds each marked edit, and undoing them must give upstream's bytes back exactly.
+        d = UPSTREAM_DECLARATIONS["tree-sitter-cfml"]
+        rel = "common/scanner.h"
+        patches = d.get("patches", {})
+        self.assertIn(rel, patches)
+        for patched, upstream in patches[rel]:
+            self.assertIn(b"WICKED PATCH", patched)
+            self.assertNotIn(b"WICKED PATCH", upstream)
+        sha = d["files"][rel]
+        with tempfile.TemporaryDirectory() as tmp:
+            vendor = self.copy(tmp)
+            scanner = vendor / "tree-sitter-cfml" / rel
+            text = scanner.read_bytes()
+            # An edit the record does not hold.
+            scanner.write_bytes(text.replace(b"static inline void advance(", b"static inline void  advance(", 1))
+            self.assertEqual(declaration_problems(vendor, self.notice),
+                             [f"tree-sitter-cfml: {rel} is not upstream's blob {sha} plus its recorded patches"])
+            # The recorded patch dropped: upstream's bytes are back, but the record says it ships.
+            undone = text
+            for patched, upstream in patches[rel]:
+                undone = undone.replace(patched, upstream)
+            scanner.write_bytes(undone)
+            self.assertEqual(declaration_problems(vendor, self.notice),
+                             [f"tree-sitter-cfml: {rel} does not carry its recorded patch 1",
+                              f"tree-sitter-cfml: {rel} does not carry its recorded patch 2"])
+            # NOTICE and the PROVENANCE row say the tree is patched.
+            scanner.write_bytes(text)
+            block = notice_block(self.notice, "tree-sitter-cfml")
+            notice = self.notice.replace(block, block.replace("WICKED PATCH", "local patch"))
+            rows = vendor / "PROVENANCE.md"
+            rows.write_text("\n".join(line.replace("WICKED PATCH", "local patch") if "`tree-sitter-cfml/`" in line
+                                       else line for line in rows.read_text().split("\n")))
+            self.assertEqual(declaration_problems(vendor, notice),
+                             ["tree-sitter-cfml: PROVENANCE row does not name its WICKED PATCHes",
+                              "tree-sitter-cfml: NOTICE entry does not name its WICKED PATCHes"])
+
+    def test_the_extract_crate_states_the_terms_of_the_trees_it_ships(self):
+        # A tree with no crate of its own is packaged in wicked-estate-extract (it has no include
+        # or exclude list), so that crate's SPDX expression names its license (#629 R2 N1).
+        manifest = tomllib.loads((VENDOR.parent / "Cargo.toml").read_text())["package"]["license"]
+        if isinstance(manifest, dict):
+            manifest = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["license"]
+        terms = set(re.split(r"\s+AND\s+", manifest))
+        shipped = {tree: d["shipped_in_extract"] for tree, d in UPSTREAM_DECLARATIONS.items() if d["spdx"] is None}
+        self.assertEqual(sorted(shipped), ["tree-sitter-apexlang", "tree-sitter-cobol-scanner"])
+        for tree, spdx in shipped.items():
+            self.assertIn(spdx, terms, f"{tree} ships inside wicked-estate-extract under {spdx}")
+
     def test_a_crate_that_drops_its_license_is_caught(self):
         with tempfile.TemporaryDirectory() as tmp:
             vendor = self.copy(tmp)
