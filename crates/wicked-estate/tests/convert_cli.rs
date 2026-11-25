@@ -445,3 +445,95 @@ fn limits_are_checked_before_any_work() {
 fn a_password_protected_pdf_is_encrypted() {
     assert_refused(&convert(&fixture("locked.pdf"), &[]), "encrypted", 5);
 }
+
+/// R2 F1: the conversion child bounds itself. A caller that kills `convert` on its own timeout
+/// leaves the child with no parent to kill it; the child still ends at the deadline it was given,
+/// here with its input never even finished.
+#[test]
+fn an_orphaned_conversion_child_ends_at_its_own_deadline() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wicked-estate"))
+        .args(["__doc-convert", "docx", "deadline=300"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the conversion child");
+    // Held open and never written: the child stalls on its input.
+    let stdin = child.stdin.take();
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    drop(stdin);
+    assert!(
+        status.is_some(),
+        "the child outlived its 300 ms deadline by 30 s"
+    );
+    let mut reply = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut reply).unwrap();
+    assert!(
+        reply.starts_with("SKIP\nunreadable\t") && reply.contains("took longer"),
+        "{reply:?}"
+    );
+}
+
+/// R2 F2: a stdout that cannot take the Markdown is its own exit code, never 1 (usage).
+#[cfg(unix)]
+#[test]
+fn a_stdout_write_failure_has_its_own_code() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wicked-estate"))
+        .arg("convert")
+        .arg(fixture("spec.docx"))
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env("WICKED_HOME", home.path())
+        .env_remove("WICKED_ESTATE_DB")
+        .env_remove("WICKED_STORE_URL")
+        .env_remove("WICKED_RUNTIME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn wicked-estate");
+    // The reader goes away before the Markdown is written: the write fails (EPIPE).
+    drop(child.stdout.take());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let out = rx
+        .recv_timeout(Duration::from_secs(120))
+        .expect("wicked-estate did not return within the limit")
+        .expect("wait for wicked-estate");
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(13), "stderr={err}");
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 1, "{err}");
+    assert!(lines[0].starts_with("refused output: "), "{err}");
+}
+
+/// R2 F3: `knowledge.ingest`'s secret-file rule applies: a file it would not read is refused,
+/// unread, with its own code. Through a link with an innocent name too.
+#[test]
+fn a_secret_named_file_is_refused_unread() {
+    let tmp = tempfile::tempdir().unwrap();
+    let secret = tmp.path().join("credentials.docx");
+    std::fs::copy(fixture("spec.docx"), &secret).unwrap();
+    let why = assert_refused(&convert(&secret, &[]), "secret_file", 14);
+    assert!(why.contains("secret-file rule"), "{why}");
+    #[cfg(unix)]
+    {
+        let link = tmp.path().join("notes.docx");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        assert_refused(&convert(&link, &[]), "secret_file", 14);
+    }
+}
