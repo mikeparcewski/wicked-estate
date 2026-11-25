@@ -490,7 +490,11 @@ fn an_orphaned_conversion_child_ends_at_its_own_deadline() {
 #[test]
 fn a_stdout_write_failure_has_its_own_code() {
     let home = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wicked-estate"))
+    // A pipe with no reader before the process starts: its write fails (EPIPE) whatever the
+    // scheduling.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let child = Command::new(env!("CARGO_BIN_EXE_wicked-estate"))
         .arg("convert")
         .arg(fixture("spec.docx"))
         .current_dir(home.path())
@@ -500,12 +504,10 @@ fn a_stdout_write_failure_has_its_own_code() {
         .env_remove("WICKED_STORE_URL")
         .env_remove("WICKED_RUNTIME")
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(writer)
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn wicked-estate");
-    // The reader goes away before the Markdown is written: the write fails (EPIPE).
-    drop(child.stdout.take());
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(child.wait_with_output());

@@ -3247,11 +3247,11 @@ enum JsScopeRead {
     Hoisted,
 }
 
-/// Declarations the local-binding path reads (a scope's declarations, then each declaration list
-/// a join scans), counted in tests so a test bounds this work, not the wall-clock time
-/// (wicked-estate#501: each is read once per file, not once per call).
 #[cfg(test)]
 thread_local! {
+    /// Declarations the local-binding path reads (a scope's declarations, then each declaration
+    /// list a join scans), counted in tests so a test bounds this work, not the wall-clock time
+    /// (wicked-estate#501: each is read once per file, not once per call).
     static JS_DECLS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 

@@ -52,7 +52,7 @@ pub fn print_usage() {
         "  wicked-estate convert <file> [--max-bytes N] [--deadline-ms N]  # one document (pdf, docx, pptx, xlsx, odt, rtf, epub, ...) to Markdown on stdout, secrets masked; stores nothing"
     );
     println!(
-        "    Refusal: empty stdout, one stderr line 'refused <kind>: <reason>', exit {}",
+        "    Refusal: empty stdout (13 output may have written part), one stderr line 'refused <kind>: <reason>', exit {}",
         EXIT_CODES
             .iter()
             .map(|(kind, code)| format!("{code} {kind}"))
@@ -84,13 +84,17 @@ pub fn run(args: &cli_flags::Args) -> std::io::Result<i32> {
         .map(Duration::from_millis)
         .unwrap_or(doc_convert::CONVERT_DEADLINE);
     let path = Path::new(file);
-    if is_secret_file(path) {
+    // The file read is the one checked: the resolved path, so a link swapped after the check
+    // cannot point the read at a secret file.
+    let resolved = std::fs::canonicalize(path).ok();
+    let read_from = resolved.as_deref().unwrap_or(path);
+    if is_secret_file(path) || is_secret_file(read_from) {
         eprintln!(
             "refused secret_file: the file matches the secret-file rule (as knowledge.ingest); not read"
         );
         return Ok(exit_code("secret_file"));
     }
-    match convert(path, max_bytes, deadline) {
+    match convert(path, read_from, max_bytes, deadline) {
         Ok(md) => {
             let mut out = std::io::stdout().lock();
             let written = out
@@ -124,16 +128,21 @@ pub fn run(args: &cli_flags::Args) -> std::io::Result<i32> {
     }
 }
 
-/// `knowledge.ingest`'s secret-file rule (#556 R2): the name as given, and the name it resolves
-/// to, so a link with an innocent name to `credentials.docx` is refused too.
+/// `knowledge.ingest`'s secret-file rule (#556 R2), checked on the name as given and on the name
+/// it resolves to, so a link with an innocent name to `credentials.docx` is refused too.
 fn is_secret_file(path: &Path) -> bool {
-    use wicked_estate_extract::redact::is_excluded;
-    is_excluded(&path.to_string_lossy())
-        || std::fs::canonicalize(path).is_ok_and(|real| is_excluded(&real.to_string_lossy()))
+    wicked_estate_extract::redact::is_excluded(&path.to_string_lossy())
 }
 
-fn convert(path: &Path, max_bytes: usize, deadline: Duration) -> Result<String, Skipped> {
-    let bytes = doc_convert::read_capped_at(path, max_bytes)?;
+/// Convert the file at `read_from` (the resolved operand), naming its format by `path`, the name
+/// the caller gave.
+fn convert(
+    path: &Path,
+    read_from: &Path,
+    max_bytes: usize,
+    deadline: Duration,
+) -> Result<String, Skipped> {
+    let bytes = doc_convert::read_capped_at(read_from, max_bytes)?;
     // The file name names the format only when the bytes carry no signature, and only for a
     // document extension: a signatureless `.csv` (text, not a document) is unsupported.
     let name = path

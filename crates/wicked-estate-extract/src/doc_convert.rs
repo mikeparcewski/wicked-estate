@@ -54,6 +54,8 @@ const DEADLINE_ARG: &str = "deadline=";
 /// Set by whichever of the child's main thread and its watchdog replies first; the other never
 /// writes, so the parent reads exactly one reply.
 static CHILD_REPLIED: AtomicBool = AtomicBool::new(false);
+/// How long past its deadline the child waits for a reply already being written to finish.
+const REPLY_GRACE: Duration = Duration::from_secs(5);
 /// Written once to the child's stderr when the budget first refuses an allocation. An infallible
 /// allocation the budget refuses aborts the child before it can reply; this line is how the parent
 /// still reports the budget, not a crash.
@@ -249,6 +251,11 @@ pub fn run_child_if_requested(alloc: &'static BudgetAlloc) -> Option<i32> {
         if reply_once(&Err(Skipped::Unreadable(DEADLINE_REASON))) {
             std::process::exit(0);
         }
+        // The main thread's reply began first. A reader that drains it lets the process end at
+        // once; one that holds the pipe open without reading must not keep the child alive. A
+        // nonzero exit, so a reader that then sees a cut reply treats it as a failure.
+        std::thread::sleep(REPLY_GRACE);
+        std::process::exit(1);
     });
     if watchdog.is_err() {
         // Without its watchdog the child would be bounded only by a parent that may be gone.
