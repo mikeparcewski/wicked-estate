@@ -210,15 +210,20 @@ pub fn classify(
 /// What the classifier learns about one parsed file, computed on first use and shared by every
 /// definition of that file (#582: per-definition walks of a COBOL program's flat procedure
 /// division made indexing quadratic in its size). Make one per file with `default()` and pass it
-/// to [`classify_in`] with that file's tree and source; given another tree or source, it starts
-/// over rather than answer from the wrong file.
+/// to [`classify_in`] with that file's tree and source. It borrows both for its lifetime, so
+/// neither can change under it; given another tree or source, it starts over rather than answer
+/// from the wrong file.
 #[derive(Default)]
 pub struct FileFacts<'t> {
     cobol: Option<CobolTree<'t>>,
-    /// `(source pointer, length)` -> whether the source is not UTF-8 or carries a free-format
-    /// directive: either way every exit-only candidate stays real.
-    cobol_free_format: Option<((usize, usize), bool)>,
+    /// The source and whether it is not UTF-8 or carries a free-format directive: either way
+    /// every exit-only candidate stays real.
+    cobol_free_format: Option<(&'t [u8], bool)>,
 }
+
+#[cfg(test)]
+#[path = "behaviour_reference.rs"]
+mod reference;
 
 /// [`classify`] with per-file facts shared across a file's definitions.
 #[must_use]
@@ -231,7 +236,7 @@ pub fn classify_in<'t>(
     tree: &'t tree_sitter::Tree,
     start: usize,
     end: usize,
-    src: &[u8],
+    src: &'t [u8],
 ) -> Option<Behaviour> {
     let family = match lang {
         "python" => Family::Python,
@@ -268,20 +273,27 @@ pub fn classify_in<'t>(
             Some(t) if t.root_id == root => t,
             slot => slot.insert(CobolTree::new(tree)),
         };
-        let key = (src.as_ptr() as usize, src.len());
         let free_format = match facts.cobol_free_format {
-            Some((k, free)) if k == key => free,
+            Some((seen, free)) if std::ptr::eq(seen, src) => free,
             _ => {
                 let free = std::str::from_utf8(src)
                     .map_or(true, crate::cobol_links::source_is_free_format);
-                facts.cobol_free_format = Some((key, free));
+                facts.cobol_free_format = Some((src, free));
                 free
             }
         };
-        let Some(header) = cobol_tree.header_at(start, end) else {
-            return Some(Behaviour::Real);
+        let got = match cobol_tree.header_at(start, end) {
+            Some(header) => cobol(cobol_tree, header, src, free_format),
+            None => Behaviour::Real,
         };
-        return Some(cobol(cobol_tree, header, src, free_format));
+        // The pre-#582 classifier is the oracle: every unit test that extracts COBOL checks it.
+        #[cfg(test)]
+        {
+            let old = anchor(tree, start, end, def_kinds)
+                .map_or(Behaviour::Real, |n| reference::cobol(n, src));
+            assert_eq!(got, old, "#582 oracle at bytes {start}..{end}");
+        }
+        return Some(got);
     }
     let Some(node) = anchor(tree, start, end, def_kinds) else {
         return Some(Behaviour::Real);
@@ -611,16 +623,29 @@ fn cobol_area_exit_only(area: &str) -> bool {
 const NO_NODE: u32 = u32::MAX;
 
 /// A COBOL file's syntax tree with O(1) navigation (#582), built by one cursor walk: each node's
-/// parent and next sibling, and the headers by byte range. Node `0` is the root.
+/// parent, next sibling and subtree, and the headers by byte range. Nodes are in preorder; node
+/// `0` is the root.
 struct CobolTree<'t> {
     root_id: usize,
     nodes: Vec<TsNode<'t>>,
     parent: Vec<u32>,
+    /// `TsNode::next_sibling`'s answer: the first later sibling that ENDS after this node ends
+    /// (tree-sitter skips a zero-width sibling at the node's end, a MISSING period say).
     next: Vec<u32>,
+    /// One past the last node of each node's subtree.
+    subtree_end: Vec<u32>,
     /// `(start, end)` -> the innermost paragraph or section header with exactly that range.
     headers: std::collections::HashMap<(usize, usize), u32>,
-    /// Per scan root: its ERROR/MISSING start bytes and `program_definition` start bytes, sorted.
-    scans: std::collections::HashMap<u32, (Vec<usize>, Vec<usize>)>,
+    /// Per scan root, sorted: ERROR/MISSING starts, `program_definition` starts, and the end of
+    /// every non-root node's parent (the old walk's visit count, see `error_after_division`).
+    scans: std::collections::HashMap<u32, ScanFacts>,
+}
+
+#[derive(Default)]
+struct ScanFacts {
+    errors: Vec<usize>,
+    programs: Vec<usize>,
+    parent_ends: Vec<usize>,
 }
 
 impl<'t> CobolTree<'t> {
@@ -630,42 +655,53 @@ impl<'t> CobolTree<'t> {
             nodes: Vec::new(),
             parent: Vec::new(),
             next: Vec::new(),
+            subtree_end: Vec::new(),
             headers: std::collections::HashMap::new(),
             scans: std::collections::HashMap::new(),
         };
         let mut cursor = tree.walk();
-        // (node, its last child seen so far) for each open ancestor.
-        let mut open: Vec<(u32, u32)> = Vec::new();
+        // Each open ancestor: (node, where its children still waiting for a next sibling start
+        // in `waiting`). Siblings end in order, so the ones a new child ends after are a prefix.
+        let mut open: Vec<(u32, usize)> = Vec::new();
+        let mut waiting: Vec<u32> = Vec::new();
         loop {
             let n = cursor.node();
             let i = out.nodes.len() as u32;
-            let parent = match open.last_mut() {
-                Some((p, last)) => {
-                    if *last != NO_NODE {
-                        out.next[*last as usize] = i;
+            let parent = match open.last() {
+                Some(&(p, from)) => {
+                    let done = waiting[from..]
+                        .iter()
+                        .take_while(|&&w| out.nodes[w as usize].end_byte() < n.end_byte())
+                        .count();
+                    for w in waiting.drain(from..from + done) {
+                        out.next[w as usize] = i;
                     }
-                    *last = i;
-                    *p
+                    waiting.push(i);
+                    p
                 }
                 None => NO_NODE,
             };
             out.nodes.push(n);
             out.parent.push(parent);
             out.next.push(NO_NODE);
+            out.subtree_end.push(i + 1);
             if crate::treesitter::COBOL_HEADERS.contains(&n.kind()) {
                 // Preorder: a deeper node with the same range comes later and wins, as `anchor`'s
                 // innermost-first walk would pick it.
                 out.headers.insert((n.start_byte(), n.end_byte()), i);
             }
             if cursor.goto_first_child() {
-                open.push((i, NO_NODE));
+                open.push((i, waiting.len()));
                 continue;
             }
             while !cursor.goto_next_sibling() {
                 if !cursor.goto_parent() {
                     return out;
                 }
-                open.pop();
+                if let Some((p, from)) = open.pop() {
+                    out.subtree_end[p as usize] = out.nodes.len() as u32;
+                    waiting.truncate(from);
+                }
             }
         }
     }
@@ -709,36 +745,54 @@ impl<'t> CobolTree<'t> {
         Some(self.node(parent).end_byte())
     }
 
+    /// How many nodes the old error walk from `scan_root` visited for `division_end` (tests).
+    #[cfg(test)]
+    fn visited_from(&mut self, scan_root: u32, division_end: usize) -> usize {
+        self.error_after_division(scan_root, division_end);
+        let ends = &self.scans[&scan_root].parent_ends;
+        1 + ends.len() - ends.partition_point(|&e| e < division_end)
+    }
+
     /// Whether an ERROR or MISSING node lies at or after `division_end` within `scan_root`,
     /// before the next `program_definition`: error recovery closes the division early and parks
     /// the rest of the paragraph's statements there. The root's nodes are collected once; each
-    /// question is then two binary searches.
+    /// question is then three binary searches.
+    ///
+    /// Same answer as the old walk, budget included: it descended only into nodes ending at or
+    /// after `division_end` and answered `true` (keep it real) past `WALK_BUDGET * 64` visits. A
+    /// node's ancestors end no earlier than its parent, so it visited the root and every node
+    /// whose parent ends at or after `division_end`.
     fn error_after_division(&mut self, scan_root: u32, division_end: usize) -> bool {
-        let root = self.node(scan_root);
-        let (errors, programs) = self.scans.entry(scan_root).or_insert_with(|| {
-            let (mut errors, mut programs) = (Vec::new(), Vec::new());
-            let mut cursor = root.walk();
-            'walk: loop {
-                let n = cursor.node();
+        let (nodes, parent, subtree_end) = (&self.nodes, &self.parent, &self.subtree_end);
+        let facts = self.scans.entry(scan_root).or_insert_with(|| {
+            let mut facts = ScanFacts::default();
+            for i in scan_root..subtree_end[scan_root as usize] {
+                let n = nodes[i as usize];
                 if n.kind() == "program_definition" {
-                    programs.push(n.start_byte());
+                    facts.programs.push(n.start_byte());
                 }
                 if n.is_error() || n.is_missing() {
-                    errors.push(n.start_byte());
+                    facts.errors.push(n.start_byte());
                 }
-                if cursor.goto_first_child() {
-                    continue;
-                }
-                while !cursor.goto_next_sibling() {
-                    if !cursor.goto_parent() {
-                        break 'walk;
-                    }
+                if i != scan_root {
+                    facts
+                        .parent_ends
+                        .push(nodes[parent[i as usize] as usize].end_byte());
                 }
             }
-            errors.sort_unstable();
-            programs.sort_unstable();
-            (errors, programs)
+            facts.errors.sort_unstable();
+            facts.programs.sort_unstable();
+            facts.parent_ends.sort_unstable();
+            facts
         });
+        if 1 + facts.parent_ends.len() - facts.parent_ends.partition_point(|&e| e < division_end)
+            > WALK_BUDGET * 64
+        {
+            return true;
+        }
+        let ScanFacts {
+            errors, programs, ..
+        } = facts;
         let stop = programs
             .get(programs.partition_point(|&p| p < division_end))
             .copied()
@@ -1995,6 +2049,274 @@ mod tests {
             .into_iter()
             .map(|(k, b, r)| (k.rsplit('#').next().unwrap_or(&k).to_string(), (b, r)))
             .collect()
+    }
+
+    // ── #582: the array-based COBOL classifier ─────────────────────────────────────────────
+    // `classify_in` checks every COBOL answer against the pre-#582 classifier under cfg(test)
+    // (behaviour_reference.rs), so every COBOL test here is also an equivalence test. These add the
+    // shapes where the two navigations could differ, and the per-file cache.
+
+    fn parse_cobol(src: &str) -> tree_sitter::Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::treesitter::lang_cobol())
+            .expect("cobol grammar");
+        parser.parse(src, None).expect("parses")
+    }
+
+    /// Shapes where tree-sitter's navigation is not plain adjacency: MISSING periods (zero-width
+    /// siblings), declaratives, two programs in one file.
+    fn cobol_edge_sources() -> Vec<String> {
+        let head = [
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+        ];
+        let with = |body: &[&str]| -> String {
+            let lines: Vec<&str> = head.iter().copied().chain(body.iter().copied()).collect();
+            fixed(&lines)
+        };
+        vec![
+            with(&["A-PARA.", "    EXIT", "B-PARA.", "    EXIT."]),
+            with(&["A-PARA.", "    CONTINUE", "B-PARA.", "    EXIT"]),
+            with(&["A-PARA", "    EXIT.", "B-PARA.", "    GOBACK"]),
+            with(&[
+                "A-SECT SECTION.",
+                "A-PARA.",
+                "    EXIT",
+                "B-SECT SECTION.",
+                "B-PARA.",
+                "    EXIT.",
+            ]),
+            with(&[
+                "DECLARATIVES.",
+                "ERR-SECT SECTION.",
+                "    USE AFTER ERROR PROCEDURE ON INFILE.",
+                "ERR-PARA.",
+                "    EXIT.",
+                "END DECLARATIVES.",
+                "MAIN-SECT SECTION.",
+                "MAIN-PARA.",
+                "    EXIT.",
+            ]),
+            fixed(&[
+                "IDENTIFICATION DIVISION.",
+                "PROGRAM-ID. ONE.",
+                "PROCEDURE DIVISION.",
+                "A-PARA.",
+                "    PERFORM B-PARA.",
+                "B-PARA.",
+                "    EXIT.",
+                "END PROGRAM ONE.",
+                "IDENTIFICATION DIVISION.",
+                "PROGRAM-ID. TWO.",
+                "PROCEDURE DIVISION.",
+                "C-PARA.",
+                "    EXIT",
+                "END PROGRAM TWO.",
+            ]),
+        ]
+    }
+
+    /// The repo's own COBOL fixtures (real programs the index already reads) plus the edge shapes.
+    fn cobol_corpus() -> Vec<String> {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let mut out = cobol_edge_sources();
+        for dir in [
+            "wicked-estate-resolve/tests/fixtures/cobol_roles/cbl",
+            "wicked-estate/tests/fixtures/mainframe/cbl",
+            "wicked-estate/tests/fixtures/mainframe-grammarless/cbl",
+        ] {
+            let mut files: Vec<_> = std::fs::read_dir(format!("{root}/{dir}"))
+                .expect("fixture dir")
+                .map(|e| e.unwrap().path())
+                .collect();
+            files.sort();
+            out.extend(
+                files
+                    .iter()
+                    .map(|f| std::fs::read_to_string(f).expect("fixture")),
+            );
+        }
+        out
+    }
+
+    #[test]
+    fn cobol_tree_navigation_matches_tree_sitter_582() {
+        let corpus = cobol_corpus();
+        assert!(corpus.len() >= 15 + 6, "{} sources", corpus.len());
+        let mut skipped_zero_width = 0usize;
+        for src in &corpus {
+            let tree = parse_cobol(src);
+            let ix = CobolTree::new(&tree);
+            for i in 0..ix.nodes.len() as u32 {
+                let n = ix.node(i);
+                let id = |o: Option<u32>| o.map(|j| ix.node(j).id());
+                assert_eq!(
+                    id(ix.parent(i)),
+                    n.parent().map(|p| p.id()),
+                    "parent of {n:?}"
+                );
+                assert_eq!(
+                    id(ix.next(i)),
+                    n.next_sibling().map(|s| s.id()),
+                    "next of {n:?}"
+                );
+                let adjacent = n.parent().and_then(|p| {
+                    let mut c = p.walk();
+                    let kids: Vec<_> = p.children(&mut c).collect();
+                    let at = kids.iter().position(|k| k.id() == n.id())?;
+                    kids.get(at + 1).copied()
+                });
+                if adjacent.is_some_and(|a| a.end_byte() <= n.end_byte()) {
+                    skipped_zero_width += 1;
+                }
+            }
+        }
+        // The case the adjacency arrays first got wrong is in the corpus.
+        assert!(
+            skipped_zero_width > 0,
+            "no zero-width sibling in the corpus"
+        );
+    }
+
+    #[test]
+    fn cobol_edge_shapes_classify_as_before_582() {
+        // The oracle in classify_in fails the test on any difference.
+        for src in cobol_edge_sources() {
+            tags("src/PROG.cbl", "cobol", &src);
+        }
+        for src in cobol_corpus() {
+            tags("src/PROG.cbl", "cobol", &src);
+        }
+    }
+
+    /// The old error check gave up after `WALK_BUDGET * 64` visits and kept the paragraph real.
+    /// The arrays keep that answer: program ONE's last paragraph is EXIT only, and a second program
+    /// big enough to pass the budget keeps it real, while a small one leaves it a stub.
+    #[test]
+    fn cobol_error_check_keeps_the_old_walk_budget_582() {
+        let program = |rows: usize| -> String {
+            let mut lines = vec![
+                "IDENTIFICATION DIVISION.".to_string(),
+                "PROGRAM-ID. ONE.".to_string(),
+                "PROCEDURE DIVISION.".to_string(),
+                "A-PARA.".to_string(),
+                "    PERFORM B-PARA.".to_string(),
+                "B-PARA.".to_string(),
+                "    EXIT.".to_string(),
+                "END PROGRAM ONE.".to_string(),
+                "IDENTIFICATION DIVISION.".to_string(),
+                "PROGRAM-ID. TWO.".to_string(),
+                "PROCEDURE DIVISION.".to_string(),
+                "BIG-PARA.".to_string(),
+            ];
+            lines.extend(
+                std::iter::repeat_n("    DISPLAY A B C D E F G H I J K L M N.", rows)
+                    .map(str::to_string),
+            );
+            lines.push("END PROGRAM TWO.".to_string());
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            fixed(&lines)
+        };
+        let budget = WALK_BUDGET * 64;
+        let big = program(budget / 16);
+        // Precondition: the old walk from B-PARA passes the budget on the big file.
+        let tree = parse_cobol(&big);
+        let mut ix = CobolTree::new(&tree);
+        let b = (0..ix.nodes.len() as u32)
+            .find(|&i| {
+                crate::treesitter::COBOL_HEADERS.contains(&ix.node(i).kind())
+                    && text(ix.node(i), big.as_bytes()).contains("B-PARA")
+            })
+            .expect("B-PARA header");
+        let end = ix.body_end(b).expect("B-PARA body end");
+        assert!(
+            ix.visited_from(0, end) > budget,
+            "{}",
+            ix.visited_from(0, end)
+        );
+        expect(&cobol_tags_raw(&big), "B-PARA", "real", None);
+        expect(
+            &cobol_tags_raw(&program(10)),
+            "B-PARA",
+            "stub",
+            Some("exit_only"),
+        );
+    }
+
+    fn cobol_tags_raw(code: &str) -> std::collections::BTreeMap<String, (String, Option<String>)> {
+        tags("src/PROG.cbl", "cobol", code)
+            .into_iter()
+            .map(|(k, b, r)| (k.rsplit('#').next().unwrap_or(&k).to_string(), (b, r)))
+            .collect()
+    }
+
+    /// One FileFacts across two files answers each as a fresh classification does: the
+    /// free-format answer and the tree index follow the source and tree they are given.
+    #[test]
+    fn file_facts_follow_the_file_they_are_given_582() {
+        let fixed_src = fixed(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "A-PARA.",
+            "    EXIT.",
+        ]);
+        let free_src = format!(">>SOURCE FORMAT FREE\n{fixed_src}");
+        let (fixed_tree, free_tree) = (parse_cobol(&fixed_src), parse_cobol(&free_src));
+        let header = |tree: &tree_sitter::Tree| {
+            let ix = CobolTree::new(tree);
+            let h = (0..ix.nodes.len() as u32)
+                .find(|&i| ix.node(i).kind() == "paragraph_header")
+                .expect("a paragraph header");
+            (ix.node(h).start_byte(), ix.node(h).end_byte())
+        };
+        let ((fs, fe), (rs, re)) = (header(&fixed_tree), header(&free_tree));
+        let fresh_fixed = classify(
+            "cobol",
+            "P.cbl",
+            "function",
+            &fixed_tree,
+            fs,
+            fe,
+            fixed_src.as_bytes(),
+        );
+        let fresh_free = classify(
+            "cobol",
+            "P.cbl",
+            "function",
+            &free_tree,
+            rs,
+            re,
+            free_src.as_bytes(),
+        );
+        assert_eq!(fresh_fixed, Some(Behaviour::Stub("exit_only")));
+        assert_eq!(fresh_free, Some(Behaviour::Real));
+        let mut facts = FileFacts::default();
+        for _ in 0..2 {
+            let a = classify_in(
+                &mut facts,
+                "cobol",
+                "P.cbl",
+                "function",
+                &fixed_tree,
+                fs,
+                fe,
+                fixed_src.as_bytes(),
+            );
+            let b = classify_in(
+                &mut facts,
+                "cobol",
+                "P.cbl",
+                "function",
+                &free_tree,
+                rs,
+                re,
+                free_src.as_bytes(),
+            );
+            assert_eq!((a, b), (fresh_fixed, fresh_free));
+        }
     }
 
     fn expect(

@@ -383,7 +383,7 @@ fn cobol_largest_error(tree: &tree_sitter::Tree) -> Option<Span> {
     }
 }
 
-fn lang_cobol() -> tree_sitter::Language {
+pub(crate) fn lang_cobol() -> tree_sitter::Language {
     static PATCHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let ptr = *PATCHED.get_or_init(|| {
         let base: tree_sitter::Language = arborium_cobol::language().into();
