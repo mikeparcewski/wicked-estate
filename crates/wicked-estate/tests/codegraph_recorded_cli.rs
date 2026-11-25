@@ -163,7 +163,7 @@ fn estate_readers_answer_on_the_recorded_codegraph_store() {
         bundle.contains(POINT),
         "ContextBundle seeds on Point: {bundle}"
     );
-    // The node, with no error. Its `source` is null: a minted node has no byte span (estate#625).
+    // The node, with no error. Its `source` is null: a minted node has no byte span (estate#590).
     let content: Value =
         serde_json::from_str(&tool(&store, "FetchContent", json!({ "symbol": POINT }))).unwrap();
     assert_eq!(content["found"], json!(true), "{content}");
