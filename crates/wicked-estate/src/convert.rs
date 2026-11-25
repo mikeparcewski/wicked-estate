@@ -8,7 +8,9 @@
 //! before the store resolves and opens no graph.
 //!
 //! A refusal leaves stdout empty, writes one `refused <kind>: <reason>` line on stderr and exits
-//! with that kind's code ([`exit_code`]), so a caller branches on the code, not on prose.
+//! with that kind's code ([`exit_code`]), so a caller branches on the code, not on prose. The one
+//! exception is `output` (13): converted Markdown that stdout would not take, of which part may
+//! already be written.
 
 use std::path::Path;
 use std::time::Duration;
@@ -17,8 +19,8 @@ use wicked_estate_extract::doc_convert::{self, Skipped};
 
 use crate::cli_flags;
 
-/// The exit code for each refusal kind ([`Skipped::kind`]). 0 is converted Markdown; 1 is a usage
-/// error (the shared parser's).
+/// The exit code for each refusal kind ([`Skipped::kind`], plus this command's own `output` and
+/// `secret_file`). 0 is converted Markdown; 1 is a usage error (the shared parser's).
 pub const EXIT_CODES: &[(&str, i32)] = &[
     ("too_large", 3),
     ("unsupported", 4),
@@ -30,6 +32,8 @@ pub const EXIT_CODES: &[(&str, i32)] = &[
     ("unreadable", 10),
     ("malformed", 11),
     ("failed", 12),
+    ("output", 13),
+    ("secret_file", 14),
 ];
 
 /// The exit code a refusal of `kind` returns; an unknown kind is a plain failure.
@@ -79,15 +83,38 @@ pub fn run(args: &cli_flags::Args) -> std::io::Result<i32> {
         .u64("deadline-ms")
         .map(Duration::from_millis)
         .unwrap_or(doc_convert::CONVERT_DEADLINE);
-    match convert(Path::new(file), max_bytes, deadline) {
+    let path = Path::new(file);
+    if is_secret_file(path) {
+        eprintln!(
+            "refused secret_file: the file matches the secret-file rule (as knowledge.ingest); not read"
+        );
+        return Ok(exit_code("secret_file"));
+    }
+    match convert(path, max_bytes, deadline) {
         Ok(md) => {
             let mut out = std::io::stdout().lock();
-            out.write_all(md.as_bytes())?;
-            if !md.ends_with('\n') {
-                out.write_all(b"\n")?;
+            let written = out
+                .write_all(md.as_bytes())
+                .and_then(|()| {
+                    if md.ends_with('\n') {
+                        Ok(())
+                    } else {
+                        out.write_all(b"\n")
+                    }
+                })
+                .and_then(|()| out.flush());
+            match written {
+                Ok(()) => Ok(0),
+                // The caller's pipe closed or its disk filled: not a usage error. Part of the
+                // Markdown may already be on stdout.
+                Err(e) => {
+                    eprintln!(
+                        "refused output: cannot write the Markdown to stdout ({}); stdout may hold part of it",
+                        e.kind()
+                    );
+                    Ok(exit_code("output"))
+                }
             }
-            out.flush()?;
-            Ok(0)
         }
         Err(skip) => {
             let kind = skip.kind();
@@ -95,6 +122,14 @@ pub fn run(args: &cli_flags::Args) -> std::io::Result<i32> {
             Ok(exit_code(kind))
         }
     }
+}
+
+/// `knowledge.ingest`'s secret-file rule (#556 R2): the name as given, and the name it resolves
+/// to, so a link with an innocent name to `credentials.docx` is refused too.
+fn is_secret_file(path: &Path) -> bool {
+    use wicked_estate_extract::redact::is_excluded;
+    is_excluded(&path.to_string_lossy())
+        || std::fs::canonicalize(path).is_ok_and(|real| is_excluded(&real.to_string_lossy()))
 }
 
 fn convert(path: &Path, max_bytes: usize, deadline: Duration) -> Result<String, Skipped> {

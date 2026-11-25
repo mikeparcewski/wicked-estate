@@ -46,6 +46,14 @@ const DEADLINE_REASON: &str = "took longer than the 120 s conversion limit";
 const UNAVAILABLE_REASON: &str = "isolated converter unavailable";
 /// Child-mode argument after the format hint: mask the Markdown before replying (#556).
 const MASK_ARG: &str = "mask";
+/// Child-mode argument prefix, `deadline=<ms>`: the child's own wall-clock limit (#556 R2). The
+/// parent enforces the same limit, but a caller that kills the parent leaves the child with no
+/// one to kill it; the child's watchdog ends it at this deadline anyway. Absent or unparsable
+/// means [`CONVERT_DEADLINE`], so a child is never unbounded.
+const DEADLINE_ARG: &str = "deadline=";
+/// Set by whichever of the child's main thread and its watchdog replies first; the other never
+/// writes, so the parent reads exactly one reply.
+static CHILD_REPLIED: AtomicBool = AtomicBool::new(false);
 /// Written once to the child's stderr when the budget first refuses an allocation. An infallible
 /// allocation the budget refuses aborts the child before it can reply; this line is how the parent
 /// still reports the budget, not a crash.
@@ -221,10 +229,33 @@ pub fn run_child_if_requested(alloc: &'static BudgetAlloc) -> Option<i32> {
     }
     // The parent reads stderr only for the budget mark; a caught panic's message is noise.
     std::panic::set_hook(Box::new(|_| {}));
-    alloc.arm(MAX_CONVERT_MEMORY_BYTES);
     let hint = args.next().unwrap_or_default();
     let ext = format_hint(hint.to_str().unwrap_or(""));
-    let mask = args.next().as_deref() == Some(std::ffi::OsStr::new(MASK_ARG));
+    let (mut mask, mut deadline) = (false, CONVERT_DEADLINE);
+    for arg in args {
+        match arg.to_str() {
+            Some(MASK_ARG) => mask = true,
+            Some(a) => {
+                if let Some(ms) = a.strip_prefix(DEADLINE_ARG).and_then(|v| v.parse().ok()) {
+                    deadline = Duration::from_millis(ms).min(CONVERT_DEADLINE);
+                }
+            }
+            None => {}
+        }
+    }
+    // Started before the budget is armed, so its own allocation is never refused.
+    let watchdog = std::thread::Builder::new().spawn(move || {
+        std::thread::sleep(deadline);
+        if reply_once(&Err(Skipped::Unreadable(DEADLINE_REASON))) {
+            std::process::exit(0);
+        }
+    });
+    if watchdog.is_err() {
+        // Without its watchdog the child would be bounded only by a parent that may be gone.
+        reply_once(&Err(Skipped::Panicked));
+        return Some(0);
+    }
+    alloc.arm(MAX_CONVERT_MEMORY_BYTES);
     let mut bytes = Vec::new();
     let mut reply = match std::io::stdin()
         .take(MAX_INPUT_BYTES as u64 + 1)
@@ -239,11 +270,25 @@ pub fn run_child_if_requested(alloc: &'static BudgetAlloc) -> Option<i32> {
     if alloc.refused() {
         reply = Err(Skipped::Unreadable(MEMORY_REASON));
     }
-    // The caller exits right after; flush explicitly so the reply is never left in a buffer.
-    let mut out = std::io::stdout().lock();
-    let _ = out.write_all(encode_reply(&reply).as_bytes());
-    let _ = out.flush();
+    if !reply_once(&reply) {
+        // The watchdog is replying and exits the process when it is done.
+        loop {
+            std::thread::park();
+        }
+    }
     Some(0)
+}
+
+/// Write the child's one reply, unless the other writer (main thread or watchdog) already has.
+/// The caller exits right after; flush explicitly so the reply is never left in a buffer.
+fn reply_once(reply: &Result<String, Skipped>) -> bool {
+    if CHILD_REPLIED.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(encode_reply(reply).as_bytes());
+    let _ = out.flush();
+    true
 }
 
 fn format_hint(ext: &str) -> &str {
@@ -543,15 +588,23 @@ fn convert_bounded(
         let exe = exe
             .as_ref()
             .map_err(|_| Skipped::Unreadable(UNAVAILABLE_REASON))?;
-        let mut cmd = Command::new(exe);
-        cmd.arg(CHILD_ARG).arg(format_hint(ext));
-        if mask {
-            cmd.arg(MASK_ARG);
-        }
-        return supervise(cmd, bytes, deadline.min(CONVERT_DEADLINE));
+        let deadline = deadline.min(CONVERT_DEADLINE);
+        return supervise(child_command(exe, ext, mask, deadline), bytes, deadline);
     }
     let md = convert_in_process(ext, bytes)?;
     Ok(if mask { mask_markdown(&md) } else { md })
+}
+
+/// The isolated child's command line: the format hint, its own deadline, and the mask flag.
+fn child_command(exe: &std::path::Path, ext: &str, mask: bool, deadline: Duration) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.arg(CHILD_ARG)
+        .arg(format_hint(ext))
+        .arg(format!("{DEADLINE_ARG}{}", deadline.as_millis()));
+    if mask {
+        cmd.arg(MASK_ARG);
+    }
+    cmd
 }
 
 fn convert_in_process(ext: &str, bytes: &[u8]) -> Result<String, Skipped> {
@@ -568,25 +621,7 @@ fn convert_in_process(ext: &str, bytes: &[u8]) -> Result<String, Skipped> {
     let Some(converted) = converted else {
         return Err(Skipped::Unreadable("unrecognized format"));
     };
-    let md = match converted {
-        Ok(md) => md,
-        Err(e) => {
-            return Err(match e {
-                anydoc::ConvertError::NeedsOcr { .. } => {
-                    // "page 2 of 5 needs OCR" / "all 3 pages need OCR": page numbers only.
-                    Skipped::NeedsOcr(e.to_string())
-                }
-                anydoc::ConvertError::Encrypted => Skipped::Encrypted,
-                anydoc::ConvertError::ResourceLimit { .. } => {
-                    Skipped::Unreadable("over a converter safety limit")
-                }
-                anydoc::ConvertError::Unsupported(_) => Skipped::Unreadable("unsupported content"),
-                anydoc::ConvertError::MissingPart { .. } => Skipped::Unreadable("missing part"),
-                anydoc::ConvertError::Io(_) => Skipped::Unreadable("cannot read"),
-                _ => Skipped::Unreadable("malformed document"),
-            });
-        }
-    };
+    let md = converted.map_err(skipped_for)?;
     if md.trim().is_empty() {
         return Err(Skipped::Unreadable("no text"));
     }
@@ -596,6 +631,25 @@ fn convert_in_process(ext: &str, bytes: &[u8]) -> Result<String, Skipped> {
         ));
     }
     Ok(unescape_delimiters(&md))
+}
+
+/// The refusal for a converter error. The converter works on bytes already in memory, so its
+/// `Io` errors are reads of streams inside the document (OLE streams, PDF objects): a corrupt
+/// document, `malformed`, not a file that could not be read (#556 R2).
+fn skipped_for(e: anydoc::ConvertError) -> Skipped {
+    match e {
+        anydoc::ConvertError::NeedsOcr { .. } => {
+            // "page 2 of 5 needs OCR" / "all 3 pages need OCR": page numbers only.
+            Skipped::NeedsOcr(e.to_string())
+        }
+        anydoc::ConvertError::Encrypted => Skipped::Encrypted,
+        anydoc::ConvertError::ResourceLimit { .. } => {
+            Skipped::Unreadable("over a converter safety limit")
+        }
+        anydoc::ConvertError::Unsupported(_) => Skipped::Unreadable("unsupported content"),
+        anydoc::ConvertError::MissingPart { .. } => Skipped::Unreadable("missing part"),
+        _ => Skipped::Unreadable("malformed document"),
+    }
 }
 
 /// `\_` `\*` `\~` and `` \` `` -> the bare character. Only the inline delimiters an escape can split
@@ -1057,6 +1111,27 @@ mod tests {
     fn skip_reasons_never_carry_document_text() {
         let err = to_markdown("x.docx", b"PK\x03\x04 SECRETPAYLOAD").expect_err("garbage");
         assert!(!err.to_string().contains("SECRETPAYLOAD"), "{err}");
+    }
+
+    /// #556 R2 F1: the child is told its deadline, so it can end itself if its parent is gone.
+    #[test]
+    fn the_child_is_given_its_own_deadline_556() {
+        let cmd = child_command(
+            std::path::Path::new("wicked-estate"),
+            "docx",
+            true,
+            Duration::from_millis(250),
+        );
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, [CHILD_ARG, "docx", "deadline=250", MASK_ARG]);
+    }
+
+    /// #556 R2 F4: the converter reads bytes already in memory, so its I/O error is a corrupt
+    /// document, not a file that could not be read.
+    #[test]
+    fn an_in_document_read_error_is_malformed_556() {
+        let e = anydoc::ConvertError::Io(std::io::ErrorKind::UnexpectedEof.into());
+        assert_eq!(skipped_for(e).kind(), "malformed");
     }
 
     #[test]
