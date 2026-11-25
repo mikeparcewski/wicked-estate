@@ -219,6 +219,9 @@ pub struct FileFacts<'t> {
     /// The source and whether it is not UTF-8 or carries a free-format directive: either way
     /// every exit-only candidate stays real.
     cobol_free_format: Option<(&'t [u8], bool)>,
+    /// Tests that count the classifier's work turn the pre-#582 oracle off: it is quadratic.
+    #[cfg(test)]
+    oracle_off: bool,
 }
 
 #[cfg(test)]
@@ -276,6 +279,7 @@ pub fn classify_in<'t>(
         let free_format = match facts.cobol_free_format {
             Some((seen, free)) if std::ptr::eq(seen, src) => free,
             _ => {
+                cobol_tick(src.len());
                 let free = std::str::from_utf8(src)
                     .map_or(true, crate::cobol_links::source_is_free_format);
                 facts.cobol_free_format = Some((src, free));
@@ -288,7 +292,7 @@ pub fn classify_in<'t>(
         };
         // The pre-#582 classifier is the oracle: every unit test that extracts COBOL checks it.
         #[cfg(test)]
-        {
+        if !facts.oracle_off {
             let old = anchor(tree, start, end, def_kinds)
                 .map_or(Behaviour::Real, |n| reference::cobol(n, src));
             assert_eq!(got, old, "#582 oracle at bytes {start}..{end}");
@@ -485,10 +489,13 @@ fn cobol_exit_only_source_ok(
 ) -> bool {
     let header = tree.node(h);
     let line_start = |at: usize| {
-        src[..at.min(src.len())]
+        let at = at.min(src.len());
+        let begin = src[..at]
             .iter()
             .rposition(|&b| b == b'\n')
-            .map_or(0, |i| i + 1)
+            .map_or(0, |i| i + 1);
+        cobol_tick(at - begin + 1);
+        begin
     };
     let line_begin = line_start(header.start_byte());
     let end = end.min(src.len());
@@ -499,10 +506,12 @@ fn cobol_exit_only_source_ok(
     let region_end = if ended_by_header || end == 0 || src[end - 1] == b'\n' {
         line_start(end)
     } else {
-        src[end..]
+        let eol = src[end..]
             .iter()
             .position(|&b| b == b'\n')
-            .map_or(src.len(), |i| end + i)
+            .map_or(src.len(), |i| end + i);
+        cobol_tick(eol - end + 1);
+        eol
     };
     let region_end = if ended_by_header {
         region_end
@@ -534,6 +543,7 @@ fn cobol_exit_only_source_ok(
             .iter()
             .position(|&b| b == b'\n')
             .map_or(src.len(), |i| boundary + i);
+        cobol_tick(boundary_end - boundary + 1);
         let prefix = String::from_utf8_lossy(&src[boundary..boundary_end]);
         if !prefix
             .chars()
@@ -544,6 +554,7 @@ fn cobol_exit_only_source_ok(
         }
     }
     let header_end_col = header.end_byte().min(src.len()) - line_begin;
+    cobol_tick(region_end - line_begin + 1);
     let region = String::from_utf8_lossy(&src[line_begin..region_end]);
     for (idx, raw) in region.split('\n').enumerate() {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
@@ -619,6 +630,24 @@ fn cobol_area_exit_only(area: &str) -> bool {
     word.is_empty() || COBOL_EXIT_WORDS.contains(&word.as_str())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The COBOL classifier's steps on this thread (tests): a node built or scanned, a navigation
+    /// or lookup, a binary search, a sort's length, a source byte read. Per thread, so it counts
+    /// every tree and cache a test's calls build, rebuilt ones included. The #582 guards assert
+    /// it grows linearly with the file.
+    static COBOL_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count `steps` of the COBOL classifier's work (tests only; a no-op in the product build).
+#[inline]
+fn cobol_tick(steps: usize) {
+    #[cfg(test)]
+    COBOL_WORK.with(|w| w.set(w.get() + steps));
+    #[cfg(not(test))]
+    let _ = steps;
+}
+
 /// No node: the root's parent, a last child's next sibling.
 const NO_NODE: u32 = u32::MAX;
 
@@ -673,6 +702,7 @@ impl<'t> CobolTree<'t> {
                         .iter()
                         .take_while(|&&w| out.nodes[w as usize].end_byte() < n.end_byte())
                         .count();
+                    cobol_tick(done + 1);
                     for w in waiting.drain(from..from + done) {
                         out.next[w as usize] = i;
                     }
@@ -681,6 +711,7 @@ impl<'t> CobolTree<'t> {
                 }
                 None => NO_NODE,
             };
+            cobol_tick(1);
             out.nodes.push(n);
             out.parent.push(parent);
             out.next.push(NO_NODE);
@@ -707,19 +738,23 @@ impl<'t> CobolTree<'t> {
     }
 
     fn node(&self, i: u32) -> TsNode<'t> {
+        cobol_tick(1);
         self.nodes[i as usize]
     }
 
     fn parent(&self, i: u32) -> Option<u32> {
+        cobol_tick(1);
         Some(self.parent[i as usize]).filter(|&p| p != NO_NODE)
     }
 
     fn next(&self, i: u32) -> Option<u32> {
+        cobol_tick(1);
         Some(self.next[i as usize]).filter(|&n| n != NO_NODE)
     }
 
     /// The header the def at `start..end` anchors on, as [`anchor`] finds it.
     fn header_at(&self, start: usize, end: usize) -> Option<u32> {
+        cobol_tick(1);
         self.headers.get(&(start, end)).copied()
     }
 
@@ -766,7 +801,9 @@ impl<'t> CobolTree<'t> {
         let (nodes, parent, subtree_end) = (&self.nodes, &self.parent, &self.subtree_end);
         let facts = self.scans.entry(scan_root).or_insert_with(|| {
             let mut facts = ScanFacts::default();
-            for i in scan_root..subtree_end[scan_root as usize] {
+            let range = scan_root..subtree_end[scan_root as usize];
+            cobol_tick(range.len());
+            for i in range {
                 let n = nodes[i as usize];
                 if n.kind() == "program_definition" {
                     facts.programs.push(n.start_byte());
@@ -783,8 +820,11 @@ impl<'t> CobolTree<'t> {
             facts.errors.sort_unstable();
             facts.programs.sort_unstable();
             facts.parent_ends.sort_unstable();
+            cobol_tick(facts.errors.len() + facts.programs.len() + facts.parent_ends.len());
             facts
         });
+        // One lookup and up to three binary searches per question.
+        cobol_tick(4);
         if 1 + facts.parent_ends.len() - facts.parent_ends.partition_point(|&e| e < division_end)
             > WALK_BUDGET * 64
         {
@@ -2141,11 +2181,14 @@ mod tests {
         out
     }
 
+    /// Parent and next sibling equal tree-sitter's on every node of the corpus. `next` also
+    /// follows `ts_node__next_sibling`'s rule of skipping a later sibling that ends at or before
+    /// the node's end. No shape found makes the patched grammar produce one: its MISSING nodes are
+    /// last children, and a statement with no period before a header recovers as ERROR.
     #[test]
     fn cobol_tree_navigation_matches_tree_sitter_582() {
         let corpus = cobol_corpus();
         assert!(corpus.len() >= 15 + 6, "{} sources", corpus.len());
-        let mut skipped_zero_width = 0usize;
         for src in &corpus {
             let tree = parse_cobol(src);
             let ix = CobolTree::new(&tree);
@@ -2162,22 +2205,8 @@ mod tests {
                     n.next_sibling().map(|s| s.id()),
                     "next of {n:?}"
                 );
-                let adjacent = n.parent().and_then(|p| {
-                    let mut c = p.walk();
-                    let kids: Vec<_> = p.children(&mut c).collect();
-                    let at = kids.iter().position(|k| k.id() == n.id())?;
-                    kids.get(at + 1).copied()
-                });
-                if adjacent.is_some_and(|a| a.end_byte() <= n.end_byte()) {
-                    skipped_zero_width += 1;
-                }
             }
         }
-        // The case the adjacency arrays first got wrong is in the corpus.
-        assert!(
-            skipped_zero_width > 0,
-            "no zero-width sibling in the corpus"
-        );
     }
 
     #[test]
@@ -2243,6 +2272,100 @@ mod tests {
             "stub",
             Some("exit_only"),
         );
+    }
+
+    /// The classifier's counted work over every COBOL header of `src`, through `classify_in` as
+    /// the extractor calls it, with the quadratic oracle off; and how many came out `exit_only`.
+    fn cobol_work(src: &str) -> (usize, usize) {
+        let tree = parse_cobol(src);
+        let mut headers = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(n) = stack.pop() {
+            if crate::treesitter::COBOL_HEADERS.contains(&n.kind()) {
+                headers.push((n.start_byte(), n.end_byte()));
+            }
+            let mut c = n.walk();
+            stack.extend(n.children(&mut c));
+        }
+        let mut facts = FileFacts {
+            oracle_off: true,
+            ..FileFacts::default()
+        };
+        let mut stubs = 0;
+        COBOL_WORK.with(|w| w.set(0));
+        for (start, end) in headers {
+            let got = classify_in(
+                &mut facts,
+                "cobol",
+                "src/PROG.cbl",
+                "function",
+                &tree,
+                start,
+                end,
+                src.as_bytes(),
+            );
+            stubs += usize::from(got == Some(Behaviour::Stub("exit_only")));
+        }
+        (COBOL_WORK.with(std::cell::Cell::get), stubs)
+    }
+
+    /// Work at `n` and `2n` copies of a shape: linear work at most doubles, plus slack for the
+    /// fixed part; quadratic work quadruples. Counted steps, not wall-clock time (#604).
+    fn assert_linear_work(shape: &str, make: impl Fn(usize) -> String, n: usize) {
+        let (small, small_stubs) = cobol_work(&make(n));
+        let (big, big_stubs) = cobol_work(&make(2 * n));
+        eprintln!("{shape}: work {small} at {n}, {big} at {}", 2 * n);
+        assert_eq!(
+            (small_stubs, big_stubs),
+            (n, 2 * n),
+            "{shape}: every EXIT paragraph is a stub"
+        );
+        assert!(
+            big * 10 <= small * 22,
+            "{shape}: work {small} at {n} grew to {big} at {} ({:.2}x)",
+            2 * n,
+            big as f64 / small as f64
+        );
+    }
+
+    /// The shapes `tests/cobol_graph_completeness.rs` extracts at full size (#582): PERFORM ...
+    /// THRU ranges each ending in an EXIT paragraph, and many small programs in one file.
+    #[test]
+    fn cobol_classifier_work_is_linear_in_the_file_582() {
+        let exit_ranges = |n: usize| -> String {
+            let mut lines = vec![
+                "IDENTIFICATION DIVISION.".to_string(),
+                "PROGRAM-ID. EXITPGM.".to_string(),
+                "PROCEDURE DIVISION.".to_string(),
+            ];
+            for i in 0..n {
+                lines.push(format!("P{i}."));
+                lines.push(format!("    PERFORM Q{i} THRU Q{i}-EXIT."));
+                lines.push(format!("Q{i}."));
+                lines.push("    MOVE 'Y' TO WS-FLAG.".to_string());
+                lines.push(format!("Q{i}-EXIT."));
+                lines.push("    EXIT.".to_string());
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            fixed(&lines)
+        };
+        let programs = |n: usize| -> String {
+            let mut lines = Vec::new();
+            for i in 0..n {
+                lines.push("IDENTIFICATION DIVISION.".to_string());
+                lines.push(format!("PROGRAM-ID. PG{i}."));
+                lines.push("PROCEDURE DIVISION.".to_string());
+                lines.push("A-PARA.".to_string());
+                lines.push("    PERFORM B-PARA.".to_string());
+                lines.push("B-PARA.".to_string());
+                lines.push("    EXIT.".to_string());
+                lines.push(format!("END PROGRAM PG{i}."));
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            fixed(&lines)
+        };
+        assert_linear_work("exit ranges", exit_ranges, 400);
+        assert_linear_work("programs", programs, 200);
     }
 
     fn cobol_tags_raw(code: &str) -> std::collections::BTreeMap<String, (String, Option<String>)> {

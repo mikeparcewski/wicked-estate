@@ -1774,7 +1774,8 @@ fn many_paragraphs_extract_in_linear_time() {
 }
 
 /// The behaviour each named paragraph was given (wicked-estate#582's guards check the fast path
-/// still classifies).
+/// still classifies at full size; the lib test `cobol_classifier_work_is_linear_in_the_file_582`
+/// counts its work).
 fn behaviour_of<'a>(ex: &'a Extraction, name: &str) -> Vec<&'a str> {
     ex.nodes
         .iter()
@@ -1784,7 +1785,7 @@ fn behaviour_of<'a>(ex: &'a Extraction, name: &str) -> Vec<&'a str> {
 }
 
 #[test]
-fn many_exit_paragraphs_classify_in_linear_time_582() {
+fn many_exit_paragraphs_classify_582() {
     // 6,000 PERFORM ... THRU ranges, each ending in an EXIT paragraph (about 24k lines). Each
     // exit-only paragraph re-read the whole file (UTF-8 and free-format checks) and walked its
     // siblings with tree-sitter's O(index) `next_sibling`: about 16 s for 25k lines in a debug
@@ -1800,7 +1801,6 @@ fn many_exit_paragraphs_classify_in_linear_time_582() {
     }
     let body: Vec<&str> = body.iter().map(String::as_str).collect();
     let text = program("EXITPGM", DATA, &body);
-    assert_extracts_within("EXITPGM", &text, std::time::Duration::from_secs(30));
     let ex = extract("EXITPGM", &text);
     assert_eq!(behaviour_of(&ex, "Q0-EXIT"), ["stub"]);
     assert_eq!(behaviour_of(&ex, "Q5999-EXIT"), ["stub"]);
@@ -1808,7 +1808,7 @@ fn many_exit_paragraphs_classify_in_linear_time_582() {
 }
 
 #[test]
-fn many_programs_in_one_file_classify_in_linear_time_582() {
+fn many_programs_in_one_file_classify_582() {
     // 4,000 small programs in one file: the error-after-division check walked from the file's
     // root once per program, about 135 s in a debug build.
     let mut text = String::new();
@@ -1821,7 +1821,6 @@ fn many_programs_in_one_file_classify_in_linear_time_582() {
         one.push_str(&format!("       END PROGRAM PG{i}.\n"));
         text.push_str(&one);
     }
-    assert_extracts_within("MANYPROGS", &text, std::time::Duration::from_secs(30));
     let ex = extract("MANYPROGS", &text);
     // Every program's B-PARA is classified. An early program's last paragraph may stay real: the
     // error check keeps the old walk's budget, which the programs after it can pass.
