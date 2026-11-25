@@ -36,8 +36,10 @@ fn object_names(db: &Path) -> BTreeSet<String> {
 }
 
 /// The fixture is the 0.35.10 shape: next to a graph this build creates, it lacks exactly the
-/// objects 0.35.11 added, and its one extra object is the 0.35.x FTS shadow-table guard trigger,
-/// which this build's writer opens drop (#570) and its readers do not need.
+/// objects added since: `edge_files` and its index (0.35.11, #543) and the FTS stamp triggers
+/// (#589), all of which a writer open creates and no read requires. Its one extra object is the
+/// 0.35.x FTS shadow-table guard trigger, which this build's writer opens drop (#570) and its
+/// readers do not need.
 #[test]
 fn the_fixture_is_a_0_35_10_graph_601() {
     let tmp = tempfile::tempdir().unwrap();
@@ -46,7 +48,18 @@ fn the_fixture_is_a_0_35_10_graph_601() {
     drop(SqliteStore::open(&fresh).unwrap());
     let (old, fresh) = (object_names(&old), object_names(&fresh));
     let missing: Vec<&str> = fresh.difference(&old).map(String::as_str).collect();
-    assert_eq!(missing, ["edge_files", "idx_edge_files_file"]);
+    assert_eq!(
+        missing,
+        [
+            "edge_files",
+            "fts_verified_on_node_delete",
+            "fts_verified_on_node_insert",
+            "fts_verified_on_node_update",
+            "fts_verified_on_symbol_delete",
+            "fts_verified_on_symbol_update",
+            "idx_edge_files_file",
+        ]
+    );
     let extra: Vec<&str> = old.difference(&fresh).map(String::as_str).collect();
     assert_eq!(extra, ["nodes_fts_rowid_guard"]);
 }
