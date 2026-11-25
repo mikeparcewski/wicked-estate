@@ -9,6 +9,7 @@
 ### Fixed
 
 - COBOL: the behaviour classifier no longer makes indexing a large program, or a file of many programs, quadratic in its size. It does its per-file work once per file instead of once per definition: one tree walk, the free-format check, and the error scan (#582)
+- Vendored grammars state exactly the license their upstream declares (#322). vb6, vba and vbscript upstreams ship no LICENSE file and state no copyright notice, so their LICENSE and NOTICE entries no longer carry the invented `Copyright (c) 2023 <handle>` lines. vbscript is now `MIT AND ISC`, because its upstream declares both; NOTICE carries the ISC text. Each upstream-derived tree records the upstream commit its sources match. The four published grammar crates (`wicked-estate-tree-sitter-vb6`, `-vba` and `-vbscript` 0.1.2, `-cfml` 0.26.22) now package their LICENSE. CI checks every third-party tree against an intake record of what upstream declares.
 
 ## [0.36.0] — 2026-11-25
 

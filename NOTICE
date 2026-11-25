@@ -40,7 +40,11 @@ Oracle APEXlang tree-sitter grammar and test fixtures
 ColdFusion CFML (tag + cfscript) tree-sitter grammar
   Path:      crates/wicked-estate-extract/vendor/tree-sitter-cfml/
   Crate:     wicked-estate-tree-sitter-cfml
-  Origin:    Vendored from https://github.com/cfmleditor/tree-sitter-cfml
+  Origin:    Vendored from https://github.com/cfmleditor/tree-sitter-cfml;
+             its grammar sources (grammar.js, src/, common/) and LICENSE are
+             byte-identical to upstream commit
+             6b4a43943c191950ee2c77f7b94cec5e903318a4 (tag v0.26.20).
+             Cargo.toml, README.md and bindings/rust/ are this repository's.
   License:   MIT License (the terms of this product's LICENSE file)
              Copyright (c) 2014 Gareth Edwards & Gavin Baumanis
              The full license text ships in the directory (LICENSE).
@@ -50,7 +54,7 @@ COBOL tree-sitter external scanner (patched)
   Origin:    scanner.c and tree_sitter/parser.h copied from the arborium-cobol
              2.18.0 crate (grammar/scanner.c, grammar/src/tree_sitter/parser.h),
              which packages https://github.com/zharinov/tree-sitter-cobol at
-             befb226951b65585617f42ecbe526d00c124100c; three patches, marked
+             befb226951b65585617f42ecbe526d00c124100c; four patches, marked
              WICKED PATCH in scanner.c. The parse tables stay in the crate.
   License:   MIT License (the terms of this product's LICENSE file)
              Copyright (c) 2016 Max Brunsfeld
@@ -63,26 +67,62 @@ COBOL tree-sitter external scanner (patched)
 Visual Basic 6 tree-sitter grammar
   Path:      crates/wicked-estate-extract/vendor/tree-sitter-vb6/
   Crate:     wicked-estate-tree-sitter-vb6
-  Origin:    Vendored from https://github.com/joannefan/tree-sitter-vb6
-  License:   MIT License (the terms of this product's LICENSE file)
-             Copyright (c) 2023 joannefan
-             The full license text ships in the directory (LICENSE).
+  Origin:    Vendored from https://github.com/joannefan/tree-sitter-vb6;
+             its src/ (grammar.json, parser.c, node-types.json and the
+             tree_sitter/ headers) is byte-identical to upstream commit
+             1ee443353ce49f12e39a8e627b557c59e348b729.
+             Cargo.toml, README.md, bindings/rust/ and LICENSE are this
+             repository's.
+  License:   MIT License, as upstream declares it in package.json,
+             Cargo.toml, pyproject.toml and tree-sitter.json, which name
+             its author as "joanne". Upstream ships no LICENSE file and
+             states no copyright notice, so none is reproduced here.
+             The license text ships in the directory (LICENSE).
 -------------------------------------------------------------------------------
 VBA tree-sitter grammar
   Path:      crates/wicked-estate-extract/vendor/tree-sitter-vba/
   Crate:     wicked-estate-tree-sitter-vba
-  Origin:    Vendored from https://github.com/tmepple/tree-sitter-vba
-  License:   MIT License (the terms of this product's LICENSE file)
-             Copyright (c) 2023 tmepple
-             The full license text ships in the directory (LICENSE).
+  Origin:    Vendored from https://github.com/tmepple/tree-sitter-vba;
+             its src/ (grammar.json, parser.c, node-types.json and the
+             tree_sitter/ headers) is byte-identical to upstream commit
+             c691f237b2a703732d4b6a1f01d5b4f73f94d41e.
+             Cargo.toml, README.md, bindings/rust/ and LICENSE are this
+             repository's.
+  License:   MIT License, as upstream declares it in package.json,
+             Cargo.toml and tree-sitter.json; tree-sitter.json names its
+             author as "Todd Epple". Upstream ships no LICENSE file and
+             states no copyright notice, so none is reproduced here.
+             The license text ships in the directory (LICENSE).
 -------------------------------------------------------------------------------
 VBScript tree-sitter grammar
   Path:      crates/wicked-estate-extract/vendor/tree-sitter-vbscript/
   Crate:     wicked-estate-tree-sitter-vbscript
-  Origin:    Vendored from https://github.com/JJK96/tree-sitter-vbscript
-  License:   MIT License (the terms of this product's LICENSE file)
-             Copyright (c) 2023 JJK96
-             The full license text ships in the directory (LICENSE).
+  Origin:    Vendored from https://github.com/JJK96/tree-sitter-vbscript;
+             its src/ (grammar.json, parser.c, node-types.json and the
+             tree_sitter/ headers) is byte-identical to upstream commit
+             6d9548eab0514e0572a616fd58d5997a93b37415.
+             Cargo.toml, README.md, bindings/rust/ and LICENSE are this
+             repository's.
+  License:   MIT License and ISC License (SPDX: MIT AND ISC). Upstream's
+             declarations conflict: package.json says ISC and names its
+             author as "Jan-Jaap Korpershoek", while Cargo.toml and
+             pyproject.toml say MIT, so the grammar is used under both.
+             Upstream ships no LICENSE file and
+             states no copyright notice, so none is reproduced here.
+             Both license texts ship in the directory (LICENSE). The MIT
+             terms are this product's LICENSE file; the ISC terms:
+
+  Permission to use, copy, modify, and/or distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+
+  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 -------------------------------------------------------------------------------
 In-house tree-sitter grammars: Progress OpenEdge ABL, Crystal Reports formula,
 Visual FoxPro, Informix 4GL, LotusScript, PowerBuilder PowerScript
