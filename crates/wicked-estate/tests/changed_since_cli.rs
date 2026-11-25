@@ -116,10 +116,20 @@ fn a_labelled_graph_reports_the_changed_symbols() {
     for want in ["cancelOrder", "placeOrder"] {
         assert!(found.iter().any(|n| n == want), "{want}: {found:?}");
     }
+    // Both changed files are inside the indexed root, so each is reported under the label:
+    // orders.ts's symbols and the README's file node, and nothing else.
     let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    for row in rows.as_array().unwrap() {
-        assert_eq!(row["file"], "shop/svc/src/orders.ts", "{rows}");
-    }
+    let files: std::collections::BTreeSet<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        files,
+        ["shop/README.md", "shop/svc/src/orders.ts"].into(),
+        "{rows}"
+    );
 
     let text =
         String::from_utf8_lossy(&estate(&dir, &["changed-since", &first, "--db", db]).stdout)
