@@ -2,9 +2,29 @@
 
 ## [Unreleased]
 
+## [0.36.0] — 2026-11-25
+
+Minor release on the train-14 cut d5d42e30, carrying 10 PRs since 0.35.11: #600, #602, #603, #604, #607, #606, #599, #609, #608, #605. It is a minor version because `ViaEdge` is now `#[non_exhaustive]` (#575), a semver break for a 0.x crate.
+
+### Added
+
+- `wicked-estate convert` returns one document as Markdown, or a typed refusal (#602)
+
 ### Changed
 
 - **COBOL: a paragraph name that repeats in two sections of one program now gives each paragraph its own node (#580).** Such paragraphs get a section-qualified id, `…#PARA(SECTION).`. Before, they shared one node, so both bodies' calls and data uses landed on it, and `PERFORM PARA OF SECTION` between them was dropped as a self-jump. `PERFORM PARA OF SECTION` now binds to the named one. Ids of paragraphs whose names are unique in their program do not change. Re-index note: when a second paragraph of the same name is added in another section, the earlier paragraph's id changes too (unless it sits before any section), so annotations or pins on that earlier id need re-pointing after the next index.
+- `wicked_estate_core::ViaEdge` is `#[non_exhaustive]` (#575, from #559), so a later field is not a semver break. Code outside the crate can no longer build one with a struct literal; it reads the fields as before.
+
+### Fixed
+
+- COBOL: recovery that takes over a parse ends linearly and is reported (#600; #583, #578)
+- Every `path` hop carries its call site (#603; #357)
+- `convert`: the child deadline, and typed refusals for output and secret files; #501's timed test made deterministic (#604, #556 round-2 follow-ups)
+- `convert` and extract: every lexical frame is counted, and the mask is applied before `deadline=` (#607, #604 round-2 follow-ups)
+- `changed-since` maps git's paths onto the graph's stored paths (#606; #352)
+- `changed-since`: a graph used from another worktree, a clone or a moved checkout still maps (#609, #606 round-2 follow-up)
+- Store: an O(log n) open-time FTS check on a verified store (#599; closes #589)
+- Store: the read-only currency check does not require objects that only writes touch, so a graph an older writer left opens read-only (#605; #601)
 
 ## [0.35.11] — 2026-11-24
 
