@@ -1940,6 +1940,34 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
     out
 }
 
+/// Every COBOL paragraph header of the file, by first byte: the section header it sits in, as
+/// (first byte, name as the header spells it, uppercased), or `None` (a paragraph before any
+/// section). Sections are not listed, and a section counts whether or not it emits a node (one
+/// named by an integer does not). Linear in the tree.
+fn cobol_paragraph_sections(
+    tree: &tree_sitter::Tree,
+    src: &[u8],
+) -> HashMap<usize, Option<(usize, String)>> {
+    let mut out = HashMap::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() != "procedure_division" {
+            push_children(&mut stack, node);
+            continue;
+        }
+        let mut open = None;
+        for h in CobolDivision::of(node, src).headers {
+            if h.is_section {
+                open = Some(h.start);
+                continue;
+            }
+            let section = h.section.and_then(|name| Some((open?, name)));
+            out.insert(h.start, section);
+        }
+    }
+    out
+}
+
 /// The innermost COBOL program at each byte, as `(from byte, program)` steps sorted by byte (look
 /// one up with the last step at or before it). Programs nest or follow one another, so one sweep
 /// over them in source order, with a stack of the open ones, builds the steps: linear in the
@@ -5439,6 +5467,53 @@ impl TreeSitterExtractor {
                 }
             }
 
+            // COBOL (#580): a paragraph name may repeat in different sections of one program, and
+            // `PERFORM X OF S` picks one. When paragraphs that share one id sit in two or more
+            // sections (or one sits before any section), each of them that is in a section is
+            // qualified in its own descriptor, `X(S).`, not by an `S#` container, which a nested
+            // program named S would share. Sections and every other id are unchanged. A later
+            // duplicate so re-ids the earlier paragraph too.
+            if self.lang_name == "cobol" {
+                let sections = cobol_paragraph_sections(&tree, src);
+                // Paragraphs by id, as pending indexes; each one's section is `sections[start]`.
+                let mut by_symbol: HashMap<&SymbolId, Vec<usize>> = HashMap::new();
+                for (i, (p, identity)) in pending.iter().zip(&identities).enumerate() {
+                    if let Some((_, symbol)) = identity
+                        .as_ref()
+                        .filter(|_| sections.contains_key(&p.start))
+                    {
+                        by_symbol.entry(symbol).or_default().push(i);
+                    }
+                }
+                let section_of =
+                    |i: usize| sections.get(&pending[i].start).and_then(Option::as_ref);
+                let mut qualified = Vec::new();
+                for twins in by_symbol.values() {
+                    let spread: HashSet<Option<usize>> =
+                        twins.iter().map(|&i| section_of(i).map(|s| s.0)).collect();
+                    if spread.len() < 2 {
+                        continue;
+                    }
+                    for &i in twins {
+                        if let Some((_, name)) = section_of(i) {
+                            qualified.push((i, name.clone()));
+                        }
+                    }
+                }
+                for (i, section) in qualified {
+                    if let Some((chain, symbol)) = &mut identities[i] {
+                        *symbol = disambiguated_def_symbol(
+                            &scheme,
+                            &module,
+                            chain,
+                            &pending[i].name,
+                            def_suffix(&pending[i].kind),
+                            Some(section),
+                        );
+                    }
+                }
+            }
+
             for (p, identity) in pending.iter().zip(&identities) {
                 // Non-emitting anchors contribute containment only.
                 let Some((_, symbol)) = identity else {
@@ -5633,7 +5708,9 @@ impl TreeSitterExtractor {
                 };
                 match (target, from) {
                     (Some(t), _) if source == Some(t) => {}
-                    // Same-named paragraphs of two sections share one id (#580): no self-edge.
+                    // Two headers that still share one id: a name repeated within one section (which
+                    // COBOL rejects), or a section and a paragraph of one name (#580 qualifies only
+                    // paragraph names repeated across sections). No self-edge.
                     (Some(t), Some(from)) if from == defs[units[t]].symbol => {}
                     (Some(t), Some(from)) => {
                         cobol_flow_edges.push((from, defs[units[t]].symbol.clone(), call.span));
