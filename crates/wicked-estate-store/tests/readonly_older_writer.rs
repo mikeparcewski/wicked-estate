@@ -73,7 +73,7 @@ fn a_graph_an_older_writer_left_opens_read_only_and_answers_601() {
     assert_eq!(alpha.len(), 1, "{alpha:?}");
     let alpha = &alpha[0];
     assert_eq!(by_name("beta").len(), 1);
-    assert!(store.get_node(&alpha.id).unwrap().is_some());
+    assert!(store.get_node(&alpha.symbol).unwrap().is_some());
     assert_eq!(
         store
             .find_symbols(&SymbolQuery {
@@ -92,17 +92,19 @@ fn a_graph_an_older_writer_left_opens_read_only_and_answers_601() {
             .unwrap()
             .is_empty()
     );
-    let out = store.neighbors(&alpha.id, Direction::Dependencies).unwrap();
+    let out = store
+        .neighbors(&alpha.symbol, Direction::Dependencies)
+        .unwrap();
     assert!(
         out.iter().any(|e| e.kind == EdgeKind::Calls),
         "alpha calls beta: {out:?}"
     );
     let _ = store
-        .traverse(&alpha.id, &TraversalSpec::blast_radius(3))
+        .traverse(&alpha.symbol, &TraversalSpec::blast_radius(3))
         .unwrap();
     let _ = store
         .traverse_multi(
-            std::slice::from_ref(&alpha.id),
+            std::slice::from_ref(&alpha.symbol),
             &TraversalSpec::blast_radius(3),
         )
         .unwrap();
@@ -117,13 +119,13 @@ fn a_graph_an_older_writer_left_opens_read_only_and_answers_601() {
     let _ = store.file_call_refs("src/a.ts").unwrap();
     let _ = store.symbol_source(alpha).unwrap();
     let _ = store.changes_since(0).unwrap();
-    let _ = store.node_semantics(&alpha.id).unwrap();
+    let _ = store.node_semantics(&alpha.symbol).unwrap();
     let _ = store.semantics_in_files(&["src/a.ts"]).unwrap();
     let _ = store.find_by_requirement("REQ-1").unwrap();
-    let _ = store.annotations(&alpha.id).unwrap();
+    let _ = store.annotations(&alpha.symbol).unwrap();
     let _ = store.annotations_by_type("note").unwrap();
     let _ = store.annotations_stale_since(0).unwrap();
-    let _ = store.symbol_epoch(&alpha.id).unwrap();
+    let _ = store.symbol_epoch(&alpha.symbol).unwrap();
     let _ = store.support_owners().unwrap();
     let _ = store.capabilities();
     assert_eq!(
@@ -141,7 +143,7 @@ fn a_graph_an_older_writer_left_opens_read_only_and_answers_601() {
         .unwrap();
     let _ = store.unresolved_refs_for_name("gamma").unwrap();
     let _ = store
-        .count_unresolved_refs_from(std::slice::from_ref(&alpha.id))
+        .count_unresolved_refs_from(std::slice::from_ref(&alpha.symbol))
         .unwrap();
     let stats = store.stats().unwrap();
     assert_eq!((stats.node_count, stats.edge_count), (3, 3));
