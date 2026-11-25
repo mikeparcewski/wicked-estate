@@ -1,5 +1,6 @@
 """#322: every grammar vendored as source has a PROVENANCE row and a NOTICE entry."""
 
+from fnmatch import fnmatchcase
 import hashlib
 from pathlib import Path
 import re
@@ -236,7 +237,39 @@ def collapsed(text):
 
 
 def copyright_lines(text):
-    return tuple(m.group(0).strip() for m in re.finditer(r"Copyright \(c\)[^\n]*", text))
+    """Every copyright statement, however spelt: `Copyright (c)`, `Copyright ©`, `Copyright 2024`
+    or a bare `©`. Lower-case "copyright" is prose ("states no copyright notice", the MIT grant)."""
+    return tuple(m.group(0).strip() for m in re.finditer(r"(?:\bCopyright\b|\u00a9)[^\n]*", text))
+
+
+# License names, so a surface that names one upstream does not declare is caught. An SPDX choice
+# ("MIT OR ISC") is a different grant from "MIT AND ISC", so it is caught too.
+LICENSE_NAMES = r"MIT|ISC|Apache|BSD|L?GPL|AGPL|MPL|EPL|UPL|Universal Permissive|Unlicense|CC0|CC-BY|Zlib|BSL|Artistic|WTFPL"
+
+
+def undeclared_licenses(text, declared):
+    named = {m.group(1) for m in re.finditer(rf"\b({LICENSE_NAMES})\b", text)}
+    return sorted(n for n in named if not any(re.search(rf"\b{re.escape(n)}\b", d) for d in declared))
+
+
+def offers_a_choice(text):
+    return re.search(rf"\b(?:{LICENSE_NAMES})(?:-[\w.]+)?\s+OR\s", text) is not None
+
+
+def cargo_packages(rel, package):
+    """Whether `cargo package` ships `rel`: `include` wins over `exclude`; in either list the last
+    matching pattern decides, and `!` negates it (gitignore rules)."""
+    include = package.get("include")
+    patterns, shipped = (include, False) if include is not None else (package.get("exclude", []), True)
+    for pattern in patterns:
+        negated = pattern.startswith("!")
+        pattern = pattern.lstrip("!")
+        anchored = pattern.startswith("/")
+        pattern = pattern.strip("/")
+        name = rel if anchored or "/" in pattern else rel.rsplit("/", 1)[-1]
+        if fnmatchcase(name, pattern):
+            shipped = (not negated) if include is not None else negated
+    return shipped
 
 
 def notice_block(notice, tree):
@@ -263,14 +296,23 @@ def declaration_problems(vendor, notice, declarations=UPSTREAM_DECLARATIONS):
         row = rows.get(tree, "")
         cells = [c.strip() for c in row.strip().strip("|").split("|")]
         license_cell = cells[5] if len(cells) == 7 else ""
-        if d["repo"] not in row or d["commit"] not in row:
-            problems.append(f"{tree}: PROVENANCE row does not name {d['repo']} at {d['commit']}")
+        source_cell, commit_cell = (cells[2], cells[3]) if len(cells) == 7 else ("", "")
+        if d["repo"] not in source_cell:
+            problems.append(f"{tree}: PROVENANCE Source cell does not name {d['repo']}")
+        if d["commit"] not in commit_cell:
+            problems.append(f"{tree}: PROVENANCE Commit / Origin cell does not name {d['commit']}")
+        for sha in sorted(set(re.findall(r"\b[0-9a-f]{40}\b", commit_cell + license_cell)) - {d["commit"]}):
+            problems.append(f"{tree}: PROVENANCE Commit / Origin cell names {sha}, not {d['commit']}")
         for name in d["licenses"] + stems[:len(d["copyrights"])] + ((d["author"], NO_COPYRIGHT) if d["author"] else ()):
             if name not in license_cell:
                 problems.append(f"{tree}: PROVENANCE license cell lacks {name!r}")
         for line in copyright_lines(license_cell):
             if not line.startswith(stems):
                 problems.append(f"{tree}: PROVENANCE license cell states {line!r}, which upstream does not")
+        problems += [f"{tree}: PROVENANCE license cell names {n}, which upstream does not declare"
+                     for n in undeclared_licenses(license_cell, d["licenses"])]
+        if offers_a_choice(license_cell) and not offers_a_choice(d["spdx"] or ""):
+            problems.append(f"{tree}: PROVENANCE license cell offers a choice (OR); upstream's terms are {d['spdx']!r}")
         # The files the record pins are the upstream bytes.
         for rel, sha in d["files"].items():
             path = vendor / tree / rel
@@ -291,6 +333,10 @@ def declaration_problems(vendor, notice, declarations=UPSTREAM_DECLARATIONS):
             for name in d["licenses"]:
                 if collapsed(LICENSE_BODIES[name]) not in collapsed(text):
                     problems.append(f"{tree}: LICENSE lacks the {name} license text")
+            problems += [f"{tree}: LICENSE names {n}, which upstream does not declare"
+                         for n in undeclared_licenses(text, d["licenses"])]
+            if offers_a_choice(text) and not offers_a_choice(d["spdx"] or ""):
+                problems.append(f"{tree}: LICENSE offers a choice (OR); upstream's terms are {d['spdx']!r}")
         # NOTICE: upstream, commit, licenses, holders (and no other), texts it must carry.
         block = notice_block(notice, tree)
         flat = collapsed(block)
@@ -303,6 +349,10 @@ def declaration_problems(vendor, notice, declarations=UPSTREAM_DECLARATIONS):
         for name in d["notice_texts"]:
             if collapsed(LICENSE_BODIES[name]) not in flat:
                 problems.append(f"{tree}: NOTICE entry lacks the {name} license text")
+        problems += [f"{tree}: NOTICE entry names {n}, which upstream does not declare"
+                     for n in undeclared_licenses(block, d["licenses"])]
+        if offers_a_choice(block) and not offers_a_choice(d["spdx"] or ""):
+            problems.append(f"{tree}: NOTICE entry offers a choice (OR); upstream's terms are {d['spdx']!r}")
         # The crate: the row's SPDX expression, and a package that carries the LICENSE.
         cargo = vendor / tree / "Cargo.toml"
         if d["spdx"] is not None:
@@ -311,8 +361,7 @@ def declaration_problems(vendor, notice, declarations=UPSTREAM_DECLARATIONS):
                 problems.append(f"{tree}: Cargo.toml license {package.get('license')!r} != {d['spdx']!r}")
             if "license-file" in package:
                 problems.append(f"{tree}: Cargo.toml sets license-file; use license = {d['spdx']!r}")
-            include, exclude = package.get("include"), package.get("exclude", [])
-            if (include is not None and "LICENSE" not in include) or "LICENSE" in exclude:
+            if not cargo_packages("LICENSE", package):
                 problems.append(f"{tree}: Cargo.toml packages no LICENSE")
     return problems
 
@@ -418,8 +467,64 @@ class UpstreamDeclarationTests(unittest.TestCase):
             prov = vendor / "PROVENANCE.md"
             prov.write_text(prov.read_text().replace("1ee443353ce49f12e39a8e627b557c59e348b729", "unknown"))
             self.assertEqual(declaration_problems(vendor, self.notice),
-                             ["tree-sitter-vb6: PROVENANCE row does not name "
-                              "https://github.com/joannefan/tree-sitter-vb6 at 1ee443353ce49f12e39a8e627b557c59e348b729"])
+                             ["tree-sitter-vb6: PROVENANCE Commit / Origin cell does not name "
+                              "1ee443353ce49f12e39a8e627b557c59e348b729"])
+
+    def test_a_contradicting_origin_or_license_is_caught(self):
+        # Codex round 1 re-delta probes: each passed the field-blind checks.
+        with tempfile.TemporaryDirectory() as tmp:
+            vendor = self.copy(tmp)
+            prov = vendor / "PROVENANCE.md"
+            rows = prov.read_text().splitlines()
+            at = next(i for i, r in enumerate(rows) if "| `tree-sitter-apexlang/` |" in r)
+            cells = rows[at].split("|")
+            cells[4] = cells[4].replace("014cdb29f12dfa6a689bbe8a80ee1c5f0bf15be1", "0" * 40)
+            rows[at] = "|".join(cells)
+            rows = [r.replace("| MIT AND ISC. ", "| MIT OR ISC. ") for r in rows]
+            prov.write_text("\n".join(rows) + "\n")
+            lic = vendor / "tree-sitter-vba" / "LICENSE"
+            lic.write_text(lic.read_text().replace("It declares\nthe MIT License", "It declares\nApache-2.0"))
+            problems = declaration_problems(vendor, self.notice)
+        self.assertEqual(problems, [
+            "tree-sitter-apexlang: PROVENANCE Commit / Origin cell does not name "
+            "014cdb29f12dfa6a689bbe8a80ee1c5f0bf15be1",
+            "tree-sitter-apexlang: PROVENANCE Commit / Origin cell names 0000000000000000000000000000000000000000, "
+            "not 014cdb29f12dfa6a689bbe8a80ee1c5f0bf15be1",
+            "tree-sitter-vba: LICENSE names Apache, which upstream does not declare",
+            "tree-sitter-vbscript: PROVENANCE license cell offers a choice (OR); upstream's terms are 'MIT AND ISC'",
+        ])
+        notice = self.notice.replace("states no copyright notice, so none is reproduced here.",
+                                     "states no copyright notice, so none is reproduced here.\n"
+                                     "             License: Apache-2.0 only", 1)
+        self.assertEqual(declaration_problems(VENDOR, notice),
+                         ["tree-sitter-vb6: NOTICE entry names Apache, which upstream does not declare"])
+
+    def test_any_copyright_spelling_is_caught(self):
+        for line in ("Copyright 1900 Wrong Person", "Copyright \u00a9 1900 Wrong Person", "\u00a9 1900 Wrong Person"):
+            with tempfile.TemporaryDirectory() as tmp:
+                vendor = self.copy(tmp)
+                lic = vendor / "tree-sitter-vba" / "LICENSE"
+                lic.write_text(lic.read_text() + "\n" + line + "\n")
+                self.assertEqual(declaration_problems(vendor, self.notice),
+                                 [f"tree-sitter-vba: LICENSE copyright lines ({line!r},) != upstream's ()"], line)
+
+    def test_cargo_include_and_exclude_follow_cargo_precedence(self):
+        include = 'include = ["LICENSE", "README.md", "bindings/rust/*.rs", "src/**/*"]'
+        cases = (
+            # A later negation drops LICENSE from the package.
+            (include.replace('"src/**/*"]', '"src/**/*", "!LICENSE"]'), ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
+            # include wins over exclude, so LICENSE still ships.
+            (include + '\nexclude = ["LICENSE"]', []),
+            # With no include, exclude decides, by pattern.
+            ('exclude = ["/LIC*"]', ["tree-sitter-vba: Cargo.toml packages no LICENSE"]),
+            ('exclude = ["src/LICENSE"]', []),
+        )
+        for manifest, expected in cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                vendor = self.copy(tmp)
+                cargo = vendor / "tree-sitter-vba" / "Cargo.toml"
+                cargo.write_text(cargo.read_text().replace(include, manifest))
+                self.assertEqual(declaration_problems(vendor, self.notice), expected, manifest)
 
 
 class VendoredGrammarProvenanceTests(unittest.TestCase):
