@@ -1,0 +1,2 @@
+# Versioned store fixtures are committed (the repo ignores *.db elsewhere).
+!store_v0_35_10.db
