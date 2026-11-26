@@ -1323,11 +1323,49 @@ fn literal_at(clean: &str, m: regex::Match) -> String {
 /// Index of a program in [`Anchors::modules`]; `None` = no program (a copybook).
 type Prog = Option<usize>;
 
+/// The ranges that hold each byte (`start <= byte < end`), from one sweep
+/// ([`crate::treesitter::holders`]) instead of a scan of every range per lookup (#641). The holders
+/// of a byte change only at a range's start or end, so they are kept once per distinct start or
+/// end, for the bytes from it up to the next one.
+#[derive(Default)]
+struct Holding {
+    /// Every distinct start and end, ascending.
+    from: Vec<usize>,
+    /// The ranges holding the bytes from `from[i]` up to `from[i + 1]`, by index, ascending.
+    held: Vec<Vec<usize>>,
+}
+
+impl Holding {
+    fn of(ranges: &[(usize, usize)]) -> Self {
+        let mut from: Vec<usize> = ranges.iter().flat_map(|&(s, e)| [s, e]).collect();
+        from.sort_unstable();
+        from.dedup();
+        // A range holds the bytes from `p` on exactly when it holds the one-byte range at `p`.
+        let at: Vec<(usize, usize)> = from.iter().map(|&p| (p, p + 1)).collect();
+        let held = crate::treesitter::holders(ranges, &at);
+        Self { from, held }
+    }
+
+    /// The indexes of the ranges that hold `byte`, ascending: the ones a scan in order finds.
+    fn at(&self, byte: usize) -> &[usize] {
+        let i = self.from.partition_point(|&p| p <= byte);
+        let held = i
+            .checked_sub(1)
+            .map_or(&[][..], |i| self.held[i].as_slice());
+        crate::behaviour::cobol_tick(1 + held.len());
+        held
+    }
+}
+
 struct Anchors {
     /// (symbol, PROGRAM-ID, start byte, end byte) of every program in the file.
     modules: Vec<(SymbolId, String, usize, usize)>,
+    /// The programs that hold each byte.
+    module_holding: Holding,
     /// (symbol, start byte, end byte) of every paragraph and section in the file.
     units: Vec<(SymbolId, usize, usize)>,
+    /// The paragraphs and sections that hold each byte.
+    unit_holding: Holding,
     /// The source when no program holds the construct: the copybook node, else the File node.
     fallback: SymbolId,
     /// A copybook file's definition record + its `Contains` edges, taken by [`supplement`].
@@ -1352,7 +1390,7 @@ impl Anchors {
                 )
             })
             .collect();
-        let units = ex
+        let units: Vec<_> = ex
             .nodes
             .iter()
             .filter(|n| n.kind == NodeKind::Function)
@@ -1361,6 +1399,8 @@ impl Anchors {
                 (n.symbol.clone(), s.start_byte as usize, s.end_byte as usize)
             })
             .collect();
+        let module_ranges: Vec<_> = modules.iter().map(|&(_, _, s, e)| (s, e)).collect();
+        let unit_ranges: Vec<_> = units.iter().map(|&(_, s, e)| (s, e)).collect();
         let copybook = if modules.is_empty() && !RE_PROGRAM_ID.is_match(code) {
             let name = copybook_name(&file.path);
             let sym = copybook_symbol(&name);
@@ -1393,7 +1433,9 @@ impl Anchors {
             None
         };
         Self {
+            module_holding: Holding::of(&module_ranges),
             modules,
+            unit_holding: Holding::of(&unit_ranges),
             units,
             fallback: Symbol::file(&file.path).id(),
             copybook,
@@ -1404,31 +1446,35 @@ impl Anchors {
     /// The innermost program whose span holds `byte`; none outside every program (the construct
     /// then starts from the copybook or File node).
     fn prog(&self, byte: usize) -> Prog {
-        self.modules
+        self.module_holding
+            .at(byte)
             .iter()
-            .enumerate()
-            .filter(|(_, (_, _, s, e))| *s <= byte && byte < *e)
-            .min_by_key(|(_, (_, _, s, e))| e - s)
-            .map(|(i, _)| i)
+            .copied()
+            .min_by_key(|&i| self.modules[i].3 - self.modules[i].2)
     }
 
     /// The source of a call or data use at `byte`: the innermost paragraph or section holding it
     /// (the tree-sitter extractor's rule for PERFORM, CALL and data names), else [`Self::at`]'s.
     fn unit(&self, byte: usize) -> SymbolId {
-        self.units
+        self.unit_holding
+            .at(byte)
             .iter()
-            .filter(|(_, s, e)| *s <= byte && byte < *e)
+            .map(|&i| &self.units[i])
             .min_by_key(|(_, s, e)| e - s)
             .map_or_else(|| self.at(byte).0, |(sym, _, _)| sym.clone())
     }
 
+    /// The programs that hold `byte`, in file order.
+    fn holders(&self, byte: usize) -> impl Iterator<Item = &(SymbolId, String, usize, usize)> {
+        self.module_holding
+            .at(byte)
+            .iter()
+            .map(|&i| &self.modules[i])
+    }
+
     /// The PROGRAM-IDs of the programs that hold `byte`, innermost first.
     fn chain(&self, byte: usize) -> Vec<String> {
-        let mut held: Vec<_> = self
-            .modules
-            .iter()
-            .filter(|(_, _, s, e)| *s <= byte && byte < *e)
-            .collect();
+        let mut held: Vec<_> = self.holders(byte).collect();
         held.sort_by_key(|(_, _, s, e)| e - s);
         held.into_iter().map(|(_, name, ..)| name.clone()).collect()
     }
@@ -1483,17 +1529,33 @@ impl Literals {
             return out;
         }
         let len = code.len();
-        for (i, (_, _, s, e)) in anchors.modules.iter().enumerate() {
-            let (s, e) = ((*s).min(len), (*e).min(len));
+        let ranges: Vec<(usize, usize)> = anchors
+            .modules
+            .iter()
+            .map(|&(_, _, s, e)| (s.min(len), e.min(len)))
+            .collect();
+        // The programs nested in each one (inside it, not the same span), from one sweep instead
+        // of a scan of every other program per program (#641).
+        let mut nested: Vec<Vec<usize>> = vec![Vec::new(); ranges.len()];
+        for (j, held_by) in crate::treesitter::holders(&ranges, &ranges)
+            .into_iter()
+            .enumerate()
+        {
+            for i in held_by {
+                if i != j && ranges[i] != ranges[j] {
+                    nested[i].push(j);
+                }
+            }
+        }
+        for (i, &(s, e)) in ranges.iter().enumerate() {
             if !code.is_char_boundary(s) || !code.is_char_boundary(e) {
                 continue;
             }
             let mut own: Vec<u8> = code.as_bytes()[s..e].to_vec();
-            for (j, (_, _, ns, ne)) in anchors.modules.iter().enumerate() {
-                let (ns, ne) = (*ns, (*ne).min(len));
-                if j != i && ns >= s && ne <= e && (ns, ne) != (s, e) {
-                    blank_bytes(&mut own, ns - s, ne - s);
-                }
+            crate::behaviour::cobol_tick(1 + nested[i].len());
+            for &j in &nested[i] {
+                let (ns, ne) = ranges[j];
+                blank_bytes(&mut own, ns - s, ne - s);
             }
             let own = String::from_utf8(own).unwrap_or_default();
             out.insert(Some(i), Self::build(&own, &clean[s..e], s, lines));
@@ -1764,18 +1826,18 @@ impl Pass<'_> {
         self.out.refs.push(r);
     }
 
-    /// Decide `var` in program `prog` once.
-    fn decide(&mut self, prog: Prog, var: &str) -> Decision {
-        let key = (prog, var.to_ascii_uppercase());
-        if let Some(d) = self.decisions.get(&key) {
-            return d.clone();
-        }
-        let d = self
-            .lits
-            .get(&prog)
-            .map_or_else(|| Literals::default().decide(var), |l| l.decide(var));
-        self.decisions.insert(key, d.clone());
-        d
+    /// Decide `var` in program `prog` once; every later call reads the kept decision, without a
+    /// copy of its evidence (#641: one per call made many dynamic CALLs of one variable
+    /// quadratic).
+    fn decide(&mut self, prog: Prog, var: &str) -> &Decision {
+        crate::behaviour::cobol_tick(1);
+        let lits = &self.lits;
+        self.decisions
+            .entry((prog, var.to_ascii_uppercase()))
+            .or_insert_with(|| {
+                lits.get(&prog)
+                    .map_or_else(|| Literals::default().decide(var), |l| l.decide(var))
+            })
     }
 
     /// The `Calls` ref name for a dynamic program-name variable in `prog`.
@@ -2246,9 +2308,7 @@ impl Pass<'_> {
             }
             let holders: Vec<&SymbolId> = match self
                 .anchors
-                .modules
-                .iter()
-                .filter(|(_, _, s, e)| *s <= at && at < *e)
+                .holders(at)
                 .map(|(sym, ..)| sym)
                 .collect::<Vec<_>>()
             {
@@ -2510,6 +2570,172 @@ mod tests {
             .expect("parse");
         supplement(&sf, &mut ex);
         ex
+    }
+
+    // ── wicked-estate#641: the supplement's work is linear in the file ─────────────────────
+
+    /// The supplement's counted work on `text` (the tree-sitter extract it reads is not counted),
+    /// and the extraction it gives.
+    fn supplement_work(text: &str) -> (usize, Extraction) {
+        let sf = SourceFile {
+            path: "cbl/WORK.cbl".to_string(),
+            language: Language::new("cobol"),
+            text: text.to_string(),
+        };
+        let mut ex = crate::behaviour::without_cobol_oracle(|| {
+            crate::treesitter::TreeSitterExtractor::for_language("cobol")
+                .expect("cobol grammar")
+                .extract(&sf)
+                .expect("parse")
+        });
+        let ((), work) = crate::behaviour::cobol_counted(|| supplement(&sf, &mut ex));
+        (work, ex)
+    }
+
+    /// Work at `n` and `4n` copies of a shape: linear work at most quadruples, and the bound is
+    /// 4.4x as for the classifier's guard (`cobol_classifier_work_is_linear_in_the_file_582`). A
+    /// lookup that scans every paragraph, section or program grows sixteenfold. `sites` counts
+    /// what the shape is there to exercise in an extraction: it must be `n` and `4n`.
+    fn assert_linear_supplement(
+        shape: &str,
+        make: impl Fn(usize) -> String,
+        sites: impl Fn(&Extraction) -> usize,
+        n: usize,
+    ) {
+        let (small, small_ex) = supplement_work(&make(n));
+        let (big, big_ex) = supplement_work(&make(4 * n));
+        eprintln!("{shape}: work {small} at {n}, {big} at {}", 4 * n);
+        assert_eq!(
+            (sites(&small_ex), sites(&big_ex)),
+            (n, 4 * n),
+            "{shape}: every site is extracted"
+        );
+        assert!(small > 0, "{shape}: the shape counts no supplement work");
+        assert!(
+            big * 10 <= small * 44,
+            "{shape}: work {small} at {n} grew to {big} at {} ({:.2}x)",
+            4 * n,
+            big as f64 / small as f64
+        );
+    }
+
+    fn cobol_program(id: &str, data: &[String], body: &[String]) -> String {
+        let mut out = vec![
+            "       IDENTIFICATION DIVISION.".to_string(),
+            format!("       PROGRAM-ID. {id}."),
+            "       DATA DIVISION.".to_string(),
+            "       WORKING-STORAGE SECTION.".to_string(),
+        ];
+        out.extend(data.iter().map(|l| format!("       {l}")));
+        out.push("       PROCEDURE DIVISION.".to_string());
+        out.extend(body.iter().map(|l| format!("       {l}")));
+        out.join("\n") + "\n"
+    }
+
+    /// The shapes #641 measured: a paragraph per CICS LINK (each site's paragraph was found by a
+    /// scan of every paragraph and section) and many programs in one file (each site's program by
+    /// a scan of every program, and each program's literals by a scan of every other program).
+    /// Plus many dynamic CALLs of one variable, whose cached decision was cloned per call.
+    #[test]
+    fn cics_sql_supplement_work_is_linear_in_the_file_641() {
+        let links = |n: usize| -> String {
+            let mut body = Vec::new();
+            for i in 0..n {
+                body.push(format!("P{i}."));
+                body.push(format!("    EXEC CICS LINK PROGRAM('PGM{i}') END-EXEC."));
+            }
+            body.push("    GOBACK.".to_string());
+            cobol_program("LINKS", &["01  WS-A PIC X(10).".to_string()], &body)
+        };
+        let programs = |n: usize| -> String {
+            (0..n)
+                .map(|i| {
+                    cobol_program(
+                        &format!("PG{i}"),
+                        &[format!("01  F{i} PIC X(10).")],
+                        &[
+                            "MAIN-PARA.".to_string(),
+                            format!("    MOVE 'A' TO F{i}."),
+                            "    GOBACK.".to_string(),
+                        ],
+                    ) + &format!("       END PROGRAM PG{i}.\n")
+                })
+                .collect()
+        };
+        let dynamic = |n: usize| -> String {
+            let mut body = Vec::new();
+            for i in 0..n {
+                body.push(format!("P{i}."));
+                body.push("    MOVE 'SUBPGM' TO WS-PGM".to_string());
+                body.push("    CALL WS-PGM.".to_string());
+            }
+            body.push("    GOBACK.".to_string());
+            cobol_program("DYN", &["01  WS-PGM PIC X(8).".to_string()], &body)
+        };
+        // A CICS LINK call by its paragraph; a program's data use, owned by that program; a
+        // dynamic CALL that resolved through the variable's literal (each one a cached decision).
+        let link_calls = |ex: &Extraction| {
+            ex.refs
+                .iter()
+                .filter(|r| r.kind == EdgeKind::Calls && r.raw_name.starts_with("PGM"))
+                .filter(|r| hint_str(r, ROLE_KEY) == Some(ROLE_PROGRAM))
+                .count()
+        };
+        let owned_uses = |ex: &Extraction| {
+            ex.refs
+                .iter()
+                .filter(|r| r.kind == EdgeKind::References && r.raw_name.starts_with('F'))
+                .filter(|r| hint_list(r, PROGRAMS_KEY) == [format!("PG{}", &r.raw_name[1..])])
+                .count()
+        };
+        let resolved_calls = |ex: &Extraction| {
+            let name = format!("{COBOL_DYNAMIC_CALL_PREFIX}SUBPGM");
+            ex.refs
+                .iter()
+                .filter(|r| r.kind == EdgeKind::Calls && r.raw_name == name)
+                .count()
+        };
+        assert_linear_supplement("a paragraph per CICS LINK", links, link_calls, 400);
+        assert_linear_supplement("many programs", programs, owned_uses, 200);
+        assert_linear_supplement(
+            "dynamic CALLs of one variable",
+            dynamic,
+            resolved_calls,
+            400,
+        );
+    }
+
+    /// [`Holding::at`] finds the ranges a scan in order finds (`start <= byte < end`), for any
+    /// ranges: nested, overlapping, equal, adjacent or empty.
+    #[test]
+    fn holding_matches_a_scan_641() {
+        let mut seed: u64 = 641;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as usize
+        };
+        for round in 0..2_000 {
+            let span = 2 + round % 40;
+            let ranges: Vec<(usize, usize)> = (0..round % 25)
+                .map(|_| {
+                    let start = next() % span;
+                    (start, start + next() % (span / 2 + 1))
+                })
+                .collect();
+            let holding = Holding::of(&ranges);
+            for byte in 0..span + span / 2 + 2 {
+                let want: Vec<usize> = (0..ranges.len())
+                    .filter(|&r| ranges[r].0 <= byte && byte < ranges[r].1)
+                    .collect();
+                assert_eq!(
+                    holding.at(byte),
+                    want,
+                    "round {round}: byte {byte} of {ranges:?}"
+                );
+            }
+        }
     }
 
     fn paragraph_sym(ex: &Extraction, name: &str) -> SymbolId {

@@ -2657,7 +2657,7 @@ struct PendingDef {
 /// stack keeps only costs time. When ranges nest or follow one another, as tree-sitter nodes and
 /// COBOL's paragraph spans do, the stack at a query is the chain of ranges holding its start, so
 /// the sweep costs the sorts plus, per query, the nesting depth at its start.
-fn holders(ranges: &[(usize, usize)], queries: &[(usize, usize)]) -> Vec<Vec<usize>> {
+pub(crate) fn holders(ranges: &[(usize, usize)], queries: &[(usize, usize)]) -> Vec<Vec<usize>> {
     debug_assert!(
         ranges
             .iter()
