@@ -1295,6 +1295,16 @@ impl Prepared {
                 }
             }
         }
+        // Files where estate's own extraction has a namespace or module node: elsewhere a
+        // namespace is no container in estate's ids (estate#591).
+        let estate_namespaces: HashSet<&str> = nodes
+            .iter()
+            .filter(|n| {
+                matches!(n.kind, NodeKind::Namespace | NodeKind::Module)
+                    && n.metadata.get("origin").and_then(|v| v.as_str()) != Some("codegraph")
+            })
+            .map(|n| n.location.file.as_str())
+            .collect();
         // Mint estate-scheme ids for codegraph-only definitions in files extracted this run.
         // Outer definitions first, so a nested one can hang under a minted owner.
         unmatched.sort_by_key(|(d, p)| (p.clone(), d.start_line, std::cmp::Reverse(d.end_line)));
@@ -1350,8 +1360,17 @@ impl Prepared {
                     // a one-line `package`/`namespace x;` declaration, not a block.
                     break;
                 }
-                chain.push(Descriptor::new(p.name.clone(), Suffix::Type));
                 cur = parent.get(pid).copied();
+                if matches!(p.kind.as_str(), "namespace" | "module")
+                    && !estate_namespaces.contains(path.as_str())
+                {
+                    // A block namespace in a file where estate's extraction captures none (C#:
+                    // csharp.scm has no namespace pattern) is not in estate's id chain, so a
+                    // minted id skips it as estate's own ids do. Where estate captures them
+                    // (TS, C++, PHP, VB.NET, Scala) the namespace stays a container.
+                    continue;
+                }
+                chain.push(Descriptor::new(p.name.clone(), Suffix::Type));
             }
             chain.reverse();
             let suffix = match cg_class(&d.kind) {
