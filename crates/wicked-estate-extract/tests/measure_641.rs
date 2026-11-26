@@ -74,22 +74,25 @@ fn time(text: &str) -> (f64, usize, usize) {
     (start.elapsed().as_secs_f64(), ex.nodes.len(), ex.refs.len())
 }
 
+/// (name, generator, base N)
+type Shape = (&'static str, fn(usize) -> String, usize);
+
 #[test]
 fn measure_cics_sql_extract_scaling_641() {
     if std::env::var_os("MEASURE_641").is_none() {
         return;
     }
-    let shapes: [(&str, fn(usize) -> String, usize); 3] = [
-        ("a paragraph per CICS LINK", cics_links, 4_000),
+    let shapes: [Shape; 3] = [
+        ("a paragraph per CICS LINK", cics_links, 16_000),
         (
             "sequential programs, a field and a data use each",
             many_programs,
-            1_000,
+            4_000,
         ),
         (
             "a flat procedure division of PERFORMs",
             flat_performs,
-            4_000,
+            16_000,
         ),
     ];
     for (shape, make, n) in shapes {
