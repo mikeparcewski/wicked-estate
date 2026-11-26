@@ -37,7 +37,7 @@ tree-sitter CLI (0.25.10) before it was fixed.
 | `tree-sitter-cfml/cfml/src/scanner.c` | `74cd1565e362b3d39a10792fdfc20e0689b0587e` | 34 | Sound. A wrapper over `common/scanner.h`; `destroy` frees each tag and both arrays once. Finding A. |
 | `tree-sitter-cfml/cfml/src/tag.c` | `36788ffa85f346445c8d79fb3eedd0cab5202233` | 1 | Sound. One line, `#include "../../common/tag.h"` (reviewed in that row), and not compiled: the build script compiles only `parser.c` and `scanner.c`. |
 | `tree-sitter-cfml/cfscript/src/scanner.c` | `978a8c8ba978f44d557a0cfab62ea20b6aad3784` | 404 | Finding 1, fixed here as `WICKED PATCH 1`. The rest is sound: stateless, and every other loop stops at 0, at `eof()` or after a fixed count. |
-| `tree-sitter-cfml/common/scanner.h` | `38519e8ad837977ada33aba91c8189d59a085860` | 1628 | Finding 2 (#631). Findings 4 and 5, fixed as `WICKED PATCH 2` and `3` (#636). Findings A and B. Serialization writes are guarded against the buffer size. Fixed buffers (`end_delimiter[256]`, `word[16]`) are bounded by length checks. Every content scan advances on each pass and stops at 0. |
+| `tree-sitter-cfml/common/scanner.h` | `a2036105334697ba6a68263c48ecbe7f809b8480` | 1638 | Finding 2, fixed as `WICKED PATCH 4` (#631). Findings 4 and 5, fixed as `WICKED PATCH 2` and `3` (#636). Findings A and B. Serialization writes are guarded against the buffer size. Fixed buffers (`end_delimiter[256]`, `word[16]`) are bounded by length checks. Every content scan advances on each pass and stops at 0. |
 | `tree-sitter-cfml/common/tag.h` | `d441dc4fc5f21b35db1d279be38e2e19ec8b6ab7` | 416 | Sound. Fixed tables (the 126-entry tag map holds 126 entries; the void-tag list ends in NULL). `tag_free` frees the name of exactly the tag types that own one. |
 | `tree-sitter-cobol-scanner/cobol_language.c` | `aef9c1c228aaa02de50ea812fbfe044c720b6ebb` | 33 | Sound. It copies the crate's language once and refuses anything but ABI 15 with 7 external tokens. |
 | `tree-sitter-cobol-scanner/scanner.c` | `9de18c6c38300c16ed9599ec73a234f2aad39245` | 426 | Finding 3, fixed as `WICKED PATCH 5` (#634). Finding 6, fixed as `WICKED PATCH 6` (#636). Finding A. Patches 1-4 keep error recovery linear. Apart from the loop in finding 3, every loop stops at 0, or at a column bound together with a character test that fails at 0. |
@@ -50,9 +50,12 @@ tree-sitter CLI (0.25.10) before it was fixed.
    `queryExecute("` string never finished parsing. Fixed by `WICKED PATCH 1`, with a test in
    `legacy_family_realworld.rs`. The fuzz smoke now cuts every token off inside a string it
    opens.
-2. **`scan_comment` is quadratic on unterminated nested `<!--`.** Each scan reads to the end of
-   the file and fails, and the parser retries it at the next `<!`. Filed as #631. The fuzz smoke
-   lists the shape as known slow until then.
+2. **`scan_comment` is quadratic on unterminated nested `<!--`.** Each scan read to the end of
+   the file and failed, and the parser retried it at the next `<!`. Fixed by `WICKED PATCH 4`
+   (#631): a comment still open at the end of the input is a comment, ending at its last `-->`
+   (or at the end of the input when nothing closed): no later scan starts inside it, and the text
+   after its last `-->` holds no `-->`, so the first opener there runs to the end once. Tests
+   in `legacy_family_realworld.rs`; the fuzz smoke no longer lists the shape as known slow.
 3. **COBOL's sequence-area loop never returned at the end of the input** (hang). It advanced
    until column 6 with no end-of-input check. Fixed by `WICKED PATCH 5` (#634). The extractor's
    `cobol_scanner_fuzz_smoke` test now cuts files off in every column of the sequence area.
