@@ -169,12 +169,6 @@ fn estate_readers_answer_on_the_recorded_codegraph_store() {
     assert_eq!(content["found"], json!(true), "{content}");
     assert_eq!(content["symbol"], json!(POINT), "{content}");
     assert_eq!(content["name"], json!("Point"), "{content}");
-    let content: Value = serde_json::from_str(&tool(
-        &store,
-        "FetchContent",
-        json!({ "symbol": POINT, "include_source": true }),
-    ))
-    .unwrap();
     assert_eq!(
         content["source"],
         json!("record Point(int a) { int g() { return a; } }"),
