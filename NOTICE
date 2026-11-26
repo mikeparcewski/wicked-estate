@@ -44,9 +44,10 @@ ColdFusion CFML (tag + cfscript) tree-sitter grammar
              its grammar sources (grammar.js, src/grammar.json, the scanners,
              common/) and LICENSE are byte-identical to upstream commit
              6b4a43943c191950ee2c77f7b94cec5e903318a4 (tag v0.26.20), except
-             two local patches in common/scanner.h, marked WICKED PATCH 2
-             and 3: deserialize reads within its buffer, and four start
-             tags free their names.
+             three local patches, each marked WICKED PATCH: 1 in
+             cfscript/src/scanner.c (the query-text scan also stops at the
+             end of the input); 2 and 3 in common/scanner.h (deserialize
+             reads within its buffer; four start tags free their names).
              parser.c, node-types.json and the tree_sitter/ headers are
              generated from grammar.json by the pinned tree-sitter CLI.
              Cargo.toml, README.md, tree-sitter.json and bindings/rust/ are

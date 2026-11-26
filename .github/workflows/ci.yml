@@ -44,6 +44,19 @@ jobs:
       # from its grammar.json (in-house trees: from our grammar.js first). Upstream grammar.js never runs.
       - name: vendored parsers regenerate byte-identical (tree-sitter-cli pinned)
         run: python3 scripts/regen-vendored-parsers.py && git diff --exit-code -- crates/wicked-estate-extract/vendor
+      # #322 step 5: a deterministic fuzz smoke over every vendored parser and its scanner, through the
+      # same pinned CLI. A crash or a parse past the timeout fails; known slow shapes name their issue.
+      # Decision B: it runs on pushes to main and on PRs that change vendor/ or the smoke itself.
+      - name: vendored parsers fuzz smoke (crash or timeout fails)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$BASE" ] && git fetch -q --no-tags --depth=1 origin "$BASE" \
+            && git diff --quiet "$BASE" HEAD -- crates/wicked-estate-extract/vendor scripts/fuzz-smoke-vendored-parsers.py scripts/regen-vendored-parsers.py; then
+            echo "fuzz smoke skipped: this PR changes nothing under vendor/ and not the smoke"
+          else
+            python3 scripts/fuzz-smoke-vendored-parsers.py --inputs 300
+          fi
       # estate#310: the pinned APEXlang corpus (Oracle, UPL-1.0) is fetched, not vendored; every
       # file is checked against oracle/apexlang/corpus.tsv. The extract + index tests below parse and
       # resolve all of it (APEXLANG_CORPUS_REQUIRED turns a missing corpus into a failure).

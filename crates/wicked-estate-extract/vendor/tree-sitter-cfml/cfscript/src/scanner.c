@@ -347,7 +347,9 @@ static bool scan_query_text(TSLexer *lexer) {
     bool saw_text = false;
     bool at_newline = false;
 
-    while (lexer->lookahead != '"') {
+    // WICKED PATCH 1 (wicked-estate #322): stop at the end of the input. Upstream waited for the
+    // closing quote, so a file that ends inside a query string never returned.
+    while (lexer->lookahead != '"' && !lexer->eof(lexer)) {
         bool is_wspace = iswspace(lexer->lookahead);
         if (lexer->lookahead == '\n') {
             at_newline = true;

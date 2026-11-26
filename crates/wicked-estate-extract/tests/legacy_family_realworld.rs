@@ -211,3 +211,28 @@ fn cfscript_component_realistic() {
         "helper call missing; got {c:?}"
     );
 }
+
+/// A .cfs file that ends inside a `queryExecute("` string. The cfscript scanner read query text
+/// until the closing `"` with no end-of-input check, so the parse never returned (#322's scanner
+/// review). The parse runs on its own thread, so a regression fails this test after the bound
+/// instead of hanging the run; the spinning thread ends with the test process.
+#[test]
+fn cfscript_file_ending_inside_a_query_string_extracts() {
+    let text = "component {\n    function load() {\n        return queryExecute(\"SELECT id FROM t";
+    let (done, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // The unterminated string leaves the whole file one parse error, so no symbol is
+        // expected: the extraction only has to return.
+        let ex = extract("cfscript", "Load.cfs", text);
+        let _ = done.send(ex.nodes.len());
+    });
+    match result.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(_) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the extraction did not return within 30 s")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the extraction panicked")
+        }
+    }
+}
