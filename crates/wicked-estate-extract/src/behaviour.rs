@@ -670,6 +670,29 @@ pub(crate) fn cobol_tick(steps: usize) {
     let _ = steps;
 }
 
+/// The COBOL work `f` counts (tests only): the counter is zeroed first, so only `f`'s steps are in
+/// the answer. The CICS/SQL links supplement's guard reads its passes with it (#641).
+#[cfg(test)]
+pub(crate) fn cobol_counted<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    COBOL_WORK.with(|w| w.set(0));
+    let out = f();
+    (out, COBOL_WORK.with(std::cell::Cell::get))
+}
+
+/// Run `f` without the #582 oracle in `classify_in` (tests only; it is quadratic), for a
+/// counted-work test that extracts a large file. The oracle is back on after, panics included.
+#[cfg(test)]
+pub(crate) fn without_cobol_oracle<T>(f: impl FnOnce() -> T) -> T {
+    struct OracleOff(bool);
+    impl Drop for OracleOff {
+        fn drop(&mut self) {
+            COBOL_ORACLE_OFF.with(|o| o.set(self.0));
+        }
+    }
+    let _off = OracleOff(COBOL_ORACLE_OFF.with(|o| o.replace(true)));
+    f()
+}
+
 /// No node: the root's parent, a last child's next sibling.
 const NO_NODE: u32 = u32::MAX;
 

@@ -1404,6 +1404,7 @@ impl Anchors {
     /// The innermost program whose span holds `byte`; none outside every program (the construct
     /// then starts from the copybook or File node).
     fn prog(&self, byte: usize) -> Prog {
+        crate::behaviour::cobol_tick(self.modules.len());
         self.modules
             .iter()
             .enumerate()
@@ -1415,6 +1416,7 @@ impl Anchors {
     /// The source of a call or data use at `byte`: the innermost paragraph or section holding it
     /// (the tree-sitter extractor's rule for PERFORM, CALL and data names), else [`Self::at`]'s.
     fn unit(&self, byte: usize) -> SymbolId {
+        crate::behaviour::cobol_tick(self.units.len());
         self.units
             .iter()
             .filter(|(_, s, e)| *s <= byte && byte < *e)
@@ -1424,6 +1426,7 @@ impl Anchors {
 
     /// The PROGRAM-IDs of the programs that hold `byte`, innermost first.
     fn chain(&self, byte: usize) -> Vec<String> {
+        crate::behaviour::cobol_tick(self.modules.len());
         let mut held: Vec<_> = self
             .modules
             .iter()
@@ -1489,6 +1492,7 @@ impl Literals {
                 continue;
             }
             let mut own: Vec<u8> = code.as_bytes()[s..e].to_vec();
+            crate::behaviour::cobol_tick(anchors.modules.len());
             for (j, (_, _, ns, ne)) in anchors.modules.iter().enumerate() {
                 let (ns, ne) = (*ns, (*ne).min(len));
                 if j != i && ns >= s && ne <= e && (ns, ne) != (s, e) {
@@ -1768,6 +1772,10 @@ impl Pass<'_> {
     fn decide(&mut self, prog: Prog, var: &str) -> Decision {
         let key = (prog, var.to_ascii_uppercase());
         if let Some(d) = self.decisions.get(&key) {
+            crate::behaviour::cobol_tick(match d {
+                Decision::Resolved { value, evidence } => value.len() + evidence.len(),
+                Decision::Unresolved { reason } => reason.len(),
+            });
             return d.clone();
         }
         let d = self
@@ -2244,6 +2252,7 @@ impl Pass<'_> {
                     }
                 }
             }
+            crate::behaviour::cobol_tick(self.anchors.modules.len());
             let holders: Vec<&SymbolId> = match self
                 .anchors
                 .modules
@@ -2510,6 +2519,97 @@ mod tests {
             .expect("parse");
         supplement(&sf, &mut ex);
         ex
+    }
+
+    // ── wicked-estate#641: the supplement's work is linear in the file ─────────────────────
+
+    /// The supplement's counted work on `text` (the tree-sitter extract it reads is not counted).
+    fn supplement_work(text: &str) -> usize {
+        let sf = SourceFile {
+            path: "cbl/WORK.cbl".to_string(),
+            language: Language::new("cobol"),
+            text: text.to_string(),
+        };
+        let mut ex = crate::behaviour::without_cobol_oracle(|| {
+            crate::treesitter::TreeSitterExtractor::for_language("cobol")
+                .expect("cobol grammar")
+                .extract(&sf)
+                .expect("parse")
+        });
+        crate::behaviour::cobol_counted(|| supplement(&sf, &mut ex)).1
+    }
+
+    /// Work at `n` and `4n` copies of a shape: linear work at most quadruples, and the bound is
+    /// 4.4x as for the classifier's guard (`cobol_classifier_work_is_linear_in_the_file_582`). A
+    /// lookup that scans every paragraph, section or program grows sixteenfold.
+    fn assert_linear_supplement(shape: &str, make: impl Fn(usize) -> String, n: usize) {
+        let (small, big) = (supplement_work(&make(n)), supplement_work(&make(4 * n)));
+        eprintln!("{shape}: work {small} at {n}, {big} at {}", 4 * n);
+        assert!(small > 0, "{shape}: the shape counts no supplement work");
+        assert!(
+            big * 10 <= small * 44,
+            "{shape}: work {small} at {n} grew to {big} at {} ({:.2}x)",
+            4 * n,
+            big as f64 / small as f64
+        );
+    }
+
+    fn cobol_program(id: &str, data: &[String], body: &[String]) -> String {
+        let mut out = vec![
+            "       IDENTIFICATION DIVISION.".to_string(),
+            format!("       PROGRAM-ID. {id}."),
+            "       DATA DIVISION.".to_string(),
+            "       WORKING-STORAGE SECTION.".to_string(),
+        ];
+        out.extend(data.iter().map(|l| format!("       {l}")));
+        out.push("       PROCEDURE DIVISION.".to_string());
+        out.extend(body.iter().map(|l| format!("       {l}")));
+        out.join("\n") + "\n"
+    }
+
+    /// The shapes #641 measured: a paragraph per CICS LINK (each site's paragraph was found by a
+    /// scan of every paragraph and section) and many programs in one file (each site's program by
+    /// a scan of every program, and each program's literals by a scan of every other program).
+    /// Plus many dynamic CALLs of one variable, whose cached decision was cloned per call.
+    #[test]
+    fn cics_sql_supplement_work_is_linear_in_the_file_641() {
+        let links = |n: usize| -> String {
+            let mut body = Vec::new();
+            for i in 0..n {
+                body.push(format!("P{i}."));
+                body.push(format!("    EXEC CICS LINK PROGRAM('PGM{i}') END-EXEC."));
+            }
+            body.push("    GOBACK.".to_string());
+            cobol_program("LINKS", &["01  WS-A PIC X(10).".to_string()], &body)
+        };
+        let programs = |n: usize| -> String {
+            (0..n)
+                .map(|i| {
+                    cobol_program(
+                        &format!("PG{i}"),
+                        &[format!("01  F{i} PIC X(10).")],
+                        &[
+                            "MAIN-PARA.".to_string(),
+                            format!("    MOVE 'A' TO F{i}."),
+                            "    GOBACK.".to_string(),
+                        ],
+                    ) + &format!("       END PROGRAM PG{i}.\n")
+                })
+                .collect()
+        };
+        let dynamic = |n: usize| -> String {
+            let mut body = Vec::new();
+            for i in 0..n {
+                body.push(format!("P{i}."));
+                body.push("    MOVE 'SUBPGM' TO WS-PGM".to_string());
+                body.push("    CALL WS-PGM.".to_string());
+            }
+            body.push("    GOBACK.".to_string());
+            cobol_program("DYN", &["01  WS-PGM PIC X(8).".to_string()], &body)
+        };
+        assert_linear_supplement("a paragraph per CICS LINK", links, 400);
+        assert_linear_supplement("many programs", programs, 200);
+        assert_linear_supplement("dynamic CALLs of one variable", dynamic, 400);
     }
 
     fn paragraph_sym(ex: &Extraction, name: &str) -> SymbolId {
