@@ -2112,8 +2112,8 @@ mod tests {
             assert_eq!(
                 twins,
                 vec![
-                    ("ts-java . . . src/p/Shapes/Shapes#h(+1).".to_string(), 20),
                     ("ts-java . . . src/p/Shapes/Shapes#h().".to_string(), 2),
+                    ("ts-java . . . src/p/Shapes/Shapes#h(+1).".to_string(), 20),
                 ],
                 "run {run}: the first in source keeps the bare id"
             );
