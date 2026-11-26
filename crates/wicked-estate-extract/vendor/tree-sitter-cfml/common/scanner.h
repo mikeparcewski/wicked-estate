@@ -223,6 +223,13 @@ static unsigned serialize(Scanner *scanner, char *buffer, bool is_cfquery_contex
 } while(0)
 
 static void deserialize(Scanner *scanner, const char *buffer, unsigned length, bool is_cfquery_context) {
+    // WICKED PATCH 2 (wicked-estate#636): serialize skips the CF stack's header when the HTML stack
+    // fills the buffer, but DESERIALIZE_TAGS reads it anyway. Read from a zero-padded copy, so a
+    // missing header reads as an empty stack instead of past the end of `buffer`.
+    char padded[TREE_SITTER_SERIALIZATION_BUFFER_SIZE + 8] = {0};
+    if (length > TREE_SITTER_SERIALIZATION_BUFFER_SIZE) length = TREE_SITTER_SERIALIZATION_BUFFER_SIZE;
+    if (length > 0) memcpy(padded, buffer, length);
+    buffer = padded;
     scanner->cfoutput_depth = 0;
     scanner->cfcomponent_depth = 0;
     scanner->cffunction_depth = 0;
@@ -296,6 +303,7 @@ static bool scan_comment(TSLexer *lexer, bool is_cfquery_context) {
     unsigned dashes = 0;
     unsigned direction = -1;
     unsigned nesting = 1;
+    bool closed = false; // WICKED PATCH 4 (wicked-estate#631): set at each `-->`; see the end.
 
     while (lexer->lookahead) {
         switch (lexer->lookahead) {
@@ -310,6 +318,7 @@ static bool scan_comment(TSLexer *lexer, bool is_cfquery_context) {
             case '>':
                 if (dashes >= 2) {
                     --nesting;
+                    closed = true; // WICKED PATCH 4
                     lexer->result_symbol = CFML_COMMENT;
                     advance(lexer);
                     lexer->mark_end(lexer);
@@ -342,7 +351,15 @@ static bool scan_comment(TSLexer *lexer, bool is_cfquery_context) {
         }
         advance(lexer);
     }
-    return false;
+    // WICKED PATCH 4 (wicked-estate#631): a comment still open at the end of the input is a
+    // comment, not a failed scan. Upstream returned false here, and error recovery retried the
+    // scan at every later `<!`, each one reading to the end again: quadratic. It ends at its last
+    // `-->` (marked above), or at the end of the input when nothing closed.
+    if (!closed) {
+        lexer->mark_end(lexer);
+    }
+    lexer->result_symbol = CFML_COMMENT;
+    return true;
 }
 
 static WhitespaceResult scan_whitespace_and_comments(TSLexer *lexer, bool *scanned_comment, bool consume, bool is_cfquery_context) {
@@ -1029,20 +1046,25 @@ static bool scan_start_tag_name(Scanner *scanner, TSLexer *lexer, bool is_cf_con
             }
             tag_free(&tag);
             return true;
+        // WICKED PATCH 3 (wicked-estate#636): these four tags are not pushed, so free their names.
         case CF_SET:
             lexer->result_symbol = CF_SET_START_TAG_NAME;
+            tag_free(&tag);
             return true;
         case CF_RETURN:
             lexer->result_symbol = CF_RETURN_START_TAG_NAME;
+            tag_free(&tag);
             return true;
         case CF_IF:
             lexer->result_symbol = CF_IF_START_TAG_NAME;
             break;
         case CF_ELSEIF:
             lexer->result_symbol = CF_ELSEIF_TAG_NAME;
+            tag_free(&tag);
             return true;
         case CF_ELSE:
             lexer->result_symbol = CF_ELSE_TAG_NAME;
+            tag_free(&tag);
             return true;
         case CF_XML:
             lexer->result_symbol = CF_XML_START_TAG_NAME;

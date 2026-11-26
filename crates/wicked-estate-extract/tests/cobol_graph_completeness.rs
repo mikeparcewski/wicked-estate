@@ -1727,6 +1727,50 @@ fn assert_extracts_within(name: &str, text: &str, bound: std::time::Duration) {
 }
 
 #[test]
+fn a_file_that_ends_inside_the_sequence_area_extracts() {
+    // The scanner's sequence-area loop (columns 1-6) advanced until column 6 with no end-of-input
+    // check: at the end of the file the column stops moving, so the parse never returned
+    // (wicked-estate#634). The parse runs on its own thread, so a regression fails this test
+    // after the bound instead of hanging the run; the spinning thread ends with the test process.
+    let base = program("SEQEND", DATA, &["MAIN-PARA.", "    CALL 'SUB01'."]);
+    let shapes = [
+        (
+            "a last line shorter than the sequence area",
+            format!("{base}AB"),
+        ),
+        ("the same line ending in a newline", format!("{base}AB\n")),
+        (
+            "a DOS end-of-file byte after the last line",
+            format!("{base}\u{1a}"),
+        ),
+    ];
+    let pending: Vec<_> = shapes
+        .into_iter()
+        .map(|(shape, text)| {
+            let (done, result) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let ex = extract("SEQEND", &text);
+                let _ = done.send(function_names(&ex).contains(&"MAIN-PARA"));
+            });
+            (shape, result)
+        })
+        .collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    for (shape, result) in pending {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match result.recv_timeout(left) {
+            Ok(found) => assert!(found, "{shape}: MAIN-PARA has no node"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{shape}: the extraction did not return within 30 s")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("{shape}: the extraction panicked")
+            }
+        }
+    }
+}
+
+#[test]
 fn a_rust_source_saved_as_cbl_does_not_walk_error_children_quadratically() {
     // Error recovery gives one ERROR node a child per token in text the grammar rejects; walking a
     // node's children by index (`Node::child(i)` is O(i)) was quadratic: about a minute for these
@@ -2433,4 +2477,125 @@ fn a_use_for_debugging_handler_is_run_by_the_program_conditionally() {
     let ex = extract("DBGPGM", &text);
     assert_eq!(calls_from(&ex, "DBGPGM"), ["DBG", "MAIN-SECTION"]);
     assert_eq!(flow_tags(&ex, "DBGPGM", "DBG"), (false, true));
+}
+
+// ── ALTER and EXIT SECTION (#622) ─────────────────────────────────────────────────────────────
+
+/// The units the program `id` reaches through local `Calls` edges (where it starts, then every
+/// flow edge from there), and whether a reached unit calls `program`.
+fn reaches_call(ex: &Extraction, id: &str, program: &str) -> bool {
+    let mut seen = vec![node(ex, id).symbol.clone()];
+    let mut i = 0;
+    while i < seen.len() {
+        for e in &ex.local_edges {
+            if e.kind == EdgeKind::Calls && e.source == seen[i] && !seen.contains(&e.target) {
+                seen.push(e.target.clone());
+            }
+        }
+        i += 1;
+    }
+    ex.refs
+        .iter()
+        .any(|r| r.kind == EdgeKind::Calls && r.raw_name == program && seen.contains(&r.from))
+}
+
+#[test]
+fn an_altered_go_to_reaches_its_proceed_to_target_conditionally_622() {
+    // ALT-PARA is reached only through the ALTER: MAIN-PARA ends at its GO TO, SWITCH-PARA's
+    // `GO TO.` has no target of its own and falls into END-PARA, which ends at GOBACK.
+    let ex = extract(
+        "ALTERPGM",
+        &program(
+            "ALTERPGM",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    ALTER SWITCH-PARA TO PROCEED TO ALT-PARA.",
+                "    GO TO SWITCH-PARA.",
+                "SWITCH-PARA.",
+                "    GO TO.",
+                "END-PARA.",
+                "    GOBACK.",
+                "ALT-PARA.",
+                "    CALL 'ALTPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(callers_of(&ex, "ALT-PARA"), ["SWITCH-PARA"]);
+    // The alteration happens at run time: the edge is conditional, not a fall-through.
+    assert_eq!(flow_tags(&ex, "SWITCH-PARA", "ALT-PARA"), (false, true));
+    assert_eq!(callers_of(&ex, "ALTPGM"), ["ALT-PARA"]);
+    assert!(
+        reaches_call(&ex, "ALTERPGM", "ALTPGM"),
+        "ALT-PARA's CALL is not in the program's lineage"
+    );
+}
+
+#[test]
+fn exit_section_falls_into_the_next_section_622() {
+    // LATER-SECTION is reached only through FIRST-PARA's EXIT SECTION: SECOND-PARA, the last
+    // paragraph of MAIN-SECTION, ends at GOBACK.
+    let ex = extract(
+        "EXITPGM",
+        &program(
+            "EXITPGM",
+            DATA,
+            &[
+                "MAIN-SECTION SECTION.",
+                "FIRST-PARA.",
+                "    IF WS-FLAG = 'Y'",
+                "        EXIT SECTION",
+                "    END-IF.",
+                "    DISPLAY 'A'.",
+                "SECOND-PARA.",
+                "    GOBACK.",
+                "LATER-SECTION SECTION.",
+                "LATER-PARA.",
+                "    CALL 'LATERPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(callers_of(&ex, "LATER-SECTION"), ["FIRST-PARA"]);
+    // The EXIT SECTION is conditional, so FIRST-PARA still falls into SECOND-PARA.
+    assert_eq!(callers_of(&ex, "SECOND-PARA"), ["FIRST-PARA"]);
+    assert_eq!(flow_tags(&ex, "FIRST-PARA", "LATER-SECTION"), (true, false));
+    assert!(
+        reaches_call(&ex, "EXITPGM", "LATERPGM"),
+        "LATER-PARA's CALL is not in the program's lineage"
+    );
+}
+
+#[test]
+fn exit_section_from_an_integer_named_paragraph_falls_into_the_next_section_622() {
+    // 1000 has no node, so MAIN-SECTION, which falls into it, lands where 1000 goes: SECOND-PARA
+    // by falling through and LATER-SECTION by its EXIT SECTION.
+    let ex = extract(
+        "NUMEXIT",
+        &program(
+            "NUMEXIT",
+            DATA,
+            &[
+                "MAIN-SECTION SECTION.",
+                "1000.",
+                "    IF WS-FLAG = 'Y'",
+                "        EXIT SECTION",
+                "    END-IF.",
+                "    DISPLAY 'A'.",
+                "SECOND-PARA.",
+                "    GOBACK.",
+                "LATER-SECTION SECTION.",
+                "LATER-PARA.",
+                "    CALL 'LATERPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(callers_of(&ex, "LATER-SECTION"), ["MAIN-SECTION"]);
+    assert_eq!(
+        flow_tags(&ex, "MAIN-SECTION", "LATER-SECTION"),
+        (true, false)
+    );
+    assert!(
+        reaches_call(&ex, "NUMEXIT", "LATERPGM"),
+        "LATER-PARA's CALL is not in the program's lineage"
+    );
 }

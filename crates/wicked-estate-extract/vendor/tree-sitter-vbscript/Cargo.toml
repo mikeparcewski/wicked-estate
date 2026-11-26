@@ -1,13 +1,13 @@
 [package]
 name = "wicked-estate-tree-sitter-vbscript"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
-license = "MIT"
+license = "MIT AND ISC"
 repository = "https://github.com/mikeparcewski/wicked-estate"
 description = "VBScript grammar for tree-sitter — vendored from JJK96/tree-sitter-vbscript"
 readme = "README.md"
 build = "bindings/rust/build.rs"
-include = ["README.md", "bindings/rust/*.rs", "src/**/*"]
+include = ["LICENSE", "README.md", "bindings/rust/*.rs", "src/**/*", "tree-sitter.json"]
 
 [lib]
 path = "bindings/rust/lib.rs"

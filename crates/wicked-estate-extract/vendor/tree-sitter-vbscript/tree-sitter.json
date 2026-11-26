@@ -1,0 +1,18 @@
+{
+  "grammars": [
+    {
+      "name": "vbscript",
+      "camelcase": "Vbscript",
+      "scope": "source.vbscript",
+      "path": "."
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT AND ISC",
+    "description": "VBScript grammar for tree-sitter, vendored from upstream (regeneration config, wicked-estate)",
+    "links": {
+      "repository": "https://github.com/JJK96/tree-sitter-vbscript"
+    }
+  }
+}

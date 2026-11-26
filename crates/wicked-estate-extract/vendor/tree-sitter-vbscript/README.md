@@ -19,4 +19,5 @@ let tree = parser.parse(source, None).unwrap();
 ```
 
 Part of [wicked-estate](https://github.com/mikeparcewski/wicked-estate) — a code + infrastructure
-estate graph for LLM agents. MIT licensed.
+estate graph for LLM agents. This grammar is used under MIT and ISC, as its upstream declares both;
+see LICENSE.

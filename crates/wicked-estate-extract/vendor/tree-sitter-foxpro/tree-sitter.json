@@ -1,0 +1,21 @@
+{
+  "grammars": [
+    {
+      "name": "foxpro",
+      "camelcase": "Foxpro",
+      "scope": "source.foxpro",
+      "path": ".",
+      "file-types": [
+        "prg"
+      ]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Visual FoxPro symbols+calls grammar for tree-sitter (wicked-estate)",
+    "links": {
+      "repository": "https://github.com/mikeparcewski/wicked-estate"
+    }
+  }
+}

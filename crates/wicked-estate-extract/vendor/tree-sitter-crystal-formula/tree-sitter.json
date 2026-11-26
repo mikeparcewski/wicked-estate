@@ -1,0 +1,21 @@
+{
+  "grammars": [
+    {
+      "name": "crystal_formula",
+      "camelcase": "CrystalFormula",
+      "scope": "source.crystal-formula",
+      "path": ".",
+      "file-types": [
+        "crf"
+      ]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Crystal Reports formula language symbols+calls grammar for tree-sitter (wicked-estate)",
+    "links": {
+      "repository": "https://github.com/mikeparcewski/wicked-estate"
+    }
+  }
+}
