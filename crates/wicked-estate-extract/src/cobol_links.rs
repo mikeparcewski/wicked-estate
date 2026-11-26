@@ -2574,8 +2574,9 @@ mod tests {
 
     // ── wicked-estate#641: the supplement's work is linear in the file ─────────────────────
 
-    /// The supplement's counted work on `text` (the tree-sitter extract it reads is not counted).
-    fn supplement_work(text: &str) -> usize {
+    /// The supplement's counted work on `text` (the tree-sitter extract it reads is not counted),
+    /// and the extraction it gives.
+    fn supplement_work(text: &str) -> (usize, Extraction) {
         let sf = SourceFile {
             path: "cbl/WORK.cbl".to_string(),
             language: Language::new("cobol"),
@@ -2587,15 +2588,28 @@ mod tests {
                 .extract(&sf)
                 .expect("parse")
         });
-        crate::behaviour::cobol_counted(|| supplement(&sf, &mut ex)).1
+        let ((), work) = crate::behaviour::cobol_counted(|| supplement(&sf, &mut ex));
+        (work, ex)
     }
 
     /// Work at `n` and `4n` copies of a shape: linear work at most quadruples, and the bound is
     /// 4.4x as for the classifier's guard (`cobol_classifier_work_is_linear_in_the_file_582`). A
-    /// lookup that scans every paragraph, section or program grows sixteenfold.
-    fn assert_linear_supplement(shape: &str, make: impl Fn(usize) -> String, n: usize) {
-        let (small, big) = (supplement_work(&make(n)), supplement_work(&make(4 * n)));
+    /// lookup that scans every paragraph, section or program grows sixteenfold. `sites` counts
+    /// what the shape is there to exercise in an extraction: it must be `n` and `4n`.
+    fn assert_linear_supplement(
+        shape: &str,
+        make: impl Fn(usize) -> String,
+        sites: impl Fn(&Extraction) -> usize,
+        n: usize,
+    ) {
+        let (small, small_ex) = supplement_work(&make(n));
+        let (big, big_ex) = supplement_work(&make(4 * n));
         eprintln!("{shape}: work {small} at {n}, {big} at {}", 4 * n);
+        assert_eq!(
+            (sites(&small_ex), sites(&big_ex)),
+            (n, 4 * n),
+            "{shape}: every site is extracted"
+        );
         assert!(small > 0, "{shape}: the shape counts no supplement work");
         assert!(
             big * 10 <= small * 44,
@@ -2658,9 +2672,37 @@ mod tests {
             body.push("    GOBACK.".to_string());
             cobol_program("DYN", &["01  WS-PGM PIC X(8).".to_string()], &body)
         };
-        assert_linear_supplement("a paragraph per CICS LINK", links, 400);
-        assert_linear_supplement("many programs", programs, 200);
-        assert_linear_supplement("dynamic CALLs of one variable", dynamic, 400);
+        // A CICS LINK call by its paragraph; a program's data use, owned by that program; a
+        // dynamic CALL that resolved through the variable's literal (each one a cached decision).
+        let link_calls = |ex: &Extraction| {
+            ex.refs
+                .iter()
+                .filter(|r| r.kind == EdgeKind::Calls && r.raw_name.starts_with("PGM"))
+                .filter(|r| hint_str(r, ROLE_KEY) == Some(ROLE_PROGRAM))
+                .count()
+        };
+        let owned_uses = |ex: &Extraction| {
+            ex.refs
+                .iter()
+                .filter(|r| r.kind == EdgeKind::References && r.raw_name.starts_with('F'))
+                .filter(|r| hint_list(r, PROGRAMS_KEY) == [format!("PG{}", &r.raw_name[1..])])
+                .count()
+        };
+        let resolved_calls = |ex: &Extraction| {
+            let name = format!("{COBOL_DYNAMIC_CALL_PREFIX}SUBPGM");
+            ex.refs
+                .iter()
+                .filter(|r| r.kind == EdgeKind::Calls && r.raw_name == name)
+                .count()
+        };
+        assert_linear_supplement("a paragraph per CICS LINK", links, link_calls, 400);
+        assert_linear_supplement("many programs", programs, owned_uses, 200);
+        assert_linear_supplement(
+            "dynamic CALLs of one variable",
+            dynamic,
+            resolved_calls,
+            400,
+        );
     }
 
     /// [`Holding::at`] finds the ranges a scan in order finds (`start <= byte < end`), for any
