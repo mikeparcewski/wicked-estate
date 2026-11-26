@@ -3363,7 +3363,6 @@ fn index_path_inner(
         }
         // Identical source cannot introduce another name; pass two never schedules a third.
     }
-    drop(seen_probes);
     // Release the pre-run population before materializing the resolution index.
     drop(pre_run_symbols);
     drop(old_candidates);
@@ -3531,6 +3530,7 @@ fn index_path_inner(
             index.insert(n.clone());
         }
     }
+    drop(seen_probes);
     let codegraph_pair = codegraph_state.as_ref().zip(codegraph_ids.as_ref());
     let resolution = {
         let reader: &dyn GraphRead = &*store;

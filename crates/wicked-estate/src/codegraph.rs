@@ -1913,7 +1913,7 @@ impl Prepared {
         }
         // Codegraph's unresolved rows at sites no estate ref covered.
         let mut order: Vec<&CgUnresolved> = self.snap.unresolved.iter().collect();
-        order.sort_by_key(|u| u.file.as_str());
+        order.sort_by(|a, b| a.file.cmp(&b.file));
         for u in order {
             let path = format!("{}{}", self.prefix, u.file);
             if !extracted.contains(&path) || ids.ambiguous.contains_key(&path) {
