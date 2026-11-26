@@ -7,8 +7,8 @@
 //!    from, `redact_source`), runs codegraph on the mirror, reads its database and decides a
 //!    per-file [`Verdict`]. Unchanged files whose codegraph rows changed are returned so the
 //!    caller re-extracts them: estate is the one sync owner.
-//! 2. At resolution, [`Prepared::partition`] routes the refs of files with an `Ok` verdict and a
-//!    codegraph-owned kind to [`Prepared::resolve`] instead of estate's name resolvers.
+//! 2. At resolution, the refs of files with an `Ok` verdict and a codegraph-owned kind
+//!    ([`Prepared::owns`]) go to [`Prepared::resolve`] instead of estate's name resolvers.
 //!    A ref binds the codegraph edge at the same site; codegraph-only edges are added; codegraph
 //!    definitions estate lacks get estate-scheme ids.
 //! 3. The caller stores [`Prepared::fingerprints_json`] under [`FINGERPRINTS_META`] after the
@@ -16,8 +16,9 @@
 //!    estate's own resolvers rebuild their edges, and clears the key.
 //!
 //! Every file codegraph could not fully handle keeps estate's own pipeline and says so on stderr
-//! (`CODEGRAPH-SKIPPED: <path> <reason>`); a failed run keeps estate's pipeline for all files
-//! (`CODEGRAPH-FALLBACK: <reason>`).
+//! (`CODEGRAPH-SKIPPED: <path> <reason>`). A failed first run keeps estate's pipeline for all
+//! files (`CODEGRAPH-FALLBACK: <reason>`); once the store holds codegraph's facts, a failed run
+//! stops the index (`CODEGRAPH-FAILED: <reason>`) and the last good graph stays.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
@@ -852,6 +853,55 @@ fn state_dir_outside_sources(state_dir: &Path, root: &Path) -> std::result::Resu
     }
 }
 
+/// Refuse a symlink on the state dir's path below the indexed root. The default state dir is
+/// `<root>/.wicked-estate/graph.db.codegraph`, so a checkout can carry a link there (a linked
+/// `.wicked-estate`), and every state write would follow it out of the state dir.
+fn no_symlink_on_state_path(state_dir: &Path, root: &Path) -> std::result::Result<(), String> {
+    let root = std::path::absolute(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let Ok(rel) = state_dir.strip_prefix(&root) else {
+        return Ok(());
+    };
+    let mut path = root.clone();
+    for c in rel.components() {
+        path.push(c);
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!(
+                "the codegraph state dir's path holds a symlink at {}; refusing to write through it",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a symlink anywhere inside the state dir. estate writes only regular files and
+/// directories there (and codegraph's own runs leave none), so a link was planted, for example a
+/// tracked `tree/src` that would take the mirror's writes into the repo's own sources.
+fn no_symlink_in_state_dir(state_dir: &Path) -> std::result::Result<(), String> {
+    let mut stack = vec![state_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            // `DirEntry::file_type` does not follow a symlink.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                return Err(format!(
+                    "the codegraph state dir holds a symlink at {}; refusing to write through it",
+                    entry.path().display()
+                ));
+            }
+            if kind.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Run codegraph and decide the per-file verdicts. Returns the prepared state and the unchanged
 /// files to re-extract (their codegraph facts or verdict changed since the last run), or the
 /// reason codegraph cannot be used this run.
@@ -867,8 +917,11 @@ pub fn prepare(
         state_dir: absolute(&cfg.state_dir)?,
         ..cfg.clone()
     };
+    // Nothing is created or written before the path is known to hold no symlink (round-1 F10).
+    no_symlink_on_state_path(&cfg.state_dir, input.root)?;
     std::fs::create_dir_all(&cfg.state_dir).map_err(|e| format!("state dir: {e}"))?;
     state_dir_outside_sources(&cfg.state_dir, input.root)?;
+    no_symlink_in_state_dir(&cfg.state_dir)?;
     // The mirror and the scratch home are never one `git add -A` away from a commit.
     std::fs::write(cfg.state_dir.join(".gitignore"), "*\n")
         .map_err(|e| format!("state dir: {e}"))?;
