@@ -2,10 +2,18 @@
 
 ## [Unreleased]
 
+## [0.36.2] — 2026-11-26
+
+Patch release on the train-16 cut 890b42e6, carrying 6 PRs since 0.36.1: #638, #640, #642, #643, #645, #648. The #642, #643, #645 and #648 entries were written from each PR's changelog entry.
+
 ### Fixed
 
 - Vendored grammars' hand-written C is reviewed, fuzzed and kept that way (#322). `vendor/SCANNER-REVIEW.md` records a line-by-line review of each of the 9 hand-written C files and headers against its git blob, and CI fails when a scanner changes without a new review. The review found that a `.cfs` file ending inside a `queryExecute("` string hung its parse: cfscript's query-text scan now stops at the end of the input, as a marked local patch (`WICKED PATCH 1`); `wicked-estate-tree-sitter-cfml` 0.26.23 carries it. The intake record holds the patch and checks that undoing it gives upstream's file. The review's other findings are #634 and #636 (fixed) and #631 (filed). CI fails a vendored `build.rs` that does more than compile C with `cc`. On PRs that touch `vendor/`, CI runs `scripts/fuzz-smoke-vendored-parsers.py`, a deterministic fuzz smoke of every parser built from its `grammar.json`, and the extractor's `cobol_scanner_fuzz_smoke` test fuzzes the COBOL scanner; a crash or a hang fails. Nightly coverage-guided fuzzing is #630.
 - COBOL: extraction no longer rescans the whole file for each paragraph in five places (#627). Paragraph ends come from the classifier's per-file tree index, and each paragraph's end line from newline offsets found once. Each definition's enclosing chain, each paragraph's container, each reference's enclosing definition and each literal CALL's program come from one sorted sweep instead of a scan of every definition; the chain and reference sweeps serve every language, with the same answers as before. A 96k-line program of PERFORM THRU ranges extracts in 0.96 s instead of 18.9 s (release build).
+- `memory.learn` now stores at its `scope` and `tier` arguments instead of always at the root scope and the semantic tier, so a fact learned for one project no longer appears in every project's recall. A malformed scope or a tier outside `semantic`/`procedural` is refused (-32602), and a store that cannot learn at a scope refuses it (-32603). `MemoryApi` gains a provided `learn_at` method; its default refuses anything but the root semantic learn (#619).
+- CFML: an unterminated or unbalanced `<!--` comment no longer makes extraction quadratic. The vendored scanner ends a comment still open at the end of the input at its last `-->`, or at the end of the input when nothing closed (`WICKED PATCH 4`), instead of failing the scan and being retried at every later `<!` (#631).
+- COBOL: an `ALTER P TO PROCEED TO Q` now gives P a conditional `Calls` edge to Q (`cobol_conditional`), so a paragraph reached only through an altered `GO TO.` no longer reads as dead, and its calls stay in the program's lineage. An `EXIT SECTION` now gives its unit a `Calls` edge into the next section (`cobol_fall_through`) (#622).
+- COBOL: the CICS/SQL links supplement no longer scans every paragraph, section or program for each EXEC CICS, EXEC SQL, data use or label it reads. A file with a paragraph per CICS `LINK` is extracted in time linear in its size (#641).
 
 ## [0.36.1] — 2026-11-26
 
