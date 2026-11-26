@@ -2478,3 +2478,124 @@ fn a_use_for_debugging_handler_is_run_by_the_program_conditionally() {
     assert_eq!(calls_from(&ex, "DBGPGM"), ["DBG", "MAIN-SECTION"]);
     assert_eq!(flow_tags(&ex, "DBGPGM", "DBG"), (false, true));
 }
+
+// ── ALTER and EXIT SECTION (#622) ─────────────────────────────────────────────────────────────
+
+/// The units the program `id` reaches through local `Calls` edges (where it starts, then every
+/// flow edge from there), and whether a reached unit calls `program`.
+fn reaches_call(ex: &Extraction, id: &str, program: &str) -> bool {
+    let mut seen = vec![node(ex, id).symbol.clone()];
+    let mut i = 0;
+    while i < seen.len() {
+        for e in &ex.local_edges {
+            if e.kind == EdgeKind::Calls && e.source == seen[i] && !seen.contains(&e.target) {
+                seen.push(e.target.clone());
+            }
+        }
+        i += 1;
+    }
+    ex.refs
+        .iter()
+        .any(|r| r.kind == EdgeKind::Calls && r.raw_name == program && seen.contains(&r.from))
+}
+
+#[test]
+fn an_altered_go_to_reaches_its_proceed_to_target_conditionally_622() {
+    // ALT-PARA is reached only through the ALTER: MAIN-PARA ends at its GO TO, SWITCH-PARA's
+    // `GO TO.` has no target of its own and falls into END-PARA, which ends at GOBACK.
+    let ex = extract(
+        "ALTERPGM",
+        &program(
+            "ALTERPGM",
+            DATA,
+            &[
+                "MAIN-PARA.",
+                "    ALTER SWITCH-PARA TO PROCEED TO ALT-PARA.",
+                "    GO TO SWITCH-PARA.",
+                "SWITCH-PARA.",
+                "    GO TO.",
+                "END-PARA.",
+                "    GOBACK.",
+                "ALT-PARA.",
+                "    CALL 'ALTPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(callers_of(&ex, "ALT-PARA"), ["SWITCH-PARA"]);
+    // The alteration happens at run time: the edge is conditional, not a fall-through.
+    assert_eq!(flow_tags(&ex, "SWITCH-PARA", "ALT-PARA"), (false, true));
+    assert_eq!(callers_of(&ex, "ALTPGM"), ["ALT-PARA"]);
+    assert!(
+        reaches_call(&ex, "ALTERPGM", "ALTPGM"),
+        "ALT-PARA's CALL is not in the program's lineage"
+    );
+}
+
+#[test]
+fn exit_section_falls_into_the_next_section_622() {
+    // LATER-SECTION is reached only through FIRST-PARA's EXIT SECTION: SECOND-PARA, the last
+    // paragraph of MAIN-SECTION, ends at GOBACK.
+    let ex = extract(
+        "EXITPGM",
+        &program(
+            "EXITPGM",
+            DATA,
+            &[
+                "MAIN-SECTION SECTION.",
+                "FIRST-PARA.",
+                "    IF WS-FLAG = 'Y'",
+                "        EXIT SECTION",
+                "    END-IF.",
+                "    DISPLAY 'A'.",
+                "SECOND-PARA.",
+                "    GOBACK.",
+                "LATER-SECTION SECTION.",
+                "LATER-PARA.",
+                "    CALL 'LATERPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(callers_of(&ex, "LATER-SECTION"), ["FIRST-PARA"]);
+    // The EXIT SECTION is conditional, so FIRST-PARA still falls into SECOND-PARA.
+    assert_eq!(callers_of(&ex, "SECOND-PARA"), ["FIRST-PARA"]);
+    assert_eq!(flow_tags(&ex, "FIRST-PARA", "LATER-SECTION"), (true, false));
+    assert!(
+        reaches_call(&ex, "EXITPGM", "LATERPGM"),
+        "LATER-PARA's CALL is not in the program's lineage"
+    );
+}
+
+#[test]
+fn exit_section_from_an_integer_named_paragraph_falls_into_the_next_section_622() {
+    // 1000 has no node, so MAIN-SECTION, which falls into it, lands where 1000 goes: SECOND-PARA
+    // by falling through and LATER-SECTION by its EXIT SECTION.
+    let ex = extract(
+        "NUMEXIT",
+        &program(
+            "NUMEXIT",
+            DATA,
+            &[
+                "MAIN-SECTION SECTION.",
+                "1000.",
+                "    IF WS-FLAG = 'Y'",
+                "        EXIT SECTION",
+                "    END-IF.",
+                "    DISPLAY 'A'.",
+                "SECOND-PARA.",
+                "    GOBACK.",
+                "LATER-SECTION SECTION.",
+                "LATER-PARA.",
+                "    CALL 'LATERPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(callers_of(&ex, "LATER-SECTION"), ["MAIN-SECTION"]);
+    assert_eq!(
+        flow_tags(&ex, "MAIN-SECTION", "LATER-SECTION"),
+        (true, false)
+    );
+    assert!(
+        reaches_call(&ex, "NUMEXIT", "LATERPGM"),
+        "LATER-PARA's CALL is not in the program's lineage"
+    );
+}

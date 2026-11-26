@@ -2577,6 +2577,68 @@ mod tests {
         assert_linear_work("calls", calls, 400);
     }
 
+    /// wicked-estate#622: every paragraph of a section runs EXIT SECTION into the next section,
+    /// which is named by an integer and so has no node, as are its paragraphs: each exit lands
+    /// where that chain of unnoded headers ends. The landings are built and enumerated once, not
+    /// once per exit, and no unnoded header holds a copy of the landings after it: both count
+    /// their steps (`cobol_tick`), and either one grows with the square of the file.
+    #[test]
+    fn exits_into_a_chain_of_unnoded_headers_are_linear_work_622() {
+        let exits = |n: usize| -> String {
+            let mut lines = vec![
+                "IDENTIFICATION DIVISION.".to_string(),
+                "PROGRAM-ID. EXITSPGM.".to_string(),
+                "PROCEDURE DIVISION.".to_string(),
+                "MAIN-SECTION SECTION.".to_string(),
+            ];
+            for i in 0..n {
+                lines.push(format!("P{i}."));
+                lines.push("    IF WS-FLAG = 'Y'".to_string());
+                lines.push("        EXIT SECTION".to_string());
+                lines.push("    END-IF.".to_string());
+                lines.push(format!("P{i}-EXIT."));
+                lines.push("    EXIT.".to_string());
+            }
+            lines.push("2000 SECTION.".to_string());
+            for i in 0..n {
+                lines.push(format!("{}.", 3000 + i));
+                lines.push("    DISPLAY 'X'.".to_string());
+            }
+            // Not a stub: the guard counts the EXIT paragraphs, and a GOBACK body is one too.
+            lines.push("END-PARA.".to_string());
+            lines.push("    DISPLAY 'END'.".to_string());
+            lines.push("    GOBACK.".to_string());
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            fixed(&lines)
+        };
+        assert_linear_work("exits into unnoded headers", exits, 400);
+        // Integer-named sections, each with an integer-named paragraph that may EXIT SECTION into
+        // the next: the program's start lands on every section's Q paragraph, a linear answer
+        // that no header may copy into its own (each copy holds the rest of the chain).
+        let branching = |n: usize| -> String {
+            let mut lines = vec![
+                "IDENTIFICATION DIVISION.".to_string(),
+                "PROGRAM-ID. BRANCHPGM.".to_string(),
+                "PROCEDURE DIVISION.".to_string(),
+            ];
+            for i in 0..n {
+                lines.push(format!("{} SECTION.", 4000 + 2 * i));
+                lines.push(format!("{}.", 4001 + 2 * i));
+                lines.push("    IF WS-FLAG = 'Y'".to_string());
+                lines.push("        EXIT SECTION".to_string());
+                lines.push("    END-IF.".to_string());
+                lines.push(format!("Q{i}."));
+                lines.push("    EXIT.".to_string());
+                lines.push(format!("T{i}."));
+                lines.push("    DISPLAY 'T'.".to_string());
+                lines.push("    GOBACK.".to_string());
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            fixed(&lines)
+        };
+        assert_linear_work("branching unnoded sections", branching, 400);
+    }
+
     fn cobol_tags_raw(code: &str) -> std::collections::BTreeMap<String, (String, Option<String>)> {
         tags("src/PROG.cbl", "cobol", code)
             .into_iter()
