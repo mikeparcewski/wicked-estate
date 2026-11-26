@@ -436,6 +436,65 @@ fn a_state_dir_link_behind_an_alias_or_an_unlistable_dir_is_refused() {
     }
 }
 
+/// estate#657 (R-B codex-check on #584, W20): one run reads a switched file three times
+/// (classification, mirror, extraction). A save between them paired one revision's codegraph
+/// facts with another's definitions, and a save before the mirror, undone before the next run,
+/// left `mirror.json` naming the old digest for the new text, so codegraph kept reading the stale
+/// copy. A file that changes during a run keeps estate's pipeline for that run, and the next run
+/// mirrors it as it is.
+#[test]
+fn a_file_that_changes_during_a_run_keeps_estates_pipeline_and_is_mirrored_again_657() {
+    let ledger = "src/csharp/Ledger.cs";
+    let minted_in_ledger = |store: &SqliteStore| {
+        store.all_nodes().unwrap().iter().any(|n| {
+            n.location.file == ledger
+                && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+        })
+    };
+    for at in ["before-mirror", "after-mirror"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = coverage_copy(tmp.path());
+        let original = std::fs::read_to_string(root.join(ledger)).unwrap();
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        let cfg = CodegraphConfig {
+            bundle: tmp.path().join("no-bundle"),
+            state_dir: tmp.path().join("g.db.codegraph"),
+            languages: Vec::new(),
+            timeout: Duration::from_secs(5),
+        };
+        let (path, saved) = (root.join(ledger), format!("{original}// saved mid-run\n"));
+        TEST_MIRROR_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move |now: &str| {
+                if now == at {
+                    std::fs::write(&path, &saved).unwrap();
+                }
+            }))
+        });
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = Some(gate_sql()));
+        let first = crate::index_path_with(&mut store, &root, None, Some(&cfg));
+        TEST_MIRROR_HOOK.with(|h| *h.borrow_mut() = None);
+        first.unwrap();
+        assert!(
+            !minted_in_ledger(&store),
+            "{at}: the file that changed keeps estate's pipeline this run"
+        );
+        // The save is undone before the next run.
+        std::fs::write(root.join(ledger), &original).unwrap();
+        let second = crate::index_path_with(&mut store, &root, None, Some(&cfg));
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = None);
+        second.unwrap();
+        let mirrored = std::fs::read_to_string(cfg.mirror_root().join(ledger)).unwrap();
+        assert_eq!(
+            mirrored, original,
+            "{at}: the mirror holds the file as it is"
+        );
+        assert!(
+            minted_in_ledger(&store),
+            "{at}: the next run hands the file to codegraph again"
+        );
+    }
+}
+
 #[cfg(unix)]
 fn walkdir_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

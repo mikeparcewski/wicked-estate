@@ -763,6 +763,23 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Called with `"before-mirror"` and `"after-mirror"` around a recorded run's mirror sync,
+    /// so a test can change a file the way a save during `watch` does (estate#657).
+    pub(crate) static TEST_MIRROR_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&str)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn mirror_hook(at: &str) {
+    TEST_MIRROR_HOOK.with(|h| {
+        if let Some(hook) = h.borrow_mut().as_mut() {
+            hook(at);
+        }
+    });
+}
+
 /// A test build (`--features codegraph-fixture`, never a release) reads the codegraph database
 /// from the recorded SQL this names instead of running codegraph, so consumers' CI can write a
 /// `--codegraph` store through the real `index` route (estate#595).
@@ -948,8 +965,12 @@ pub fn prepare(
             "CODEGRAPH-FIXTURE: codegraph's facts come from recorded SQL, not a codegraph run \
              (a test build)"
         );
+        #[cfg(test)]
+        mirror_hook("before-mirror");
         sync_mirror(cfg, &input.files, &input.configs, input.read)
             .map_err(|e| format!("mirror: {e}"))?;
+        #[cfg(test)]
+        mirror_hook("after-mirror");
         if sql == "FAIL" {
             return Err("codegraph sync exited with exit status: 1: (test)".into());
         }
