@@ -1256,6 +1256,19 @@ impl Prepared {
                     .push(n);
             }
         }
+        // Source order within each group: `snap.nodes` is a HashMap, and the first of two
+        // same-line twins takes estate's node or the bare minted id (round-1 F5).
+        for defs in cg.values_mut() {
+            defs.sort_by(|a, b| {
+                (a.start_line, a.start_col, a.end_line, a.end_col, &a.id).cmp(&(
+                    b.start_line,
+                    b.start_col,
+                    b.end_line,
+                    b.end_col,
+                    &b.id,
+                ))
+            });
+        }
         // A file codegraph read without one definition, where estate's extraction has some, is
         // a silent miss (a grammar gap, a truncated parse): estate keeps it.
         let mut estate_defs: HashMap<&str, usize> = HashMap::new();
@@ -1360,7 +1373,23 @@ impl Prepared {
             .collect();
         // Mint estate-scheme ids for codegraph-only definitions in files extracted this run.
         // Outer definitions first, so a nested one can hang under a minted owner.
-        unmatched.sort_by_key(|(d, p)| (p.clone(), d.start_line, std::cmp::Reverse(d.end_line)));
+        // Outer before inner on one line too: start, then the wider span (round-1 F6).
+        unmatched.sort_by(|(a, pa), (b, pb)| {
+            (
+                pa,
+                a.start_line,
+                a.start_col,
+                std::cmp::Reverse((a.end_line, a.end_col)),
+                &a.id,
+            )
+                .cmp(&(
+                    pb,
+                    b.start_line,
+                    b.start_col,
+                    std::cmp::Reverse((b.end_line, b.end_col)),
+                    &b.id,
+                ))
+        });
         for (d, path) in unmatched {
             if is_package_declaration(d) {
                 // `package p;` holds the file's imports in codegraph; estate's File node does.
@@ -1804,6 +1833,9 @@ fn site_kind_fits(estate: &EdgeKind, cg: &str) -> bool {
     match estate {
         EdgeKind::Calls | EdgeKind::Instantiates => call,
         EdgeKind::Imports => cg == "imports",
+        // A heritage ref takes only a heritage site (either kind: languages differ on which
+        // one a clause is), never a same-line reference to a field of that name.
+        EdgeKind::Extends | EdgeKind::Implements => matches!(cg, "extends" | "implements"),
         _ => !call && cg != "imports",
     }
 }
