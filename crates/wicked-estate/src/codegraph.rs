@@ -1278,6 +1278,30 @@ impl SourceLines {
         }
         Some(start + line_text.len())
     }
+
+    /// Codegraph's (1-based line, UTF-16 column) as a byte column in that line, estate's unit.
+    fn byte_col(&self, line: u32, col: u32) -> Option<u32> {
+        let start = *self.starts.get((line as usize).checked_sub(1)?)?;
+        Some((self.byte_at(line, col)? - start) as u32)
+    }
+}
+
+/// Codegraph's (1-based line, UTF-16 column) in `path` as estate's byte column, from the file's
+/// stored text (estate#653). The column as given when the text is unavailable: on ASCII text
+/// the two units agree.
+fn byte_col(
+    sources: &mut HashMap<String, Option<SourceLines>>,
+    text: &dyn Fn(&str) -> Option<String>,
+    path: &str,
+    line: u32,
+    col: u32,
+) -> u32 {
+    sources
+        .entry(path.to_string())
+        .or_insert_with(|| text(path).map(SourceLines::new))
+        .as_ref()
+        .and_then(|s| s.byte_col(line, col))
+        .unwrap_or(col)
 }
 
 /// Codegraph id → estate id for the definitions of the switched `Ok` files, plus the estate
@@ -1291,6 +1315,11 @@ pub(crate) struct IdMap {
     /// (a definition matched more than one node) or `no-defs` (codegraph found no definition
     /// where estate found some).
     pub ambiguous: BTreeMap<String, &'static str>,
+    /// Byte columns of the codegraph edges (by index into the snapshot's edges) and unresolved
+    /// rows sourced in the files extracted this run: codegraph counts UTF-16 code units, and
+    /// every comparison with estate's spans must be in bytes (estate#653).
+    pub edge_cols: HashMap<usize, u32>,
+    pub unresolved_cols: HashMap<usize, u32>,
 }
 
 impl Prepared {
@@ -1415,7 +1444,8 @@ impl Prepared {
                     }
                 }
                 if on_line.len() > 1 {
-                    on_line.retain(|n| n.location.span.start_col == d.start_col);
+                    let col = byte_col(&mut sources, text, path, d.start_line, d.start_col);
+                    on_line.retain(|n| n.location.span.start_col == col);
                 }
                 if on_line.is_empty() {
                     // Fall back to span overlap (an annotation line may start one span and not
@@ -1592,9 +1622,9 @@ impl Prepared {
                 start_byte: start_byte as u32,
                 end_byte: end_byte as u32,
                 start_line: d.start_line.saturating_sub(1),
-                start_col: d.start_col,
+                start_col: byte_col(&mut sources, text, &path, d.start_line, d.start_col),
                 end_line: d.end_line.saturating_sub(1),
-                end_col: d.end_col,
+                end_col: byte_col(&mut sources, text, &path, d.end_line, d.end_col),
             };
             let mut node = Node::new(
                 id.clone(),
@@ -1624,6 +1654,27 @@ impl Prepared {
             );
             map.ids.insert(d.id.clone(), id);
             map.minted.push(node);
+        }
+        // Sites in the files extracted this run, in bytes, for `resolve`.
+        for (i, e) in self.snap.edges.iter().enumerate() {
+            let (Some(line), Some(col)) = (e.line, e.col) else {
+                continue;
+            };
+            let Some(src) = self.snap.nodes.get(&e.source) else {
+                continue;
+            };
+            let path = format!("{}{}", self.prefix, src.file);
+            if mint_in.contains(&path) {
+                map.edge_cols
+                    .insert(i, byte_col(&mut sources, text, &path, line, col));
+            }
+        }
+        for (i, u) in self.snap.unresolved.iter().enumerate() {
+            let path = format!("{}{}", self.prefix, u.file);
+            if mint_in.contains(&path) {
+                map.unresolved_cols
+                    .insert(i, byte_col(&mut sources, text, &path, u.line, u.col));
+            }
         }
         // An ambiguous file keeps estate's pipeline: drop its mappings and mints.
         if !map.ambiguous.is_empty() {
@@ -1693,6 +1744,8 @@ impl Prepared {
         extracted: &HashSet<String>,
     ) -> (Vec<Edge>, Vec<UnresolvedRef>, Vec<UnresolvedRef>) {
         let sites = self.sites();
+        // A site's column in bytes, estate's unit (estate#653).
+        let site_col = |i: usize| ids.edge_cols.get(&i).copied().or(self.snap.edges[i].col);
         let mut consumed = self.consumed.lock().unwrap_or_else(|e| e.into_inner());
         let mut edges = Vec::new();
         let mut unbound = Vec::new();
@@ -1735,7 +1788,7 @@ impl Prepared {
             let exact: Vec<usize> = hits
                 .iter()
                 .copied()
-                .filter(|i| self.snap.edges[*i].col == Some(r.location.span.start_col))
+                .filter(|i| site_col(*i) == Some(r.location.span.start_col))
                 .collect();
             if !exact.is_empty() || per_key.get(&key).copied().unwrap_or(0) > 1 {
                 hits = exact;
@@ -1800,13 +1853,14 @@ impl Prepared {
             if source == target {
                 continue;
             }
+            let col = site_col(i).unwrap_or(0);
             let span = Span {
                 start_byte: 0,
                 end_byte: 0,
                 start_line: e.line.unwrap_or(0).saturating_sub(1),
-                start_col: e.col.unwrap_or(0),
+                start_col: col,
                 end_line: e.line.unwrap_or(0).saturating_sub(1),
-                end_col: e.col.unwrap_or(0),
+                end_col: col,
             };
             edges.push(codegraph_edge(
                 source.clone(),
@@ -1817,7 +1871,7 @@ impl Prepared {
             ));
         }
         // Codegraph's unresolved rows at sites no estate ref covered.
-        for u in &self.snap.unresolved {
+        for (i, u) in self.snap.unresolved.iter().enumerate() {
             let path = format!("{}{}", self.prefix, u.file);
             if !extracted.contains(&path) || ids.ambiguous.contains_key(&path) {
                 continue;
@@ -1837,9 +1891,9 @@ impl Prepared {
                 start_byte: 0,
                 end_byte: 0,
                 start_line: u.line.saturating_sub(1),
-                start_col: u.col,
+                start_col: ids.unresolved_cols.get(&i).copied().unwrap_or(u.col),
                 end_line: u.line.saturating_sub(1),
-                end_col: u.col,
+                end_col: ids.unresolved_cols.get(&i).copied().unwrap_or(u.col),
             };
             unresolved.push(UnresolvedRef {
                 from: from.clone(),
