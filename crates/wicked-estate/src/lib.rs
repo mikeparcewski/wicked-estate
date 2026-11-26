@@ -645,12 +645,20 @@ fn xedge_db_for_run() -> Option<String> {
     TEST_XEDGE_DB.with(|t| t.borrow().clone())
 }
 
+/// The nodes codegraph minted in some files, and which of them carry links from outside
+/// codegraph's own facts, read before a run deletes them.
+struct MintedLeaving {
+    /// (estate path, minted id, linked from outside).
+    nodes: Vec<(String, String, bool)>,
+    xedge_note: String,
+}
+
 /// A run that stops codegraph answering for a file (switched off, the file fell back, or its
 /// language narrowed out) re-extracts it with estate's pipeline, which drops the nodes codegraph
 /// minted there. Say so before it happens, and name the minted ids something outside codegraph's
 /// own facts links to: a graph edge (an annotation), or a knowledge or memory link in xedge.db.
 /// Those links dangle once the node is gone. xedge.db is read only if it exists, never written.
-fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String>) -> Result<()> {
+fn minted_leaving(store: &dyn GraphStoreMutExt, files: &HashSet<String>) -> Result<MintedLeaving> {
     let minted: Vec<Node> = store
         .all_nodes()?
         .into_iter()
@@ -660,7 +668,10 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
         })
         .collect();
     if minted.is_empty() {
-        return Ok(());
+        return Ok(MintedLeaving {
+            nodes: Vec::new(),
+            xedge_note: String::new(),
+        });
     }
     let (mut xedges, mut xedge_note) = match xedge_db_for_run() {
         // A `file:` URI (the MCP accepts one) is opened as given; a missing target then reads
@@ -677,7 +688,7 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
         Some(path) => (None, format!("no xedge.db at {path}")),
         None => (None, "no xedge.db".to_string()),
     };
-    let mut linked = Vec::new();
+    let mut nodes = Vec::new();
     for n in &minted {
         let mut outside = store
             .neighbors(&n.symbol, wicked_estate_core::Direction::Dependents)?
@@ -694,22 +705,38 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
                 }
             }
         }
-        if outside {
-            linked.push(n.symbol.0.clone());
-        }
+        nodes.push((n.location.file.clone(), n.symbol.0.clone(), outside));
     }
-    let minted_files = minted
+    Ok(MintedLeaving { nodes, xedge_note })
+}
+
+/// Print the `CODEGRAPH-OFF` line for the leaving nodes of `only` (every file when `None`).
+fn print_minted_leaving(leaving: &MintedLeaving, only: Option<&HashSet<String>>) {
+    let nodes: Vec<&(String, String, bool)> = leaving
+        .nodes
         .iter()
-        .map(|n| n.location.file.as_str())
+        .filter(|(file, _, _)| only.is_none_or(|o| o.contains(file)))
+        .collect();
+    if nodes.is_empty() {
+        return;
+    }
+    let linked: Vec<String> = nodes
+        .iter()
+        .filter(|(_, _, linked)| *linked)
+        .map(|(_, id, _)| id.clone())
+        .collect();
+    let minted_files = nodes
+        .iter()
+        .map(|(file, _, _)| file.as_str())
         .collect::<HashSet<_>>()
         .len();
     // Every linked id is named: each is a link the user loses.
     let line = format!(
         "CODEGRAPH-OFF: {} node(s) codegraph minted in {} file(s) leave the graph; {} carry links from outside codegraph's facts (graph edges, or knowledge and memory links; {}), which will dangle{}",
-        minted.len(),
+        nodes.len(),
         minted_files,
         linked.len(),
-        xedge_note,
+        leaving.xedge_note,
         if linked.is_empty() {
             String::new()
         } else {
@@ -719,14 +746,13 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
     #[cfg(test)]
     LAST_MINTED_REPORT.with(|r| {
         *r.borrow_mut() = Some(MintedReport {
-            minted: minted.len(),
+            minted: nodes.len(),
             files: minted_files,
             linked: linked.clone(),
             line: line.clone(),
         })
     });
     eprintln!("{line}");
-    Ok(())
 }
 
 /// An estate resolver whose edges into files codegraph answers for are dropped (see
@@ -2554,22 +2580,38 @@ fn index_path_inner(
     // Files whose minted nodes this run deletes: the last run answered them and this one does
     // not (codegraph off or failed, the file fell back, or its language was narrowed out). One
     // report covers every such path (estate#597).
+    let reextracted_ok = |path: &str, fp: &str| {
+        fp.starts_with("ok|")
+            && work_by_rel.contains_key(path)
+            && (changed_seed.contains(path) || codegraph_forced.contains(path))
+    };
+    let still_ok = |path: &str| {
+        matches!(
+            codegraph_state.as_ref().and_then(|cg| cg.verdict(path)),
+            Some(codegraph::Verdict::Ok)
+        )
+    };
     let leaving: HashSet<String> = stored_fingerprints
         .iter()
-        .filter(|(path, fp)| {
-            fp.starts_with("ok|")
-                && work_by_rel.contains_key(*path)
-                && (changed_seed.contains(*path) || codegraph_forced.contains(*path))
-                && !matches!(
-                    codegraph_state.as_ref().and_then(|cg| cg.verdict(path)),
-                    Some(codegraph::Verdict::Ok)
-                )
-        })
+        .filter(|(path, fp)| reextracted_ok(path, fp) && !still_ok(path))
         .map(|(path, _)| path.clone())
         .collect();
-    if !leaving.is_empty() {
-        report_minted_going_away(store, &leaving)?;
-    }
+    // Files that stay codegraph's for now but may still fall back at mapping time (`no-defs`,
+    // `ambiguous-def`) or when saved mid-run: their minted nodes are read now, while the store
+    // still holds them, and reported after mapping if the file did fall back (estate#656).
+    let at_risk: HashSet<String> = stored_fingerprints
+        .iter()
+        .filter(|(path, fp)| reextracted_ok(path, fp) && still_ok(path))
+        .map(|(path, _)| path.clone())
+        .collect();
+    let late_leaving = if leaving.is_empty() && at_risk.is_empty() {
+        None
+    } else {
+        let files: HashSet<String> = leaving.union(&at_risk).cloned().collect();
+        let read = minted_leaving(store, &files)?;
+        print_minted_leaving(&read, Some(&leaving));
+        Some(read)
+    };
     changed_seed.extend(codegraph_forced.iter().cloned());
 
     // Call-derived value-flow edges can be stored with a changed callee-owned parameter/return
@@ -2823,6 +2865,13 @@ fn index_path_inner(
             (&doc_skips_key, &skipped_documents),
         );
         flush_doc_skips(&skipped_documents, &unreadable_files);
+        // The codegraph meta follows this run too: a switch-off that forced no file still clears
+        // the fingerprints (estate#656).
+        match &codegraph_state {
+            Some(cg) => store.meta_set_key(&fingerprints_key, &cg.fingerprints_json()),
+            None if !stored_fingerprints.is_empty() => store.meta_set_key(&fingerprints_key, ""),
+            None => {}
+        }
         return store.stats();
     }
 
@@ -3447,6 +3496,23 @@ fn index_path_inner(
         }
         ids
     });
+    // A file mapping put back to estate's pipeline records that in its fingerprint, and the
+    // minted nodes it loses are reported like any other fallback's (estate#656).
+    if let (Some(cg), Some(ids)) = (codegraph_state.as_mut(), codegraph_ids.as_ref()) {
+        for (path, reason) in &ids.ambiguous {
+            cg.fall_back(path, reason);
+        }
+    }
+    if let (Some(read), Some(cg)) = (&late_leaving, codegraph_state.as_ref()) {
+        let late: HashSet<String> = at_risk
+            .iter()
+            .filter(|path| !matches!(cg.verdict(path), Some(codegraph::Verdict::Ok)))
+            .cloned()
+            .collect();
+        if !late.is_empty() {
+            print_minted_leaving(read, Some(&late));
+        }
+    }
     // The minted nodes are written with this run's edges, but every resolver below must already
     // see them: a later run reads them from the store (estate#654).
     if let Some(ids) = &codegraph_ids {
