@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.36.1] — 2026-11-26
+
+Patch release on the train-15 cut 2df58408, carrying 7 PRs since 0.36.0: #615, #628, #629, #632, #635, #637, #633.
+
 ### Changed
 
 - **COBOL control flow is read from the grammar** (#585). A paragraph or section whose statements do not end its run (GOBACK, STOP RUN, an unconditional GO TO) now `Calls` the next one, tagged `cobol_fall_through`. A program `Calls` only the paragraph where it starts, not every paragraph no statement names, so a paragraph that control never reaches has no caller. `GO TO … DEPENDING ON` targets and DECLARATIVES handlers (called from the I/O statements on their files) are tagged `cobol_conditional`. Re-index COBOL sources to get the new edges.
