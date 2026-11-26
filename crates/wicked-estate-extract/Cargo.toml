@@ -144,7 +144,7 @@ tree-sitter-vb-dotnet = "0.1.0"           # ABI-15; on crates.io
 wicked-estate-tree-sitter-vba = { path = "vendor/tree-sitter-vba", version = "0.1.2" }        # ABI vendored from tmepple/tree-sitter-vba
 wicked-estate-tree-sitter-vbscript = { path = "vendor/tree-sitter-vbscript", version = "0.1.2" }  # ABI vendored from JJK96/tree-sitter-vbscript
 # ColdFusion CFML — vendored from cfmleditor/tree-sitter-cfml (cfml tag + cfscript; cfquery SQL dialect omitted). ABI 15.
-wicked-estate-tree-sitter-cfml = { path = "vendor/tree-sitter-cfml", version = "0.26.22" }
+wicked-estate-tree-sitter-cfml = { path = "vendor/tree-sitter-cfml", version = "0.26.23" }
 # tree-sitter-abap-sqry deferred: it pins tree-sitter ^0.26 (we're on 0.25); would need another
 # runtime bump for one niche SAP fork. ABAP coverage awaits a 0.26 bump or an ABI-≤15 ABAP grammar.
 arborium-dot = "2.18"
