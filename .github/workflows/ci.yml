@@ -16,6 +16,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # TEMPORARY (estate#641 step 1, a measurement PR that is closed, never merged).
+  measure-641:
+    name: measure 641 (release, CicsSqlExtractor N/2N/4N)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: measure-641
+      - name: measure
+        env:
+          MEASURE_641: "1"
+        run: cargo test --release -p wicked-estate-extract --test measure_641 -- --nocapture --test-threads=1 2>&1 | grep -E "MEASURE641|test result|panicked"
   # ── The non-negotiable gate (CLAUDE.md §9): 0 warnings · clippy · all tests
   #    (incl. GraphStore conformance + bench-type tests) · fmt. Runs on the DEFAULT
   #    feature set, so it pulls no ML deps and needs no network. ─────────────────
