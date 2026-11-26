@@ -26,22 +26,12 @@ PIN = "0.25.10"
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "crates/wicked-estate-extract/vendor"
 NO_JS_RUNTIME = "wicked-no-javascript-runtime"
-# Trees whose committed parser is still upstream's, because regenerating it changes the parse
-# tables; each is its own PR, gated on the extraction output, which deletes its entry. Nothing else
-# may be added here (scripts/test_parser_regeneration.py).
-NOT_YET_REGENERATED = {
-    "tree-sitter-vbscript": "upstream's parser.c is from an older CLI; regenerating it changes its parse tables (#322)",
-}
 
 
 def grammar_dirs(vendor=VENDOR):
     """Every directory holding a generated grammar (`src/grammar.json`), sorted."""
     return sorted(p.parent.parent for p in vendor.glob("**/src/grammar.json"))
 
-
-def regenerated_dirs(vendor=VENDOR):
-    """The grammars this script regenerates: all but NOT_YET_REGENERATED."""
-    return [d for d in grammar_dirs(vendor) if d.relative_to(vendor).parts[0] not in NOT_YET_REGENERATED]
 
 
 def orphan_parsers(vendor=VENDOR):
@@ -87,7 +77,7 @@ def main():
     if orphans:
         sys.exit(f"committed parsers with no src/grammar.json to regenerate them from: {orphans}")
     in_house = in_house_trees()
-    dirs = regenerated_dirs()
+    dirs = grammar_dirs()
     missing = [str(d.relative_to(ROOT)) for d in dirs if not has_config(d)]
     if missing:
         sys.exit(f"no tree-sitter.json for {missing}: the CLI would fall back to ABI 14")
@@ -96,7 +86,7 @@ def main():
         if tree in in_house and (d / "grammar.js").is_file():
             run(ts + ["generate"], d)  # our grammar.js -> grammar.json (+ parser.c)
         run(ts + ["generate", "--js-runtime", NO_JS_RUNTIME, "src/grammar.json"], d)
-    print(f"regenerated {len(dirs)} parsers with tree-sitter {PIN}; not yet: {sorted(NOT_YET_REGENERATED)}")
+    print(f"regenerated {len(dirs)} parsers with tree-sitter {PIN}")
 
 
 if __name__ == "__main__":

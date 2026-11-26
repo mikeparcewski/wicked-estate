@@ -7,7 +7,7 @@ repository = "https://github.com/mikeparcewski/wicked-estate"
 description = "VBScript grammar for tree-sitter — vendored from JJK96/tree-sitter-vbscript"
 readme = "README.md"
 build = "bindings/rust/build.rs"
-include = ["LICENSE", "README.md", "bindings/rust/*.rs", "src/**/*"]
+include = ["LICENSE", "README.md", "bindings/rust/*.rs", "src/**/*", "tree-sitter.json"]
 
 [lib]
 path = "bindings/rust/lib.rs"
