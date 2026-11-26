@@ -236,3 +236,56 @@ fn cfscript_file_ending_inside_a_query_string_extracts() {
         }
     }
 }
+
+/// Extract `text` as CFML on a worker thread and answer the extraction, or fail after `secs`
+/// instead of hanging the run (the spinning thread ends with the test process).
+fn cfml_within(shape: &str, text: String, secs: u64) -> wicked_estate_core::Extraction {
+    let (done, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(extract("cfml", "Page.cfm", &text));
+    });
+    match result.recv_timeout(std::time::Duration::from_secs(secs)) {
+        Ok(ex) => ex,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{shape}: the extraction did not return within {secs} s")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{shape}: the extraction panicked")
+        }
+    }
+}
+
+/// estate#631: cfml's `scan_comment` counts `<!--` nesting. On a comment that never closes it
+/// scanned to the end of the file and failed, and error recovery retried it at every later `<!`,
+/// each scan running to the end again: quadratic (20,000 openers took 4.4 s in the pinned CLI,
+/// four times longer per doubling). Each shape here has 60,000 to 100,000 openers.
+#[test]
+fn cfml_unterminated_or_unbalanced_comments_extract_in_linear_time_631() {
+    for (shape, text) in [
+        ("unterminated openers", "<!--".repeat(100_000)),
+        (
+            "unbalanced nested comments",
+            "<!-- a <!-- b -->\n".repeat(30_000),
+        ),
+    ] {
+        cfml_within(shape, text, 30);
+    }
+}
+
+/// estate#631: an unbalanced comment ends at its last `-->`, as an HTML comment does, so the tags
+/// after it still extract. (A comment with no `-->` at all runs to the end of the file.)
+#[test]
+fn cfml_tags_after_an_unbalanced_comment_still_extract_631() {
+    let ex = cfml_within(
+        "a comment with one more opener than closer",
+        "<!-- a <!-- b -->\n<cfcomponent name=\"Kept\">\n    <cffunction name=\"stillHere\">\n    </cffunction>\n</cfcomponent>\n".to_string(),
+        30,
+    );
+    assert!(
+        ex.nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Function && n.name == "stillHere"),
+        "function 'stillHere' missing after the comment; got {:?}",
+        names(&ex)
+    );
+}
