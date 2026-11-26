@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- COBOL: extraction no longer rescans the whole file for each paragraph in five places (#627). Paragraph ends come from the classifier's per-file tree index, and each paragraph's end line from newline offsets found once. Each definition's enclosing chain, each paragraph's container, each reference's enclosing definition and each literal CALL's program come from one sorted sweep instead of a scan of every definition; the chain and reference sweeps serve every language, with the same answers as before. A 96k-line program of PERFORM THRU ranges extracts in 0.96 s instead of 18.9 s (release build).
+
 ## [0.36.1] — 2026-11-26
 
 Patch release on the train-15 cut 2df58408, carrying 7 PRs since 0.36.0: #615, #628, #629, #632, #635, #637, #633.
