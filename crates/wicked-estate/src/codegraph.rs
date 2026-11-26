@@ -2737,6 +2737,67 @@ mod tests {
         );
     }
 
+    /// estate#654: the resolution index was built from the store before `id_map` minted this
+    /// run's nodes, so on the run that mints them (the first, and any that re-extracts the file)
+    /// the fall-through did not see them. A codegraph-unbound call named like a minted definition
+    /// and like one definition in a fallen-back file bound into the fallen-back file; the next
+    /// run, with the minted node stored, found the name ambiguous and parked the call. The run
+    /// that mints must see what a later run sees.
+    #[test]
+    fn a_minted_definition_is_a_fall_through_candidate_on_the_run_that_mints_it_654() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let edit = |path: &str, from: &str, to: &str| {
+            let p = root.join(path);
+            let s = std::fs::read_to_string(&p).unwrap();
+            assert!(s.contains(from), "{path} holds {from:?}");
+            std::fs::write(&p, s.replacen(from, to, 1)).unwrap();
+        };
+        // A call codegraph has no site for (the recording predates it), after the `helper` and
+        // `trim` sites so their columns stay.
+        edit(
+            "src/svc.ts",
+            "return helper(id).trim(); }",
+            "return helper(id).trim() + assist(id); }",
+        );
+        // The fallen-back file's own `assist`, estate's node.
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function assist(s: string): string { return s; }\n");
+        std::fs::write(&lib, text).unwrap();
+        // A definition only codegraph has, in the codegraph file src/util.ts: it is minted.
+        let sql = format!(
+            "{}\nINSERT INTO nodes VALUES('function:synthetic-assist','function','assist','assist',\
+             'src/util.ts','typescript',3,3,0,40,NULL,'(s: string): string',NULL,1,0,0,0,NULL,NULL,\
+             NULL,0);",
+            lib_util_fell_back_sql()
+        );
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        assert!(
+            store.all_nodes().unwrap().iter().any(|n| {
+                n.location.file == "src/util.ts"
+                    && n.name == "assist"
+                    && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+            }),
+            "util.ts's assist is minted"
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get = calls_from(&calls, GET);
+        assert!(
+            !from_get.iter().any(|(_, t, _)| t.ends_with("/assist().")),
+            "two definitions named assist: the call binds neither: {from_get:?}"
+        );
+        let parked = store
+            .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}assist"))
+            .unwrap();
+        assert!(
+            parked.iter().any(|r| r.from.0 == GET),
+            "the call parks, as it does on a later run: {parked:?}"
+        );
+    }
+
     #[test]
     fn a_fall_through_call_named_like_a_codegraph_definition_stays_ambiguous_594() {
         // estate#594 (N1, W12): the same fall-back, with the call's only evidence the tsconfig
