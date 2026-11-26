@@ -31,6 +31,9 @@
  *   5. A file that ends inside the sequence area (wicked-estate#634). The upstream loop over
  *      columns 1-6 advanced until column 6 with no end-of-input check; at the end of the file
  *      the column stops moving, so the scan never returned. It now stops at end of input too.
+ *   6. The keyword matcher (wicked-estate#636). Upstream advanced and read every keyword's pointer,
+ *      including keywords already ruled out, so a short one was read past its terminating NUL
+ *      while a long one still matched. Only the keywords still matching are read now.
  * Every function and table is `static`, so nothing clashes with the crate's own scanner symbols,
  * except `wicked_cobol_take_recovery_took_over` (patch 4's report to the extractor).
  */
@@ -133,20 +136,22 @@ static bool start_with_word( TSLexer *lexer, char *words[], int number_of_words)
         }
 
         // If the head of the line matches any of specified keywords, return true;
+        // WICKED PATCH 6: read and advance only the keywords still matching, so a pointer never
+        // passes its keyword's terminating NUL (wicked-estate#636).
         char c = lexer->lookahead;
         for(int i=0; i<number_of_words; ++i) {
-            if(*(keyword_pointer[i]) == 0 && continue_check[i]) {
+            if(continue_check[i] && *(keyword_pointer[i]) == 0) {
                 return true;
             }
         }
 
         // matching keywords
         for(int i=0; i<number_of_words; ++i) {
-            char k = *(keyword_pointer[i]);
             if(continue_check[i]) {
+                char k = *(keyword_pointer[i]);
                 continue_check[i] = c == towupper(k) || c == towlower(k);
+                (keyword_pointer[i])++;
             }
-            (keyword_pointer[i])++;
         }
 
         // next character

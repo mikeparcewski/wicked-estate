@@ -43,7 +43,10 @@ ColdFusion CFML (tag + cfscript) tree-sitter grammar
   Origin:    Vendored from https://github.com/cfmleditor/tree-sitter-cfml;
              its grammar sources (grammar.js, src/grammar.json, the scanners,
              common/) and LICENSE are byte-identical to upstream commit
-             6b4a43943c191950ee2c77f7b94cec5e903318a4 (tag v0.26.20).
+             6b4a43943c191950ee2c77f7b94cec5e903318a4 (tag v0.26.20), except
+             two local patches in common/scanner.h, marked WICKED PATCH 2
+             and 3: deserialize reads within its buffer, and four start
+             tags free their names.
              parser.c, node-types.json and the tree_sitter/ headers are
              generated from grammar.json by the pinned tree-sitter CLI.
              Cargo.toml, README.md, tree-sitter.json and bindings/rust/ are
@@ -57,7 +60,7 @@ COBOL tree-sitter external scanner (patched)
   Origin:    scanner.c and tree_sitter/parser.h copied from the arborium-cobol
              2.18.0 crate (grammar/scanner.c, grammar/src/tree_sitter/parser.h),
              which packages https://github.com/zharinov/tree-sitter-cobol at
-             befb226951b65585617f42ecbe526d00c124100c; five patches, marked
+             befb226951b65585617f42ecbe526d00c124100c; six patches, marked
              WICKED PATCH in scanner.c. The parse tables stay in the crate.
   License:   MIT License (the terms of this product's LICENSE file)
              Copyright (c) 2016 Max Brunsfeld
