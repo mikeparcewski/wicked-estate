@@ -655,7 +655,7 @@ development binary needs `wicked-estate index <path> --force` once.
 | `memory.erase` | Permanently delete an active or retired memory by ID, or a scope subtree. |
 | `memory.retire` | Hide an active memory from recall while keeping it for undo. |
 | `memory.unretire` | Restore a retired memory with its original ID. |
-| `memory.learn` | Store a fact linked to code symbols by name, at an optional `scope` (default root) and `tier` (`semantic` or `procedural`). |
+| `memory.learn` | Store a fact with about-edges to the given `symbols`, at an optional `scope` (default root) and `tier` (`semantic` or `procedural`). |
 | `memory.coverage` | Report memory store statistics (count by tier, staleness). |
 | `memory.list` | Management browse: list active memories in scope with facets; `retired: true` lists only retired memories with `retired_at` (not relevance-ranked or intent-filtered — the complete set). |
 

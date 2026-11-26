@@ -3378,7 +3378,7 @@ mod tests {
     }
 
     /// estate#619: a store that does not override `MemoryApi::learn_at` (`FakeMemory`) refuses a
-    /// scoped or procedural learn with -32602 instead of storing it at the root scope, and still
+    /// scoped or procedural learn with -32603 instead of storing it at the root scope, and still
     /// serves the root semantic learn through `learn`.
     #[test]
     fn learn_on_a_store_without_learn_at_refuses_a_scope_it_cannot_honour_619() {
@@ -3408,7 +3408,7 @@ mod tests {
             json!({"content": "f", "symbols": [], "tier": "procedural"}),
         ] {
             let resp = learn(args.clone());
-            assert_eq!(resp["error"]["code"], -32602, "{args} -> {resp}");
+            assert_eq!(resp["error"]["code"], -32603, "{args} -> {resp}");
             assert!(
                 resp["error"]["message"]
                     .as_str()

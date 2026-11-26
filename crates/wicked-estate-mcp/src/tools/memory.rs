@@ -366,9 +366,10 @@ fn dispatch_learn(
     let symbol_epochs = fetch_epochs(store, &symbols);
     match memory.learn_at(&fact, &symbols, &symbol_epochs, &scope, tier, now) {
         Ok(Some(memory_id)) => mcp_result(id, json!({"memory_id": memory_id})),
+        // The parameters were valid; this store cannot honour them, so a server-side refusal.
         Ok(None) => json_rpc_error(
             id,
-            -32602,
+            -32603,
             &format!(
                 "this memory store cannot learn at scope {:?} with tier {}",
                 scope.as_path(),
