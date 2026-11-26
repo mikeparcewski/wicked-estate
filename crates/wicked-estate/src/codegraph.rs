@@ -1026,6 +1026,22 @@ pub fn prepare(
     ))
 }
 
+/// Whether this run's fingerprint for an unchanged file matches the stored one. A fallback made
+/// at mapping time (`no-defs`, `ambiguous-def`) is decided again on every run from the same
+/// facts, so `ok` with the same facts matches it; anything else must be equal (#659 round 1).
+fn same_as_stored(fp: &str, stored: Option<&String>) -> bool {
+    let Some(stored) = stored else {
+        return false;
+    };
+    if stored == fp {
+        return true;
+    }
+    let mapping_fallback = ["skipped:no-defs|", "skipped:ambiguous-def|"]
+        .iter()
+        .find_map(|p| stored.strip_prefix(p));
+    matches!((mapping_fallback, fp.strip_prefix("ok|")), (Some(a), Some(b)) if a == b)
+}
+
 impl Prepared {
     pub(crate) fn new(
         prefix: &str,
@@ -1065,7 +1081,7 @@ impl Prepared {
             .filter(|p| {
                 fingerprints
                     .get(*p)
-                    .is_some_and(|fp| stored.get(*p) != Some(fp))
+                    .is_some_and(|fp| !same_as_stored(fp, stored.get(*p)))
             })
             .cloned()
             .collect();
@@ -1278,6 +1294,57 @@ impl SourceLines {
         }
         Some(start + line_text.len())
     }
+
+    /// Codegraph's (1-based line, UTF-16 column) as a byte column in that line, estate's unit.
+    fn byte_col(&self, line: u32, col: u32) -> Option<u32> {
+        let start = *self.starts.get((line as usize).checked_sub(1)?)?;
+        Some((self.byte_at(line, col)? - start) as u32)
+    }
+}
+
+/// Codegraph's (1-based line, UTF-16 column) in `path` as estate's byte column, from the file's
+/// stored text (estate#653). The column as given when the text is unavailable: on ASCII text
+/// the two units agree.
+fn byte_col(
+    sources: &mut HashMap<String, Option<SourceLines>>,
+    text: &dyn Fn(&str) -> Option<String>,
+    path: &str,
+    line: u32,
+    col: u32,
+) -> u32 {
+    sources
+        .entry(path.to_string())
+        .or_insert_with(|| text(path).map(SourceLines::new))
+        .as_ref()
+        .and_then(|s| s.byte_col(line, col))
+        .unwrap_or(col)
+}
+
+/// Codegraph's columns as byte columns for [`Prepared::resolve`], holding one file's text at a
+/// time (the callers visit files in order), so converting every site of a large run never holds
+/// the whole source population in memory (estate#653, #659 round 1).
+struct ByteCols<'a> {
+    text: &'a dyn Fn(&str) -> Option<String>,
+    file: Option<(String, Option<SourceLines>)>,
+}
+
+impl<'a> ByteCols<'a> {
+    fn new(text: &'a dyn Fn(&str) -> Option<String>) -> Self {
+        ByteCols { text, file: None }
+    }
+
+    /// Codegraph's (1-based line, UTF-16 column) in `path` as a byte column; the column as given
+    /// when the text is unavailable (on ASCII text the two agree).
+    fn col(&mut self, path: &str, line: u32, col: u32) -> u32 {
+        if self.file.as_ref().is_none_or(|(p, _)| p != path) {
+            self.file = Some((path.to_string(), (self.text)(path).map(SourceLines::new)));
+        }
+        self.file
+            .as_ref()
+            .and_then(|(_, src)| src.as_ref())
+            .and_then(|src| src.byte_col(line, col))
+            .unwrap_or(col)
+    }
 }
 
 /// Codegraph id → estate id for the definitions of the switched `Ok` files, plus the estate
@@ -1415,7 +1482,8 @@ impl Prepared {
                     }
                 }
                 if on_line.len() > 1 {
-                    on_line.retain(|n| n.location.span.start_col == d.start_col);
+                    let col = byte_col(&mut sources, text, path, d.start_line, d.start_col);
+                    on_line.retain(|n| n.location.span.start_col == col);
                 }
                 if on_line.is_empty() {
                     // Fall back to span overlap (an annotation line may start one span and not
@@ -1592,9 +1660,9 @@ impl Prepared {
                 start_byte: start_byte as u32,
                 end_byte: end_byte as u32,
                 start_line: d.start_line.saturating_sub(1),
-                start_col: d.start_col,
+                start_col: byte_col(&mut sources, text, &path, d.start_line, d.start_col),
                 end_line: d.end_line.saturating_sub(1),
-                end_col: d.end_col,
+                end_col: byte_col(&mut sources, text, &path, d.end_line, d.end_col),
             };
             let mut node = Node::new(
                 id.clone(),
@@ -1686,13 +1754,17 @@ impl Prepared {
     /// codegraph-only edges), the estate refs codegraph bound nothing for (unchanged, for
     /// estate's resolvers to try against files codegraph does not answer for), and codegraph's
     /// own unresolved rows at sites no estate ref covered (with the `codegraph:` prefix).
+    /// `text` returns a file's stored source: codegraph's UTF-16 columns are compared and
+    /// stored as estate's byte columns (estate#653).
     pub(crate) fn resolve(
         &self,
         refs: &[UnresolvedRef],
         ids: &IdMap,
         extracted: &HashSet<String>,
+        text: &dyn Fn(&str) -> Option<String>,
     ) -> (Vec<Edge>, Vec<UnresolvedRef>, Vec<UnresolvedRef>) {
         let sites = self.sites();
+        let mut cols = ByteCols::new(text);
         let mut consumed = self.consumed.lock().unwrap_or_else(|e| e.into_inner());
         let mut edges = Vec::new();
         let mut unbound = Vec::new();
@@ -1732,13 +1804,23 @@ impl Prepared {
                         .collect()
                 })
                 .unwrap_or_default();
-            let exact: Vec<usize> = hits
-                .iter()
-                .copied()
-                .filter(|i| self.snap.edges[*i].col == Some(r.location.span.start_col))
-                .collect();
-            if !exact.is_empty() || per_key.get(&key).copied().unwrap_or(0) > 1 {
-                hits = exact;
+            // A column decides only between several sites, or between refs sharing the key; it is
+            // compared in bytes, from the ref's file (the site's file: the key holds it).
+            let shared = per_key.get(&key).copied().unwrap_or(0) > 1;
+            if hits.len() > 1 || shared {
+                let exact: Vec<usize> = hits
+                    .iter()
+                    .copied()
+                    .filter(|i| {
+                        let e = &self.snap.edges[*i];
+                        e.line.zip(e.col).is_some_and(|(line, col)| {
+                            cols.col(&r.location.file, line, col) == r.location.span.start_col
+                        })
+                    })
+                    .collect();
+                if !exact.is_empty() || shared {
+                    hits = exact;
+                }
             }
             let mut bound = false;
             let mut site_dropped = 0usize;
@@ -1774,8 +1856,17 @@ impl Prepared {
                 unbound.push(r.clone());
             }
         }
-        // Codegraph-only edges sourced in files extracted this run.
-        for (i, e) in self.snap.edges.iter().enumerate() {
+        // Codegraph-only edges sourced in files extracted this run, one file at a time (their
+        // columns are converted from the file's text).
+        let mut order: Vec<usize> = (0..self.snap.edges.len()).collect();
+        order.sort_by_key(|i| {
+            self.snap
+                .nodes
+                .get(&self.snap.edges[*i].source)
+                .map(|n| n.file.as_str())
+        });
+        for i in order {
+            let e = &self.snap.edges[i];
             if consumed.contains(&i) || accounted.contains(&i) {
                 continue;
             }
@@ -1800,13 +1891,17 @@ impl Prepared {
             if source == target {
                 continue;
             }
+            let col = e
+                .line
+                .zip(e.col)
+                .map_or(0, |(line, col)| cols.col(&path, line, col));
             let span = Span {
                 start_byte: 0,
                 end_byte: 0,
                 start_line: e.line.unwrap_or(0).saturating_sub(1),
-                start_col: e.col.unwrap_or(0),
+                start_col: col,
                 end_line: e.line.unwrap_or(0).saturating_sub(1),
-                end_col: e.col.unwrap_or(0),
+                end_col: col,
             };
             edges.push(codegraph_edge(
                 source.clone(),
@@ -1817,7 +1912,9 @@ impl Prepared {
             ));
         }
         // Codegraph's unresolved rows at sites no estate ref covered.
-        for u in &self.snap.unresolved {
+        let mut order: Vec<&CgUnresolved> = self.snap.unresolved.iter().collect();
+        order.sort_by(|a, b| a.file.cmp(&b.file));
+        for u in order {
             let path = format!("{}{}", self.prefix, u.file);
             if !extracted.contains(&path) || ids.ambiguous.contains_key(&path) {
                 continue;
@@ -1833,13 +1930,14 @@ impl Prepared {
                 continue;
             };
             covered.insert(key);
+            let col = cols.col(&path, u.line, u.col);
             let span = Span {
                 start_byte: 0,
                 end_byte: 0,
                 start_line: u.line.saturating_sub(1),
-                start_col: u.col,
+                start_col: col,
                 end_line: u.line.saturating_sub(1),
-                end_col: u.col,
+                end_col: col,
             };
             unresolved.push(UnresolvedRef {
                 from: from.clone(),
@@ -2109,6 +2207,201 @@ mod tests {
                     .any(|(_, t, by)| t == target && by.starts_with("codegraph:")),
                 "both() must call {target}: {both:?}"
             );
+        }
+    }
+
+    /// estate#653: codegraph counts columns in UTF-16 code units, estate in bytes. A comment
+    /// with non-ASCII text before `new A().run() + new B().run()` puts each call's byte column
+    /// where codegraph's column for the other call is (8 emoji: 16 units, 32 bytes), so the A
+    /// call took B.run's site. Each call binds its own site.
+    #[test]
+    fn same_line_calls_after_non_ascii_text_bind_their_own_sites_653() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let path = root.join("src/same.ts");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let prefix = format!("/* {} */ ", "\u{1f600}".repeat(8));
+        let units = prefix.encode_utf16().count();
+        assert_eq!((units, prefix.len()), (23, 39));
+        std::fs::write(
+            &path,
+            text.replacen(
+                "export function both",
+                &format!("{prefix}export function both"),
+                1,
+            ),
+        )
+        .unwrap();
+        // Codegraph's columns for line 2 move by the prefix's UTF-16 length.
+        let sql = format!(
+            "{FIXTURE_SQL}\nUPDATE edges SET col = col + {units} WHERE line = 2 AND col IS NOT NULL \
+             AND source = 'function:f1b34979e8483a414e6e2aa7fc4161a6';\n\
+             UPDATE nodes SET start_column = start_column + {units}, end_column = end_column + {units} \
+             WHERE id = 'function:f1b34979e8483a414e6e2aa7fc4161a6';"
+        );
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        // Each target is called once, from its own call's site (byte columns 79 and 95). The
+        // site a ref did not bind is still imported as a codegraph-only edge, so the counts
+        // alone cannot tell; the edge's site can.
+        let line = text.lines().nth(1).unwrap().to_string();
+        let at = |call: &str| (prefix.len() + line.find(call).unwrap()) as u32;
+        let mut sites: Vec<(String, u32)> = store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.kind == EdgeKind::Calls
+                    && e.source.0 == "ts-typescript . . . src/same/both()."
+                    && e.resolved_by.starts_with("codegraph:")
+                    && e.target.0.ends_with("#run().")
+            })
+            .map(|e| {
+                let col = e.location.as_ref().map_or(u32::MAX, |l| l.span.start_col);
+                (e.target.0, col)
+            })
+            .collect();
+        sites.sort();
+        assert_eq!(
+            sites,
+            vec![
+                (
+                    "ts-typescript . . . src/same/A#run().".to_string(),
+                    at("new A()")
+                ),
+                (
+                    "ts-typescript . . . src/same/B#run().".to_string(),
+                    at("new B()")
+                ),
+            ],
+            "each call binds its own site"
+        );
+    }
+
+    /// #659 round 1 (codex F1): the value-flow replay re-resolves an unchanged caller's refs
+    /// with no file extracted this run, so the #653 conversion must not depend on the caller's
+    /// file being extracted. The replay's call shape: `resolve` with an empty extracted set.
+    #[test]
+    fn a_replayed_same_line_call_after_non_ascii_text_binds_its_own_site_653() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let path = root.join("src/same.ts");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let prefix = format!("/* {} */ ", "\u{1f600}".repeat(8));
+        let units = prefix.encode_utf16().count();
+        let edited = text.replacen(
+            "export function both",
+            &format!("{prefix}export function both"),
+            1,
+        );
+        std::fs::write(&path, &edited).unwrap();
+        let sql = format!(
+            "{FIXTURE_SQL}\nUPDATE edges SET col = col + {units} WHERE line = 2 AND col IS NOT NULL \
+             AND source = 'function:f1b34979e8483a414e6e2aa7fc4161a6';\n\
+             UPDATE nodes SET start_column = start_column + {units}, end_column = end_column + {units} \
+             WHERE id = 'function:f1b34979e8483a414e6e2aa7fc4161a6';"
+        );
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        // The next run's codegraph state, with same.ts unchanged.
+        let read = |raw: &str| std::fs::read_to_string(root.join(raw)).ok();
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = Some(sql.clone()));
+        let (prepared, _) = prepare(
+            &cfg,
+            PrepareInput {
+                root: &root,
+                prefix: "",
+                files: vec![MirrorFile {
+                    raw: "src/same.ts".into(),
+                    digest: crate::file_digest(edited.as_bytes()),
+                }],
+                configs: Vec::new(),
+                read: &read,
+                unchanged: vec!["src/same.ts".into()],
+                stored: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = None);
+        let nodes = store.all_nodes().unwrap();
+        let node_refs: Vec<&Node> = nodes.iter().collect();
+        let stored_text = |file: &str| store.file_content(file).ok().flatten();
+        let ids = prepared.id_map(&node_refs, &HashSet::new(), &stored_text);
+        let line = text.lines().nth(1).unwrap();
+        let at = |call: &str| (prefix.len() + line.find(call).unwrap()) as u32;
+        let call = |col: u32| {
+            UnresolvedRef::new(
+                SymbolId("ts-typescript . . . src/same/both().".into()),
+                "run",
+                EdgeKind::Calls,
+                Location::new(
+                    "src/same.ts",
+                    Span {
+                        start_byte: 0,
+                        end_byte: 0,
+                        start_line: 1,
+                        start_col: col,
+                        end_line: 1,
+                        end_col: col,
+                    },
+                ),
+            )
+        };
+        let refs = vec![call(at("new A()")), call(at("new B()"))];
+        let (edges, _, _) = prepared.resolve(&refs, &ids, &HashSet::new(), &stored_text);
+        let mut bound: Vec<(u32, String)> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .filter_map(|e| Some((e.location.as_ref()?.span.start_col, e.target.0.clone())))
+            .collect();
+        bound.sort();
+        assert_eq!(
+            bound,
+            vec![
+                (
+                    at("new A()"),
+                    "ts-typescript . . . src/same/A#run().".to_string()
+                ),
+                (
+                    at("new B()"),
+                    "ts-typescript . . . src/same/B#run().".to_string()
+                ),
+            ],
+            "each replayed call binds its own site"
+        );
+    }
+
+    /// #659 round 1 (codex F4): a mapping-time fallback stores `skipped:no-defs|…` (or
+    /// `ambiguous-def`), but the next run's verdict comes from codegraph's file errors alone
+    /// (`ok`), so an unchanged file was re-extracted on every run. Same facts: not forced. A
+    /// file saved mid-run, or whose facts moved, still is.
+    #[test]
+    fn an_unchanged_mapping_fallback_is_not_re_extracted_656() {
+        let raw = "src/p/Shapes.java";
+        let snap = || {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(FIXTURE_SQL).unwrap();
+            Snapshot::from_conn(&conn).unwrap()
+        };
+        let facts = snap().fingerprints()[raw].clone();
+        let files = vec![MirrorFile {
+            raw: raw.into(),
+            digest: "d".into(),
+        }];
+        let unchanged = vec![raw.to_string()];
+        for (stored, forced) in [
+            (format!("ok|{facts}"), false),
+            (format!("skipped:no-defs|{facts}"), false),
+            (format!("skipped:ambiguous-def|{facts}"), false),
+            (format!("skipped:changed-during-run|{facts}"), true),
+            ("skipped:no-defs|1:other".to_string(), true),
+        ] {
+            let stored_map = BTreeMap::from([(raw.to_string(), stored.clone())]);
+            let (_, got) =
+                Prepared::new("", snap(), &files, &HashSet::new(), &unchanged, &stored_map);
+            assert_eq!(got.contains(&raw.to_string()), forced, "{stored}");
         }
     }
 
@@ -2621,6 +2914,71 @@ mod tests {
         assert!(!holds_point(&store));
     }
 
+    /// estate#656 (1): a file codegraph answered last run that falls back at mapping time
+    /// (`no-defs` here: codegraph now finds no definition where estate finds some) loses its
+    /// minted nodes. That happens after `CODEGRAPH-OFF` was decided, so the loss went unreported
+    /// and the stored verdict still said `ok`. The report names the linked node, and the
+    /// fingerprint records the fallback.
+    #[test]
+    fn a_file_that_falls_back_at_mapping_time_reports_its_minted_nodes_656() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
+        let minted = minted_in(&store, |f| f == "src/p/Shapes.java");
+        assert!(minted > 0);
+        let (xedge, writer) = xedge_about_point(tmp.path());
+        let no_defs = format!(
+            "{FIXTURE_SQL}\n\
+             DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = 'src/p/Shapes.java') \
+             OR target IN (SELECT id FROM nodes WHERE file_path = 'src/p/Shapes.java');\n\
+             DELETE FROM unresolved_refs WHERE file_path = 'src/p/Shapes.java';\n\
+             DELETE FROM nodes WHERE file_path = 'src/p/Shapes.java' AND kind <> 'file';"
+        );
+        let report = index_reporting(&mut store, Some(&cfg), Some(&no_defs), &xedge)
+            .expect("a CODEGRAPH-OFF report for the late fallback");
+        drop(writer);
+        assert_eq!(report.minted, minted, "{report:?}");
+        assert_eq!(report.files, 1, "{report:?}");
+        assert_eq!(report.linked, vec![MINTED_POINT.to_string()], "{report:?}");
+        assert!(!holds_point(&store));
+        let fps = parse_fingerprints(store.meta_get_key(FINGERPRINTS_META).as_deref());
+        assert!(
+            fps.get("src/p/Shapes.java")
+                .is_some_and(|fp| fp.starts_with("skipped:no-defs|")),
+            "{fps:?}"
+        );
+    }
+
+    /// estate#656 (2): the no-change early return skipped the codegraph meta. Switching off an
+    /// unchanged repo whose stored verdicts are all skipped forced no file, so the run returned
+    /// early and kept the old fingerprints; a later failed `--codegraph` run then reported
+    /// `CODEGRAPH-FAILED` as if codegraph's facts were live. The switch-off clears them.
+    #[test]
+    fn switching_off_an_unchanged_repo_clears_the_fingerprints_656() {
+        let all_skipped = format!(
+            "{FIXTURE_SQL}\nUPDATE files SET errors = '[{{\"message\":\"too big\",\"severity\":\"error\",\"code\":\"size_exceeded\"}}]', node_count = 0;"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(&all_skipped));
+        let fps = parse_fingerprints(store.meta_get_key(FINGERPRINTS_META).as_deref());
+        assert!(
+            !fps.is_empty() && fps.values().all(|fp| fp.starts_with("skipped:")),
+            "{fps:?}"
+        );
+        index(&mut store, &fixture_root(), None, None);
+        assert_eq!(
+            store
+                .meta_get_key(FINGERPRINTS_META)
+                .as_deref()
+                .unwrap_or(""),
+            "",
+            "codegraph is off: no fingerprints stay"
+        );
+    }
+
     /// `path` as an SQLite `file:` URI, on Windows too (`file:///C:/...`).
     fn file_uri(path: &str) -> String {
         let p = path.replace('\\', "/");
@@ -2735,6 +3093,139 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// estate#654: the resolution index was built from the store before `id_map` minted this
+    /// run's nodes, so on the run that mints them (the first, and any that re-extracts the file)
+    /// the fall-through did not see them. A codegraph-unbound call named like a minted definition
+    /// and like one definition in a fallen-back file bound into the fallen-back file; the next
+    /// run, with the minted node stored, found the name ambiguous and parked the call. The run
+    /// that mints must see what a later run sees.
+    #[test]
+    fn a_minted_definition_is_a_fall_through_candidate_on_the_run_that_mints_it_654() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let edit = |path: &str, from: &str, to: &str| {
+            let p = root.join(path);
+            let s = std::fs::read_to_string(&p).unwrap();
+            assert!(s.contains(from), "{path} holds {from:?}");
+            std::fs::write(&p, s.replacen(from, to, 1)).unwrap();
+        };
+        // A call codegraph has no site for (the recording predates it), after the `helper` and
+        // `trim` sites so their columns stay.
+        edit(
+            "src/svc.ts",
+            "return helper(id).trim(); }",
+            "return helper(id).trim() + assist(id); }",
+        );
+        // The fallen-back file's own `assist`, estate's node.
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function assist(s: string): string { return s; }\n");
+        std::fs::write(&lib, text).unwrap();
+        // A definition only codegraph has, in the codegraph file src/util.ts: it is minted.
+        let sql = format!(
+            "{}\nINSERT INTO nodes VALUES('function:synthetic-assist','function','assist','assist',\
+             'src/util.ts','typescript',3,3,0,40,NULL,'(s: string): string',NULL,1,0,0,0,NULL,NULL,\
+             NULL,0);",
+            lib_util_fell_back_sql()
+        );
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        assert!(
+            store.all_nodes().unwrap().iter().any(|n| {
+                n.location.file == "src/util.ts"
+                    && n.name == "assist"
+                    && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+            }),
+            "util.ts's assist is minted"
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get = calls_from(&calls, GET);
+        assert!(
+            !from_get.iter().any(|(_, t, _)| t.ends_with("/assist().")),
+            "two definitions named assist: the call binds neither: {from_get:?}"
+        );
+        let parked = store
+            .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}assist"))
+            .unwrap();
+        assert!(
+            parked.iter().any(|r| r.from.0 == GET),
+            "the call parks, as it does on a later run: {parked:?}"
+        );
+    }
+
+    /// #659 round 1 (codex F2): a ref parked on an earlier run, in a file this run does not
+    /// extract, is re-tried by the backfill for every new definition's name. A definition this
+    /// run mints is new too: the parked call binds it, as a full index would.
+    #[test]
+    fn a_parked_call_binds_a_definition_minted_on_a_later_run_654() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        // The fallen-back file calls `assist`, which nothing defines yet: the call parks.
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function useAssist(s: string): string { return assist(s); }\n");
+        std::fs::write(&lib, text).unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
+        let from_lib = |store: &SqliteStore| {
+            store
+                .unresolved_refs_for_name("assist")
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.location.file == "src/lib/util.ts")
+                .count()
+        };
+        assert_eq!(
+            from_lib(&store),
+            1,
+            "the call parks while nothing defines assist"
+        );
+        // The next run re-extracts src/util.ts, where codegraph now has an `assist` estate's
+        // extractor does not: it is minted. src/lib/util.ts is unchanged.
+        let util = root.join("src/util.ts");
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched\n");
+        std::fs::write(&util, text).unwrap();
+        let sql = format!(
+            "{}\nINSERT INTO nodes VALUES('function:synthetic-assist','function','assist','assist',\
+             'src/util.ts','typescript',3,3,0,40,NULL,'(s: string): string',NULL,1,0,0,0,NULL,NULL,\
+             NULL,0);",
+            lib_util_fell_back_sql()
+        );
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        let minted: Vec<String> = store
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .filter(|n| {
+                n.location.file == "src/util.ts"
+                    && n.name == "assist"
+                    && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+            })
+            .map(|n| n.symbol.0)
+            .collect();
+        assert_eq!(minted.len(), 1, "util.ts's assist is minted");
+        let bound = store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.kind == EdgeKind::Calls
+                    && e.source.0.ends_with("/useAssist().")
+                    && e.target.0 == minted[0]
+            })
+            .count();
+        assert_eq!(bound, 1, "the parked call binds the minted assist");
+        assert_eq!(from_lib(&store), 0, "and is no longer parked");
     }
 
     #[test]

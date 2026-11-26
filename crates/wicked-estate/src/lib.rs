@@ -385,6 +385,19 @@ impl InMemoryIndex {
     fn nodes(&self) -> impl Iterator<Item = &Node> {
         self.by_id.values()
     }
+
+    /// Add a node written later in the run (codegraph's minted nodes, estate#654), so this run
+    /// resolves against the population a later run reads from the store. A known id is kept.
+    fn insert(&mut self, n: Node) {
+        if self.by_id.contains_key(&n.symbol) {
+            return;
+        }
+        self.by_name
+            .entry(n.name.clone())
+            .or_default()
+            .push(n.clone());
+        self.by_id.insert(n.symbol.clone(), n);
+    }
 }
 
 impl SymbolIndex for InMemoryIndex {
@@ -484,13 +497,14 @@ fn resolve_with_codegraph(
     index: &InMemoryIndex,
     codegraph: Option<(&codegraph::Prepared, &codegraph::IdMap)>,
     extracted: &HashSet<String>,
+    text: &dyn Fn(&str) -> Option<String>,
 ) -> Result<wicked_estate_resolve::Resolution> {
     let Some((cg, ids)) = codegraph else {
         return resolve_all_with_coverage(resolvers, refs, index);
     };
     let (owned, rest): (Vec<_>, Vec<_>) = refs.iter().cloned().partition(|r| cg.owns(r, ids));
     let mut resolution = resolve_all_with_coverage(resolvers, &rest, index)?;
-    let (mut edges, unbound, mut unresolved) = cg.resolve(&owned, ids, extracted);
+    let (mut edges, unbound, mut unresolved) = cg.resolve(&owned, ids, extracted, text);
     // A ref codegraph bound nothing for goes to estate's resolvers, which may bind it only into
     // files codegraph does not answer for: a file that fell back (its callers would otherwise
     // lose every edge into it), a file in an unswitched language, a stylesheet or a JSON file.
@@ -632,12 +646,20 @@ fn xedge_db_for_run() -> Option<String> {
     TEST_XEDGE_DB.with(|t| t.borrow().clone())
 }
 
+/// The nodes codegraph minted in some files, and which of them carry links from outside
+/// codegraph's own facts, read before a run deletes them.
+struct MintedLeaving {
+    /// (estate path, minted id, linked from outside).
+    nodes: Vec<(String, String, bool)>,
+    xedge_note: String,
+}
+
 /// A run that stops codegraph answering for a file (switched off, the file fell back, or its
 /// language narrowed out) re-extracts it with estate's pipeline, which drops the nodes codegraph
 /// minted there. Say so before it happens, and name the minted ids something outside codegraph's
 /// own facts links to: a graph edge (an annotation), or a knowledge or memory link in xedge.db.
 /// Those links dangle once the node is gone. xedge.db is read only if it exists, never written.
-fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String>) -> Result<()> {
+fn minted_leaving(store: &dyn GraphStoreMutExt, files: &HashSet<String>) -> Result<MintedLeaving> {
     let minted: Vec<Node> = store
         .all_nodes()?
         .into_iter()
@@ -647,7 +669,10 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
         })
         .collect();
     if minted.is_empty() {
-        return Ok(());
+        return Ok(MintedLeaving {
+            nodes: Vec::new(),
+            xedge_note: String::new(),
+        });
     }
     let (mut xedges, mut xedge_note) = match xedge_db_for_run() {
         // A `file:` URI (the MCP accepts one) is opened as given; a missing target then reads
@@ -664,7 +689,7 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
         Some(path) => (None, format!("no xedge.db at {path}")),
         None => (None, "no xedge.db".to_string()),
     };
-    let mut linked = Vec::new();
+    let mut nodes = Vec::new();
     for n in &minted {
         let mut outside = store
             .neighbors(&n.symbol, wicked_estate_core::Direction::Dependents)?
@@ -681,22 +706,38 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
                 }
             }
         }
-        if outside {
-            linked.push(n.symbol.0.clone());
-        }
+        nodes.push((n.location.file.clone(), n.symbol.0.clone(), outside));
     }
-    let minted_files = minted
+    Ok(MintedLeaving { nodes, xedge_note })
+}
+
+/// Print the `CODEGRAPH-OFF` line for the leaving nodes of `only` (every file when `None`).
+fn print_minted_leaving(leaving: &MintedLeaving, only: Option<&HashSet<String>>) {
+    let nodes: Vec<&(String, String, bool)> = leaving
+        .nodes
         .iter()
-        .map(|n| n.location.file.as_str())
+        .filter(|(file, _, _)| only.is_none_or(|o| o.contains(file)))
+        .collect();
+    if nodes.is_empty() {
+        return;
+    }
+    let linked: Vec<String> = nodes
+        .iter()
+        .filter(|(_, _, linked)| *linked)
+        .map(|(_, id, _)| id.clone())
+        .collect();
+    let minted_files = nodes
+        .iter()
+        .map(|(file, _, _)| file.as_str())
         .collect::<HashSet<_>>()
         .len();
     // Every linked id is named: each is a link the user loses.
     let line = format!(
         "CODEGRAPH-OFF: {} node(s) codegraph minted in {} file(s) leave the graph; {} carry links from outside codegraph's facts (graph edges, or knowledge and memory links; {}), which will dangle{}",
-        minted.len(),
+        nodes.len(),
         minted_files,
         linked.len(),
-        xedge_note,
+        leaving.xedge_note,
         if linked.is_empty() {
             String::new()
         } else {
@@ -706,14 +747,13 @@ fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String
     #[cfg(test)]
     LAST_MINTED_REPORT.with(|r| {
         *r.borrow_mut() = Some(MintedReport {
-            minted: minted.len(),
+            minted: nodes.len(),
             files: minted_files,
             linked: linked.clone(),
             line: line.clone(),
         })
     });
     eprintln!("{line}");
-    Ok(())
 }
 
 /// An estate resolver whose edges into files codegraph answers for are dropped (see
@@ -2540,23 +2580,40 @@ fn index_path_inner(
     );
     // Files whose minted nodes this run deletes: the last run answered them and this one does
     // not (codegraph off or failed, the file fell back, or its language was narrowed out). One
-    // report covers every such path (estate#597).
+    // report covers every such path (estate#597); a file that falls back later in the run gets a
+    // second report after mapping (estate#656).
+    let reextracted_ok = |path: &str, fp: &str| {
+        fp.starts_with("ok|")
+            && work_by_rel.contains_key(path)
+            && (changed_seed.contains(path) || codegraph_forced.contains(path))
+    };
+    let still_ok = |path: &str| {
+        matches!(
+            codegraph_state.as_ref().and_then(|cg| cg.verdict(path)),
+            Some(codegraph::Verdict::Ok)
+        )
+    };
     let leaving: HashSet<String> = stored_fingerprints
         .iter()
-        .filter(|(path, fp)| {
-            fp.starts_with("ok|")
-                && work_by_rel.contains_key(*path)
-                && (changed_seed.contains(*path) || codegraph_forced.contains(*path))
-                && !matches!(
-                    codegraph_state.as_ref().and_then(|cg| cg.verdict(path)),
-                    Some(codegraph::Verdict::Ok)
-                )
-        })
+        .filter(|(path, fp)| reextracted_ok(path, fp) && !still_ok(path))
         .map(|(path, _)| path.clone())
         .collect();
-    if !leaving.is_empty() {
-        report_minted_going_away(store, &leaving)?;
-    }
+    // Files that stay codegraph's for now but may still fall back at mapping time (`no-defs`,
+    // `ambiguous-def`) or when saved mid-run: their minted nodes are read now, while the store
+    // still holds them, and reported after mapping if the file did fall back (estate#656).
+    let at_risk: HashSet<String> = stored_fingerprints
+        .iter()
+        .filter(|(path, fp)| reextracted_ok(path, fp) && still_ok(path))
+        .map(|(path, _)| path.clone())
+        .collect();
+    let late_leaving = if leaving.is_empty() && at_risk.is_empty() {
+        None
+    } else {
+        let files: HashSet<String> = leaving.union(&at_risk).cloned().collect();
+        let read = minted_leaving(store, &files)?;
+        print_minted_leaving(&read, Some(&leaving));
+        Some(read)
+    };
     changed_seed.extend(codegraph_forced.iter().cloned());
 
     // Call-derived value-flow edges can be stored with a changed callee-owned parameter/return
@@ -2810,6 +2867,13 @@ fn index_path_inner(
             (&doc_skips_key, &skipped_documents),
         );
         flush_doc_skips(&skipped_documents, &unreadable_files);
+        // The codegraph meta follows this run too: a switch-off that forced no file still clears
+        // the fingerprints (estate#656).
+        match &codegraph_state {
+            Some(cg) => store.meta_set_key(&fingerprints_key, &cg.fingerprints_json()),
+            None if !stored_fingerprints.is_empty() => store.meta_set_key(&fingerprints_key, ""),
+            None => {}
+        }
         return store.stats();
     }
 
@@ -3299,7 +3363,6 @@ fn index_path_inner(
         }
         // Identical source cannot introduce another name; pass two never schedules a third.
     }
-    drop(seen_probes);
     // Release the pre-run population before materializing the resolution index.
     drop(pre_run_symbols);
     drop(old_candidates);
@@ -3399,7 +3462,7 @@ fn index_path_inner(
     //
     // The index owns its data (clones of all nodes), so it outlives the read borrow and is
     // shared with the back-fill pass.
-    let index = {
+    let mut index = {
         let reader: &dyn GraphRead = &*store;
         // Scoped to this repo: a labelled run resolves against its own nodes only, so a name that
         // is unique inside the repo stays unique no matter how many repos share the graph.
@@ -3434,14 +3497,53 @@ fn index_path_inner(
         }
         ids
     });
+    // A file mapping put back to estate's pipeline records that in its fingerprint, and the
+    // minted nodes it loses are reported like any other fallback's (estate#656).
+    if let (Some(cg), Some(ids)) = (codegraph_state.as_mut(), codegraph_ids.as_ref()) {
+        for (path, reason) in &ids.ambiguous {
+            cg.fall_back(path, reason);
+        }
+    }
+    if let (Some(read), Some(cg)) = (&late_leaving, codegraph_state.as_ref()) {
+        let late: HashSet<String> = at_risk
+            .iter()
+            .filter(|path| !matches!(cg.verdict(path), Some(codegraph::Verdict::Ok)))
+            .cloned()
+            .collect();
+        if !late.is_empty() {
+            print_minted_leaving(read, Some(&late));
+        }
+    }
+    // The minted nodes are written with this run's edges, but every resolver below must already
+    // see them: a later run reads them from the store (estate#654).
+    // They are new definitions too: the backfill re-tries refs parked on their names, from
+    // files this run did not extract (#659 round 1).
+    if let Some(ids) = &codegraph_ids {
+        for n in &ids.minted {
+            if !n.name.is_empty() {
+                for probe in node_backfill_probes(n) {
+                    if seen_probes.insert(probe.clone()) {
+                        backfill_probes.push(probe);
+                    }
+                }
+            }
+            index.insert(n.clone());
+        }
+    }
+    drop(seen_probes);
     let codegraph_pair = codegraph_state.as_ref().zip(codegraph_ids.as_ref());
-    let resolution = resolve_with_codegraph(
-        resolvers,
-        &all_refs,
-        &index,
-        codegraph_pair,
-        &extracted_files,
-    )?;
+    let resolution = {
+        let reader: &dyn GraphRead = &*store;
+        let text = |file: &str| reader.file_content(file).ok().flatten();
+        resolve_with_codegraph(
+            resolvers,
+            &all_refs,
+            &index,
+            codegraph_pair,
+            &extracted_files,
+            &text,
+        )?
+    };
     let call_ref_hints = call_value_ref_hints(&all_refs);
     let (call_flow_nodes, call_flow_edges) =
         call_value_flow(&resolution.site_edges, &index, &call_ref_hints)?;
@@ -3504,13 +3606,18 @@ fn index_path_inner(
     if !rederive_refs.is_empty() {
         let mut targets = changed_symbols.clone();
         targets.extend(extracted_symbols);
-        let rederived = resolve_with_codegraph(
-            resolvers,
-            &rederive_refs,
-            &index,
-            codegraph_pair,
-            &HashSet::new(),
-        )?;
+        let rederived = {
+            let reader: &dyn GraphRead = &*store;
+            let text = |file: &str| reader.file_content(file).ok().flatten();
+            resolve_with_codegraph(
+                resolvers,
+                &rederive_refs,
+                &index,
+                codegraph_pair,
+                &HashSet::new(),
+                &text,
+            )?
+        };
         let sites: HashSet<CallSiteKey> = rederived
             .site_edges
             .iter()
