@@ -3112,6 +3112,78 @@ mod tests {
         );
     }
 
+    /// #659 round 1 (codex F2): a ref parked on an earlier run, in a file this run does not
+    /// extract, is re-tried by the backfill for every new definition's name. A definition this
+    /// run mints is new too: the parked call binds it, as a full index would.
+    #[test]
+    fn a_parked_call_binds_a_definition_minted_on_a_later_run_654() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        // The fallen-back file calls `assist`, which nothing defines yet: the call parks.
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function useAssist(s: string): string { return assist(s); }\n");
+        std::fs::write(&lib, text).unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
+        let from_lib = |store: &SqliteStore| {
+            store
+                .unresolved_refs_for_name("assist")
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.location.file == "src/lib/util.ts")
+                .count()
+        };
+        assert_eq!(
+            from_lib(&store),
+            1,
+            "the call parks while nothing defines assist"
+        );
+        // The next run re-extracts src/util.ts, where codegraph now has an `assist` estate's
+        // extractor does not: it is minted. src/lib/util.ts is unchanged.
+        let util = root.join("src/util.ts");
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched\n");
+        std::fs::write(&util, text).unwrap();
+        let sql = format!(
+            "{}\nINSERT INTO nodes VALUES('function:synthetic-assist','function','assist','assist',\
+             'src/util.ts','typescript',3,3,0,40,NULL,'(s: string): string',NULL,1,0,0,0,NULL,NULL,\
+             NULL,0);",
+            lib_util_fell_back_sql()
+        );
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        let minted: Vec<String> = store
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .filter(|n| {
+                n.location.file == "src/util.ts"
+                    && n.name == "assist"
+                    && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+            })
+            .map(|n| n.id.0)
+            .collect();
+        assert_eq!(minted.len(), 1, "util.ts's assist is minted");
+        let bound = store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.kind == EdgeKind::Calls
+                    && e.source.0.ends_with("/useAssist().")
+                    && e.target.0 == minted[0]
+            })
+            .count();
+        assert_eq!(bound, 1, "the parked call binds the minted assist");
+        assert_eq!(from_lib(&store), 0, "and is no longer parked");
+    }
+
     #[test]
     fn a_fall_through_call_named_like_a_codegraph_definition_stays_ambiguous_594() {
         // estate#594 (N1, W12): the same fall-back, with the call's only evidence the tsconfig
