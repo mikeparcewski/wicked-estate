@@ -345,13 +345,14 @@ pub struct MirrorFile {
 /// Bring the mirror in line with `files` (switched sources) and `configs` (resolver config
 /// files). A source is rewritten only when its digest changed; a config when its text did.
 /// Files no longer listed are removed. `read` returns the redacted text, `None` when the file
-/// cannot be read (it is left out of the mirror, so codegraph reports it absent).
+/// cannot be read or no longer has the digest the caller classified (it is left out of the
+/// mirror). Returns the sources left out: they keep estate's pipeline this run.
 fn sync_mirror(
     cfg: &CodegraphConfig,
     files: &[MirrorFile],
     configs: &[String],
     read: &(dyn Fn(&str) -> Option<String> + Sync),
-) -> std::io::Result<()> {
+) -> std::io::Result<HashSet<String>> {
     let root = cfg.mirror_root();
     std::fs::create_dir_all(&root)?;
     let index_path = cfg.state_dir.join("mirror.json");
@@ -360,6 +361,7 @@ fn sync_mirror(
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     let mut next: BTreeMap<String, String> = BTreeMap::new();
+    let mut not_mirrored = HashSet::new();
     for f in files {
         if !safe_rel(&f.raw) {
             continue;
@@ -379,6 +381,7 @@ fn sync_mirror(
             }
             None => {
                 let _ = std::fs::remove_file(&target);
+                not_mirrored.insert(f.raw.clone());
             }
         }
     }
@@ -411,7 +414,7 @@ fn sync_mirror(
         &index_path,
         serde_json::to_string(&next).unwrap_or_else(|_| "{}".into()),
     )?;
-    Ok(())
+    Ok(not_mirrored)
 }
 
 /// A repo-relative path that stays inside the mirror and never touches codegraph's own dir.
@@ -970,7 +973,7 @@ pub fn prepare(
         );
         #[cfg(test)]
         mirror_hook("before-mirror");
-        sync_mirror(cfg, &input.files, &input.configs, input.read)
+        let not_mirrored = sync_mirror(cfg, &input.files, &input.configs, input.read)
             .map_err(|e| format!("mirror: {e}"))?;
         #[cfg(test)]
         mirror_hook("after-mirror");
@@ -984,12 +987,13 @@ pub fn prepare(
             input.prefix,
             snap,
             &input.files,
+            &not_mirrored,
             &input.unchanged,
             &input.stored,
         ));
     }
     verify_bundle(cfg)?;
-    sync_mirror(cfg, &input.files, &input.configs, input.read)
+    let not_mirrored = sync_mirror(cfg, &input.files, &input.configs, input.read)
         .map_err(|e| format!("mirror: {e}"))?;
     run_codegraph(cfg)?;
     let snap = Snapshot::read(&cfg.db_path())?;
@@ -997,6 +1001,7 @@ pub fn prepare(
         input.prefix,
         snap,
         &input.files,
+        &not_mirrored,
         &input.unchanged,
         &input.stored,
     ))
@@ -1007,12 +1012,18 @@ impl Prepared {
         prefix: &str,
         snap: Snapshot,
         files: &[MirrorFile],
+        not_mirrored: &HashSet<String>,
         unchanged: &[String],
         stored: &BTreeMap<String, String>,
     ) -> (Prepared, Vec<String>) {
         let mut verdicts = HashMap::new();
         for f in files {
-            verdicts.insert(format!("{prefix}{}", f.raw), file_verdict(&snap, &f.raw));
+            let verdict = if not_mirrored.contains(&f.raw) {
+                Verdict::Skipped("not-mirrored".into())
+            } else {
+                file_verdict(&snap, &f.raw)
+            };
+            verdicts.insert(format!("{prefix}{}", f.raw), verdict);
         }
         let current = snap.fingerprints();
         let mut fingerprints = BTreeMap::new();
@@ -1056,6 +1067,27 @@ impl Prepared {
     /// The verdict of an estate path, `None` for a file codegraph does not cover.
     pub fn verdict(&self, path: &str) -> Option<&Verdict> {
         self.verdicts.get(path)
+    }
+
+    /// Hand a file codegraph answered back to estate's pipeline for this run (its bytes changed
+    /// after the mirror read them, estate#657). Its fingerprint records the fallback, so the next
+    /// run re-extracts it. Returns whether the file was codegraph's.
+    pub fn fall_back(&mut self, path: &str, reason: &str) -> bool {
+        let Some(verdict) = self.verdicts.get_mut(path) else {
+            return false;
+        };
+        if !matches!(verdict, Verdict::Ok) {
+            return false;
+        }
+        *verdict = Verdict::Skipped(reason.to_string());
+        if let Some(fp) = self.fingerprints.get_mut(path) {
+            let facts = fp
+                .split_once('|')
+                .map_or("-", |(_, facts)| facts)
+                .to_string();
+            *fp = format!("skipped:{reason}|{facts}");
+        }
+        true
     }
 
     /// This run's fingerprints for [`FINGERPRINTS_META`]. Store them only after the run's

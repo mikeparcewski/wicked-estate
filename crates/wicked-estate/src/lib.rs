@@ -2460,12 +2460,26 @@ fn index_path_inner(
             .filter(|fw| cfg.switched_path(&fw.raw) && !changed_seed.contains(&fw.rel))
             .map(|fw| fw.rel.clone())
             .collect();
+        // The digest each switched file was classified with: the mirror takes only those bytes.
+        let classified: HashMap<String, String> = files
+            .iter()
+            .map(|f| (f.raw.clone(), f.digest.clone()))
+            .collect();
         // The mirror holds exactly the text estate extracts from (#405 redaction, same length
         // and line breaks), read through the confined root. A minified file estate does not
         // extract is mirrored empty: codegraph would otherwise report facts about it that have
         // no estate node to land on (a vendored jquery.min.js held 884 of Alamofire's 1,065).
         let read = |raw: &str| -> Option<String> {
             let text = confined_root.as_ref()?.read_rel_to_string(Path::new(raw))?;
+            // A file saved since it was classified is left out of the mirror (it keeps estate's
+            // pipeline this run, `not-mirrored`), so mirror.json never records one revision's
+            // digest for another's text (estate#657). The next run mirrors it.
+            if classified
+                .get(raw)
+                .is_some_and(|d| *d != file_digest(text.as_bytes()))
+            {
+                return None;
+            }
             let redacted = wicked_estate_extract::redact::redact_source(raw, &text);
             // Resolver configs are mirrored whole: a one-line tsconfig is not minified source.
             let blank =
@@ -2492,7 +2506,8 @@ fn index_path_inner(
             Err(reason) if !stored_fingerprints.is_empty() => {
                 // The store holds codegraph's facts (minted ids that knowledge and memory may
                 // link to). One failed run must not switch the whole repo to the other producer:
-                // stop before any graph write, so the last good graph stays. Only an explicit
+                // stop before any node or edge is written, so the last good graph stays (the run's
+                // `indexing` marker stays set, as for any failed index). Only an explicit
                 // switch-off (no --codegraph) hands the files back to estate.
                 let msg = format!(
                     "CODEGRAPH-FAILED: {reason}; the graph keeps its last good state. Fix the run, or index without --codegraph to hand these files back to estate's pipeline"
@@ -2868,6 +2883,8 @@ fn index_path_inner(
     let mut backfill_probes = Vec::new();
     let mut seen_probes = HashSet::new();
     let mut read_digests = Vec::new();
+    // Files whose bytes changed between classification and extraction (estate#657).
+    let changed_during_run = std::sync::Mutex::new(Vec::new());
     let mut chunk_start = 0;
     for pass in 0..2 {
         while chunk_start < changed.len() {
@@ -2908,6 +2925,12 @@ fn index_path_inner(
                             }
                         }
                     };
+                    if source.as_ref().is_some_and(|s| s.digest != fw.digest) {
+                        changed_during_run
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(fw.rel.clone());
+                    }
                     // Every readable source keeps its chunk-time digest, even when extraction
                     // is skipped. Documents retain their raw-byte classification digest.
                     chunk_digests
@@ -3383,6 +3406,22 @@ fn index_path_inner(
         InMemoryIndex::build(reader, scope.as_deref())?
     };
     let extracted_files: HashSet<String> = changed.iter().map(|fw| fw.rel.clone()).collect();
+    // A switched file saved after the mirror read it: codegraph's facts and the definitions just
+    // extracted come from different revisions, so it keeps estate's pipeline this run. The next
+    // run mirrors the new text (its digest differs from mirror.json's) and re-extracts it (its
+    // fingerprint records the fallback). estate#657.
+    if let Some(cg) = codegraph_state.as_mut() {
+        let mut late = changed_during_run
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
+        late.sort();
+        late.dedup();
+        for path in late {
+            if cg.fall_back(&path, "changed-during-run") {
+                eprintln!("CODEGRAPH-SKIPPED: {path} changed-during-run");
+            }
+        }
+    }
     let codegraph_ids = codegraph_state.as_ref().map(|cg| {
         let nodes: Vec<&Node> = index.nodes().collect();
         // The stored text of a file extracted this run: minted nodes take their byte spans
