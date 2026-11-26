@@ -678,9 +678,26 @@ impl Snapshot {
     }
 
     /// Per-file fingerprint of everything codegraph says about the file's outgoing facts:
-    /// its error state, the edges sourced in it (targets by file + qualified name, never by
-    /// line, so an edit above a target does not move it) and its unresolved rows.
+    /// its error state, the edges sourced in it and its unresolved rows. A target is named by
+    /// file, qualified name, kind and its place in source order among the definitions sharing
+    /// those (overloads, estate#652), never by line, so an edit above a target does not move it.
     fn fingerprints(&self) -> BTreeMap<String, String> {
+        let mut twins: HashMap<(&str, &str, &str), Vec<&CgNode>> = HashMap::new();
+        for n in self.nodes.values() {
+            twins
+                .entry((n.file.as_str(), n.qualified_name.as_str(), n.kind.as_str()))
+                .or_default()
+                .push(n);
+        }
+        let mut ordinal: HashMap<&str, usize> = HashMap::new();
+        for group in twins.values_mut() {
+            group.sort_by(|a, b| {
+                (a.start_line, a.start_col, &a.id).cmp(&(b.start_line, b.start_col, &b.id))
+            });
+            for (i, n) in group.iter().enumerate() {
+                ordinal.insert(n.id.as_str(), i);
+            }
+        }
         let mut rows: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (path, errors) in &self.files {
             rows.entry(path.clone())
@@ -692,7 +709,7 @@ impl Snapshot {
                 continue;
             };
             rows.entry(s.file.clone()).or_default().push(format!(
-                "R|{}|{}|{}|{:?}|{:?}|{}|{}|{}|{:?}",
+                "R|{}|{}|{}|{:?}|{:?}|{}|{}|{}|{}|{:?}|{:?}",
                 s.qualified_name,
                 s.kind,
                 e.kind,
@@ -701,7 +718,9 @@ impl Snapshot {
                 t.file,
                 t.qualified_name,
                 t.kind,
-                e.confidence.map(|c| (c * 1000.0).round() as i64)
+                ordinal.get(t.id.as_str()).copied().unwrap_or(0),
+                e.confidence.map(|c| (c * 1000.0).round() as i64),
+                e.resolved_by,
             ));
         }
         for u in &self.unresolved {
