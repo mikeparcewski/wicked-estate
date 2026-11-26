@@ -2112,6 +2112,53 @@ mod tests {
         }
     }
 
+    /// estate#653: codegraph counts columns in UTF-16 code units, estate in bytes. A comment
+    /// with non-ASCII text before `new A().run() + new B().run()` puts each call's byte column
+    /// where codegraph's column for the other call is (8 emoji: 16 units, 32 bytes), so the A
+    /// call took B.run's site. Each call binds its own site.
+    #[test]
+    fn same_line_calls_after_non_ascii_text_bind_their_own_sites_653() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let path = root.join("src/same.ts");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let prefix = format!("/* {} */ ", "\u{1f600}".repeat(8));
+        let units = prefix.encode_utf16().count();
+        assert_eq!((units, prefix.len()), (23, 39));
+        std::fs::write(
+            &path,
+            text.replacen(
+                "export function both",
+                &format!("{prefix}export function both"),
+                1,
+            ),
+        )
+        .unwrap();
+        // Codegraph's columns for line 2 move by the prefix's UTF-16 length.
+        let sql = format!(
+            "{FIXTURE_SQL}\nUPDATE edges SET col = col + {units} WHERE line = 2 AND col IS NOT NULL \
+             AND source = 'function:f1b34979e8483a414e6e2aa7fc4161a6';\n\
+             UPDATE nodes SET start_column = start_column + {units}, end_column = end_column + {units} \
+             WHERE id = 'function:f1b34979e8483a414e6e2aa7fc4161a6';"
+        );
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        let calls = edges(&store, EdgeKind::Calls);
+        let both = calls_from(&calls, "ts-typescript . . . src/same/both().");
+        let a_run = "ts-typescript . . . src/same/A#run().";
+        let b_run = "ts-typescript . . . src/same/B#run().";
+        for target in [a_run, b_run] {
+            assert_eq!(
+                both.iter()
+                    .filter(|(_, t, by)| t == target && by.starts_with("codegraph:"))
+                    .count(),
+                1,
+                "one call binds {target}: {both:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_same_line_call_codegraph_left_unresolved_never_takes_its_neighbours_target() {
         // Codex r1 (W20): codegraph answered `new A().run()` but not `new B().run()` on the same
