@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Vendored grammars' hand-written C is reviewed, fuzzed and kept that way (#322). `vendor/SCANNER-REVIEW.md` records a line-by-line review of each of the 9 hand-written C files and headers against its git blob, and CI fails when a scanner changes without a new review. The review found that a `.cfs` file ending inside a `queryExecute("` string hung its parse: cfscript's query-text scan now stops at the end of the input, as a marked local patch (`WICKED PATCH 1`); `wicked-estate-tree-sitter-cfml` 0.26.23 carries it. The intake record holds the patch and checks that undoing it gives upstream's file. The review's other findings are #634 and #636 (fixed) and #631 (filed). CI fails a vendored `build.rs` that does more than compile C with `cc`. On PRs that touch `vendor/`, CI runs `scripts/fuzz-smoke-vendored-parsers.py`, a deterministic fuzz smoke of every parser built from its `grammar.json`, and the extractor's `cobol_scanner_fuzz_smoke` test fuzzes the COBOL scanner; a crash or a hang fails. Nightly coverage-guided fuzzing is #630.
+
 ## [0.36.1] — 2026-11-26
 
 Patch release on the train-15 cut 2df58408, carrying 7 PRs since 0.36.0: #615, #628, #629, #632, #635, #637, #633.

@@ -86,6 +86,13 @@ UPSTREAM_DECLARATIONS = {
         },
         # Local edits to pinned files, each marked WICKED PATCH: (our bytes, upstream's bytes).
         "patches": {
+            # #322 scanner review: cfscript's query-text scan stops at the end of the input.
+            "cfscript/src/scanner.c": ((
+                b"    // WICKED PATCH 1 (wicked-estate #322): stop at the end of the input. Upstream waited for the\n"
+                b"    // closing quote, so a file that ends inside a query string never returned.\n"
+                b"    while (lexer->lookahead != '\"' && !lexer->eof(lexer)) {\n",
+                b"    while (lexer->lookahead != '\"') {\n",
+            ),),
             # wicked-estate#636: deserialize reads a zero-padded copy; four start tags free their names.
             "common/scanner.h": (
                 (
