@@ -853,18 +853,29 @@ fn state_dir_outside_sources(state_dir: &Path, root: &Path) -> std::result::Resu
     }
 }
 
-/// Refuse a symlink on the state dir's path below the indexed root. The default state dir is
-/// `<root>/.wicked-estate/graph.db.codegraph`, so a checkout can carry a link there (a linked
-/// `.wicked-estate`), and every state write would follow it out of the state dir.
+/// Refuse a symlink on the state dir's path that the checkout can carry: one whose own directory
+/// lies inside the indexed root. The default state dir is `<root>/.wicked-estate/graph.db.codegraph`,
+/// so a linked `.wicked-estate` would take every state write out of the state dir. Locations are
+/// compared canonically, so another spelling of the root or of the state dir (a symlinked alias
+/// of the repo) is checked the same; links outside the root (`/tmp` on macOS) are the host's.
 fn no_symlink_on_state_path(state_dir: &Path, root: &Path) -> std::result::Result<(), String> {
-    let root = std::path::absolute(root).map_err(|e| format!("{}: {e}", root.display()))?;
-    let Ok(rel) = state_dir.strip_prefix(&root) else {
+    let Ok(root) = dunce::canonicalize(root) else {
         return Ok(());
     };
-    let mut path = root.clone();
-    for c in rel.components() {
+    let mut path = PathBuf::new();
+    for c in state_dir.components() {
         path.push(c);
-        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            break; // the rest of the path does not exist yet
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        let in_checkout = path
+            .parent()
+            .and_then(|p| dunce::canonicalize(p).ok())
+            .is_some_and(|p| p.starts_with(&root));
+        if in_checkout {
             return Err(format!(
                 "the codegraph state dir's path holds a symlink at {}; refusing to write through it",
                 path.display()
@@ -876,18 +887,21 @@ fn no_symlink_on_state_path(state_dir: &Path, root: &Path) -> std::result::Resul
 
 /// Refuse a symlink anywhere inside the state dir. estate writes only regular files and
 /// directories there (and codegraph's own runs leave none), so a link was planted, for example a
-/// tracked `tree/src` that would take the mirror's writes into the repo's own sources.
+/// tracked `tree/src` that would take the mirror's writes into the repo's own sources. A
+/// directory the check cannot list refuses too: what it hides could be a link.
 fn no_symlink_in_state_dir(state_dir: &Path) -> std::result::Result<(), String> {
+    let unchecked = |path: &Path, e: std::io::Error| {
+        format!(
+            "the codegraph state dir cannot be checked for symlinks at {}: {e}",
+            path.display()
+        )
+    };
     let mut stack = vec![state_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        for entry in std::fs::read_dir(&dir).map_err(|e| unchecked(&dir, e))? {
+            let entry = entry.map_err(|e| unchecked(&dir, e))?;
             // `DirEntry::file_type` does not follow a symlink.
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
+            let kind = entry.file_type().map_err(|e| unchecked(&entry.path(), e))?;
             if kind.is_symlink() {
                 return Err(format!(
                     "the codegraph state dir holds a symlink at {}; refusing to write through it",
