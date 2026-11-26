@@ -5183,31 +5183,78 @@ mod tests {
         }
     }
 
+    /// estate#620: the extract crate always builds the CLIPS, IBM ODM IRL, AWS Config and Azure
+    /// Policy extractors, but the CLI never dispatched to them: `.clp` and `.irl` were
+    /// NOT-INDEXED and the two JSON policy shapes became generic JSON. The extract crate's own
+    /// fixtures each index as rule nodes.
+    #[test]
+    fn the_cli_indexes_the_rules_formats_the_extract_crate_always_builds_620() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../wicked-estate-extract/tests/fixtures");
+        let files = [
+            "clips/sample.clp",
+            "ibm_odm/pricing_rules.irl",
+            "aws_config/restricted_ssh.json",
+            "azure_policy/require_https_storage.json",
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        for file in files {
+            let to = tmp.path().join(file);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(fixtures.join(file), &to).unwrap();
+        }
+        let mut store = MemStore::new();
+        NOT_INDEXED.with(|notes| notes.borrow_mut().clear());
+        index_path_as(&mut store, tmp.path(), None).unwrap();
+        let notes = NOT_INDEXED.with(|notes| notes.borrow().clone());
+        assert_eq!(
+            notes,
+            Vec::<(String, String)>::new(),
+            "every rules file is indexed"
+        );
+        let nodes = store.all_nodes().unwrap();
+        for file in files {
+            let kinds: Vec<NodeKind> = nodes
+                .iter()
+                .filter(|n| n.location.file == file)
+                .map(|n| n.kind.clone())
+                .collect();
+            assert!(
+                kinds.contains(&NodeKind::Rule),
+                "{file} indexes as rule nodes: {kinds:?}"
+            );
+            assert!(
+                kinds.contains(&NodeKind::File),
+                "{file} has its file node: {kinds:?}"
+            );
+        }
+    }
+
     #[test]
     fn not_indexed_reasons_describe_export_formats() {
         // Red on main: no reason helper or NOT-INDEXED reporting exists.
         for (ext, reason) in [
-            ("ddl", "Db2 DDL: no DDL extractor yet (wicked-estate#447)"),
-            ("db2", "Db2 DDL: no DDL extractor yet (wicked-estate#447)"),
+            ("ddl", "Db2 DDL: no DDL extractor yet (wicked-estate#662)"),
+            ("db2", "Db2 DDL: no DDL extractor yet (wicked-estate#662)"),
             (
                 "csd",
-                "CICS CSD resource definitions: no extractor yet (wicked-estate#447)",
+                "CICS CSD resource definitions: no extractor yet (wicked-estate#662)",
             ),
             (
                 "mac",
-                "HLASM macro library member: no macro extractor yet (wicked-estate#447)",
+                "HLASM macro library member: no macro extractor yet (wicked-estate#662)",
             ),
             (
                 "ca7",
-                "scheduler definition: no extractor yet (wicked-estate#447)",
+                "scheduler definition: no extractor yet (wicked-estate#662)",
             ),
             (
                 "controlm",
-                "scheduler definition: no extractor yet (wicked-estate#447)",
+                "scheduler definition: no extractor yet (wicked-estate#662)",
             ),
             (
                 "ctl",
-                "mainframe control card (not VB6): no extractor yet (wicked-estate#447)",
+                "mainframe control card (not VB6): no extractor yet (wicked-estate#662)",
             ),
             ("unknown", "no extractor for this file type"),
             ("", "no extractor for this file type"),
@@ -5246,7 +5293,7 @@ mod tests {
                     ),
                     (
                         "export/REPROCT.ctl".to_string(),
-                        "mainframe control card (not VB6): no extractor yet (wicked-estate#447)"
+                        "mainframe control card (not VB6): no extractor yet (wicked-estate#662)"
                             .to_string(),
                     ),
                     (
