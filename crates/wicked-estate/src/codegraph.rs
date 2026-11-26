@@ -2235,6 +2235,132 @@ mod tests {
         );
     }
 
+    /// #659 round 1 (codex F1): the value-flow replay re-resolves an unchanged caller's refs
+    /// with no file extracted this run, so the #653 conversion must not depend on the caller's
+    /// file being extracted. The replay's call shape: `resolve` with an empty extracted set.
+    #[test]
+    fn a_replayed_same_line_call_after_non_ascii_text_binds_its_own_site_653() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let path = root.join("src/same.ts");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let prefix = format!("/* {} */ ", "\u{1f600}".repeat(8));
+        let units = prefix.encode_utf16().count();
+        let edited = text.replacen(
+            "export function both",
+            &format!("{prefix}export function both"),
+            1,
+        );
+        std::fs::write(&path, &edited).unwrap();
+        let sql = format!(
+            "{FIXTURE_SQL}\nUPDATE edges SET col = col + {units} WHERE line = 2 AND col IS NOT NULL \
+             AND source = 'function:f1b34979e8483a414e6e2aa7fc4161a6';\n\
+             UPDATE nodes SET start_column = start_column + {units}, end_column = end_column + {units} \
+             WHERE id = 'function:f1b34979e8483a414e6e2aa7fc4161a6';"
+        );
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        // The next run's codegraph state, with same.ts unchanged.
+        let read = |raw: &str| std::fs::read_to_string(root.join(raw)).ok();
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = Some(sql.clone()));
+        let (prepared, _) = prepare(
+            &cfg,
+            PrepareInput {
+                root: &root,
+                prefix: "",
+                files: vec![MirrorFile {
+                    raw: "src/same.ts".into(),
+                    digest: crate::file_digest(edited.as_bytes()),
+                }],
+                configs: Vec::new(),
+                read: &read,
+                unchanged: vec!["src/same.ts".into()],
+                stored: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = None);
+        let nodes = store.all_nodes().unwrap();
+        let node_refs: Vec<&Node> = nodes.iter().collect();
+        let stored_text = |file: &str| store.file_content(file).ok().flatten();
+        let ids = prepared.id_map(&node_refs, &HashSet::new(), &stored_text);
+        let line = text.lines().nth(1).unwrap();
+        let at = |call: &str| (prefix.len() + line.find(call).unwrap()) as u32;
+        let call = |col: u32| {
+            UnresolvedRef::new(
+                SymbolId("ts-typescript . . . src/same/both().".into()),
+                "run",
+                EdgeKind::Calls,
+                Location::new(
+                    "src/same.ts",
+                    Span {
+                        start_byte: 0,
+                        end_byte: 0,
+                        start_line: 1,
+                        start_col: col,
+                        end_line: 1,
+                        end_col: col,
+                    },
+                ),
+            )
+        };
+        let refs = vec![call(at("new A()")), call(at("new B()"))];
+        let (edges, _, _) = prepared.resolve(&refs, &ids, &HashSet::new());
+        let mut bound: Vec<(u32, String)> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .filter_map(|e| Some((e.location.as_ref()?.span.start_col, e.target.0.clone())))
+            .collect();
+        bound.sort();
+        assert_eq!(
+            bound,
+            vec![
+                (
+                    at("new A()"),
+                    "ts-typescript . . . src/same/A#run().".to_string()
+                ),
+                (
+                    at("new B()"),
+                    "ts-typescript . . . src/same/B#run().".to_string()
+                ),
+            ],
+            "each replayed call binds its own site"
+        );
+    }
+
+    /// #659 round 1 (codex F4): a mapping-time fallback stores `skipped:no-defs|…` (or
+    /// `ambiguous-def`), but the next run's verdict comes from codegraph's file errors alone
+    /// (`ok`), so an unchanged file was re-extracted on every run. Same facts: not forced. A
+    /// file saved mid-run, or whose facts moved, still is.
+    #[test]
+    fn an_unchanged_mapping_fallback_is_not_re_extracted_656() {
+        let raw = "src/p/Shapes.java";
+        let snap = || {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(FIXTURE_SQL).unwrap();
+            Snapshot::from_conn(&conn).unwrap()
+        };
+        let facts = snap().fingerprints()[raw].clone();
+        let files = vec![MirrorFile {
+            raw: raw.into(),
+            digest: "d".into(),
+        }];
+        let unchanged = vec![raw.to_string()];
+        for (stored, forced) in [
+            (format!("ok|{facts}"), false),
+            (format!("skipped:no-defs|{facts}"), false),
+            (format!("skipped:ambiguous-def|{facts}"), false),
+            (format!("skipped:changed-during-run|{facts}"), true),
+            ("skipped:no-defs|1:other".to_string(), true),
+        ] {
+            let stored_map = BTreeMap::from([(raw.to_string(), stored.clone())]);
+            let (_, got) =
+                Prepared::new("", snap(), &files, &HashSet::new(), &unchanged, &stored_map);
+            assert_eq!(got.contains(&raw.to_string()), forced, "{stored}");
+        }
+    }
+
     #[test]
     fn a_same_line_call_codegraph_left_unresolved_never_takes_its_neighbours_target() {
         // Codex r1 (W20): codegraph answered `new A().run()` but not `new B().run()` on the same
