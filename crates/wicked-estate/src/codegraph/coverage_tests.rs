@@ -374,6 +374,68 @@ fn a_symlink_on_the_state_dirs_path_is_never_written_through() {
     }
 }
 
+/// Round-2 fold (codex r2 F1, F2): the state dir's path spelled through another alias of the
+/// root (here `--db` under a symlinked spelling of the repo) skipped the lexical root check, and
+/// a directory the scan cannot list was skipped. Either way a link planted in the checkout took
+/// the writes out of the state dir. Both must refuse and fall back.
+#[cfg(unix)]
+#[test]
+fn a_state_dir_link_behind_an_alias_or_an_unlistable_dir_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    for case in ["alias", "unlistable"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = coverage_copy(tmp.path());
+        let canary = tmp.path().join("canary");
+        std::fs::create_dir_all(&canary).unwrap();
+        let mut locked = None;
+        let state_dir = match case {
+            "alias" => {
+                let alias = tmp.path().join("alias");
+                std::os::unix::fs::symlink(&root, &alias).unwrap();
+                std::os::unix::fs::symlink(&canary, root.join(".wicked-estate")).unwrap();
+                alias.join(".wicked-estate/graph.db.codegraph")
+            }
+            _ => {
+                let state = root.join(".wicked-estate/graph.db.codegraph");
+                let src = state.join("tree/src");
+                std::fs::create_dir_all(&src).unwrap();
+                std::os::unix::fs::symlink(&canary, src.join("c")).unwrap();
+                // Writable and searchable, not listable.
+                std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o300)).unwrap();
+                locked = Some(src);
+                state
+            }
+        };
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        let cfg = CodegraphConfig {
+            bundle: tmp.path().join("no-bundle"),
+            state_dir,
+            languages: Vec::new(),
+            timeout: Duration::from_secs(5),
+        };
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = Some(gate_sql()));
+        let result = crate::index_path_with(&mut store, &root, None, Some(&cfg));
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = None);
+        if let Some(src) = &locked {
+            std::fs::set_permissions(src, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        result.unwrap();
+        let written: Vec<_> = walkdir_files(&canary);
+        assert!(
+            written.is_empty(),
+            "{case}: nothing is written through the link: {written:?}"
+        );
+        assert!(
+            !store
+                .all_edges()
+                .unwrap()
+                .iter()
+                .any(|e| e.resolved_by.starts_with("codegraph:")),
+            "{case}: the run fell back to estate's pipeline"
+        );
+    }
+}
+
 #[cfg(unix)]
 fn walkdir_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
