@@ -3377,6 +3377,51 @@ mod tests {
         assert!(!resp["result"]["isError"].as_bool().unwrap_or(true));
     }
 
+    /// estate#619: a store that does not override `MemoryApi::learn_at` (`FakeMemory`) refuses a
+    /// scoped or procedural learn with -32603 instead of storing it at the root scope, and still
+    /// serves the root semantic learn through `learn`.
+    #[test]
+    fn learn_on_a_store_without_learn_at_refuses_a_scope_it_cannot_honour_619() {
+        let store = fixture();
+        let mut fake_mem = FakeMemory;
+        let mut fake_know = FakeKnowledge;
+        let mut domains = DomainHandles {
+            memory: &mut fake_mem
+                as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+            knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+        };
+        let mut learn = |args: Value| {
+            let req = json!({
+                "jsonrpc": "2.0", "id": 619, "method": "tools/call",
+                "params": { "name": "memory.learn", "arguments": args }
+            });
+            handle_request_unified(
+                &store,
+                &req,
+                &McpContext::default(),
+                Some(&mut domains),
+                None,
+            )
+        };
+        for args in [
+            json!({"content": "f", "symbols": [], "scope": "project:a"}),
+            json!({"content": "f", "symbols": [], "tier": "procedural"}),
+        ] {
+            let resp = learn(args.clone());
+            assert_eq!(resp["error"]["code"], -32603, "{args} -> {resp}");
+            assert!(
+                resp["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("cannot learn at scope"),
+                "{resp}"
+            );
+        }
+        let resp = learn(json!({"content": "f", "symbols": []}));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("fake-learn-id"), "{resp}");
+    }
+
     #[test]
     fn unified_tools_list_with_domains_returns_30_tools() {
         // All domains: 12 estate + 9 memory + 11 knowledge + 4 proposal = 36 tools.

@@ -45,6 +45,29 @@ fn parse_tier(s: &str) -> anyhow::Result<Tier> {
     })
 }
 
+/// The one `learn` write: a fact at `scope` and `tier`, with about-edges to `symbols` and their
+/// cross-store epochs. `learn` is this at the root scope and the semantic tier.
+fn learn_stored(
+    engine: &mut MemoryEngine,
+    fact: &str,
+    symbols: &[String],
+    symbol_epochs: &HashMap<String, u64>,
+    scope: &Scope,
+    tier: Tier,
+    now: i64,
+) -> anyhow::Result<String> {
+    let mem = Memory::new(MemKind::Fact, tier, scope.clone(), fact, now);
+    let id = mem.symbol().0.clone();
+    let seeds: Vec<SymbolId> = symbols.iter().cloned().map(SymbolId).collect();
+    MemoryEngine::capture_about(engine, &mem, &seeds)?;
+    if let Some(xedge) = engine.xedge.as_ref() {
+        for (sym, &epoch) in symbol_epochs {
+            xedge.put_edge(&XEdge::about(mem.symbol().0.clone(), sym.as_str(), epoch))?;
+        }
+    }
+    Ok(id)
+}
+
 impl MemoryEngine {
     /// Active inventory with exactly recall's scope and facet admission, without retrieval,
     /// ranking, expiry/salience filtering or a token budget.
@@ -218,16 +241,27 @@ impl MemoryApi for MemoryEngine {
         symbol_epochs: &HashMap<String, u64>,
         now: i64,
     ) -> Result<String, anyhow::Error> {
-        let mem = Memory::new(MemKind::Fact, Tier::Semantic, Scope::root(), fact, now);
-        let id = mem.symbol().0.clone();
-        let seeds: Vec<SymbolId> = symbols.iter().cloned().map(SymbolId).collect();
-        MemoryEngine::capture_about(self, &mem, &seeds)?;
-        if let Some(xedge) = self.xedge.as_ref() {
-            for (sym, &epoch) in symbol_epochs {
-                xedge.put_edge(&XEdge::about(mem.symbol().0.clone(), sym.as_str(), epoch))?;
-            }
-        }
-        Ok(id)
+        learn_stored(
+            self,
+            fact,
+            symbols,
+            symbol_epochs,
+            &Scope::root(),
+            Tier::Semantic,
+            now,
+        )
+    }
+
+    fn learn_at(
+        &mut self,
+        fact: &str,
+        symbols: &[String],
+        symbol_epochs: &HashMap<String, u64>,
+        scope: &Scope,
+        tier: Tier,
+        now: i64,
+    ) -> Result<Option<String>, anyhow::Error> {
+        learn_stored(self, fact, symbols, symbol_epochs, scope, tier, now).map(Some)
     }
 
     fn coverage(&self, scope_prefix: Option<&str>) -> Result<MemoryCoverage, anyhow::Error> {

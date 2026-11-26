@@ -519,6 +519,27 @@ pub trait MemoryApi {
         now: i64,
     ) -> Result<String, Self::Error>;
 
+    /// [`MemoryApi::learn`] at an explicit `scope` and `tier` (estate#619). `Ok(None)` means this
+    /// implementer cannot store at that scope or tier, and the caller must refuse rather than
+    /// widen the write. The default honours only what `learn` stores (the root scope, the
+    /// semantic tier), so an implementer that does not override it never moves a scoped fact to
+    /// root, where every scope's recall inherits it.
+    fn learn_at(
+        &mut self,
+        fact: &str,
+        symbols: &[String],
+        symbol_epochs: &HashMap<String, u64>,
+        scope: &Scope,
+        tier: Tier,
+        now: i64,
+    ) -> Result<Option<String>, Self::Error> {
+        if scope.is_root() && tier == Tier::Semantic {
+            self.learn(fact, symbols, symbol_epochs, now).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Return memory counts, optionally scoped. `scope_prefix = None` returns global totals.
     fn coverage(&self, scope_prefix: Option<&str>) -> Result<MemoryCoverage, Self::Error>;
 
