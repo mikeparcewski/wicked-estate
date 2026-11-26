@@ -385,6 +385,19 @@ impl InMemoryIndex {
     fn nodes(&self) -> impl Iterator<Item = &Node> {
         self.by_id.values()
     }
+
+    /// Add a node written later in the run (codegraph's minted nodes, estate#654), so this run
+    /// resolves against the population a later run reads from the store. A known id is kept.
+    fn insert(&mut self, n: Node) {
+        if self.by_id.contains_key(&n.symbol) {
+            return;
+        }
+        self.by_name
+            .entry(n.name.clone())
+            .or_default()
+            .push(n.clone());
+        self.by_id.insert(n.symbol.clone(), n);
+    }
 }
 
 impl SymbolIndex for InMemoryIndex {
@@ -3399,7 +3412,7 @@ fn index_path_inner(
     //
     // The index owns its data (clones of all nodes), so it outlives the read borrow and is
     // shared with the back-fill pass.
-    let index = {
+    let mut index = {
         let reader: &dyn GraphRead = &*store;
         // Scoped to this repo: a labelled run resolves against its own nodes only, so a name that
         // is unique inside the repo stays unique no matter how many repos share the graph.
@@ -3434,6 +3447,13 @@ fn index_path_inner(
         }
         ids
     });
+    // The minted nodes are written with this run's edges, but every resolver below must already
+    // see them: a later run reads them from the store (estate#654).
+    if let Some(ids) = &codegraph_ids {
+        for n in &ids.minted {
+            index.insert(n.clone());
+        }
+    }
     let codegraph_pair = codegraph_state.as_ref().zip(codegraph_ids.as_ref());
     let resolution = resolve_with_codegraph(
         resolvers,
