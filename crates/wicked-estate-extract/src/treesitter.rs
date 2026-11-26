@@ -1594,28 +1594,6 @@ impl ExtractorCache {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Build a map from paragraph/section header start-byte → true body end-byte for COBOL.
-///
-/// The arborium-cobol grammar has no `paragraph` wrapper node — paragraph_header and all
-/// statements are flat children of procedure_division / procedure_declaratives. A paragraph's
-/// body therefore spans from the header line to the byte before the next header (or end of
-/// parent). This fixup is applied after the query-based extraction so `source` returns the
-/// full paragraph body, not just the label line.
-fn cobol_paragraph_end_map(tree: &tree_sitter::Tree) -> std::collections::HashMap<usize, usize> {
-    let mut map = std::collections::HashMap::new();
-    // procedure_division may be nested under program_definition etc., so walk the whole tree.
-    let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
-    while let Some(node) = stack.pop() {
-        if is_cobol_header(node) {
-            if let Some(end) = cobol_paragraph_end(node) {
-                map.insert(node.start_byte(), end);
-            }
-        }
-        push_children(&mut stack, node);
-    }
-    map
-}
-
 /// Push `node`'s children onto a depth-first `stack` so they pop in source order. A cursor walks
 /// them: `Node::child(i)` costs O(i), so an index loop is quadratic in a node's child count, and
 /// error recovery can give one ERROR node tens of thousands of children.
@@ -1641,33 +1619,6 @@ pub(crate) fn is_cobol_header(node: tree_sitter::Node) -> bool {
     }
     let mut cursor = node.walk();
     !node.children(&mut cursor).any(|c| c.is_error())
-}
-
-/// End byte of the COBOL paragraph/section a header starts, in the same `procedure_division` /
-/// `procedure_declaratives`: for a paragraph, the next header's start; for a section, the next
-/// SECTION header's start, so a section spans its paragraphs. Else the end of that parent. `None`
-/// when the header's parent is neither. The span fixup's (and so the attribution's) boundary.
-fn cobol_paragraph_end(header: tree_sitter::Node) -> Option<usize> {
-    if header.kind() == "section_header" {
-        cobol_next_header_start(header, &["section_header"])
-    } else {
-        cobol_next_header_start(header, COBOL_HEADERS)
-    }
-}
-
-fn cobol_next_header_start(header: tree_sitter::Node, ends: &[&str]) -> Option<usize> {
-    let parent = header.parent()?;
-    if !COBOL_PROC_PARENTS.contains(&parent.kind()) {
-        return None;
-    }
-    let mut next = header.next_sibling();
-    while let Some(sib) = next {
-        if ends.contains(&sib.kind()) && is_cobol_header(sib) {
-            return Some(sib.start_byte());
-        }
-        next = sib.next_sibling();
-    }
-    Some(parent.end_byte())
 }
 
 /// For each COBOL `CALL` statement (keyed by the start byte of its target operand, the call
@@ -2552,11 +2503,13 @@ fn cobol_program_steps<'d>(
 }
 
 /// Give the next header its whole line, then trim the preceding paragraph's trailing whitespace.
-fn cobol_paragraph_span_end(src: &[u8], header_end: usize, true_end: usize) -> usize {
-    let line_start = src[..true_end]
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map_or(0, |i| i + 1);
+fn cobol_paragraph_span_end(
+    src: &[u8],
+    lines: &LineIndex,
+    header_end: usize,
+    true_end: usize,
+) -> usize {
+    let line_start = lines.line_start(true_end);
     let mut cut = true_end;
     if true_end - line_start <= 7
         || src[line_start..true_end]
@@ -2566,9 +2519,46 @@ fn cobol_paragraph_span_end(src: &[u8], header_end: usize, true_end: usize) -> u
         cut = line_start.max(header_end);
     }
     while cut > header_end && matches!(src[cut - 1], b' ' | b'\t' | b'\r' | b'\n' | 0x0c) {
+        crate::behaviour::cobol_tick(1);
         cut -= 1;
     }
     cut
+}
+
+/// A source's lines by byte, from its newline offsets found once (#627: each COBOL paragraph's
+/// span end recounted the newlines from the start of the source).
+struct LineIndex {
+    newlines: Vec<usize>,
+}
+
+impl LineIndex {
+    fn new(src: &[u8]) -> Self {
+        crate::behaviour::cobol_tick(src.len());
+        Self {
+            newlines: src
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| **b == b'\n')
+                .map(|(i, _)| i)
+                .collect(),
+        }
+    }
+
+    /// The 0-based line holding byte `at`: how many newlines come before it.
+    fn line(&self, at: usize) -> usize {
+        self.newlines.partition_point(|&n| {
+            crate::behaviour::cobol_tick(1);
+            n < at
+        })
+    }
+
+    /// The first byte of the line holding byte `at`.
+    fn line_start(&self, at: usize) -> usize {
+        match self.line(at) {
+            0 => 0,
+            k => self.newlines[k - 1] + 1,
+        }
+    }
 }
 
 fn ts_span(n: tree_sitter::Node) -> Span {
@@ -2655,6 +2645,87 @@ struct PendingDef {
     param_slots: Vec<(usize, usize)>,
 }
 
+/// For each query range, the indexes of the `ranges` that hold it (`start <= query start` and
+/// `query end <= end`, range-equal ones and empty ones included), ascending. Ranges and queries
+/// run forward (`start <= end`). The same sets a scan of every range per query finds, for any
+/// such input: overlapping, equal, empty or adjacent ranges (#627: such scans, once per
+/// definition or reference, made COBOL extraction quadratic in its definitions).
+///
+/// One sweep in start order, ranges sorted by start and then by end descending, with a stack of
+/// the open ones. A range leaves the stack once it ends at or before the next start it meets (an
+/// empty query at that start still sees it), and every answer re-checks the stack, so what the
+/// stack keeps only costs time. When ranges nest or follow one another, as tree-sitter nodes and
+/// COBOL's paragraph spans do, the stack at a query is the chain of ranges holding its start, so
+/// the sweep costs the sorts plus, per query, the nesting depth at its start.
+fn holders(ranges: &[(usize, usize)], queries: &[(usize, usize)]) -> Vec<Vec<usize>> {
+    debug_assert!(
+        ranges
+            .iter()
+            .chain(queries)
+            .all(|(start, end)| start <= end)
+    );
+    let tick = crate::behaviour::cobol_tick;
+    let mut order: Vec<usize> = (0..ranges.len()).collect();
+    order.sort_unstable_by(|&a, &b| {
+        tick(1);
+        ranges[a]
+            .0
+            .cmp(&ranges[b].0)
+            .then(ranges[b].1.cmp(&ranges[a].1))
+    });
+    // By start; at one start, the empty queries first: they are the only ones a range ending at
+    // that start holds.
+    let mut asked: Vec<usize> = (0..queries.len()).collect();
+    asked.sort_unstable_by_key(|&q| {
+        tick(1);
+        (queries[q].0, queries[q].0 != queries[q].1)
+    });
+    let mut out = vec![Vec::new(); queries.len()];
+    let mut open: Vec<usize> = Vec::new();
+    let mut next = 0;
+    // Drop the open ranges on top that end at or before `at` (`inclusive`) or before it.
+    let close = |open: &mut Vec<usize>, at: usize, inclusive: bool| {
+        while let Some(&top) = open.last() {
+            tick(1);
+            let end = ranges[top].1;
+            if end > at || (end == at && !inclusive) {
+                break;
+            }
+            open.pop();
+        }
+    };
+    for q in asked {
+        let (start, end) = queries[q];
+        let empty = start == end;
+        // A range that ends at or before a later range's start, which is before this query's,
+        // holds no query from here on.
+        while let Some(&r) = order.get(next).filter(|&&r| ranges[r].0 < start) {
+            close(&mut open, ranges[r].0, true);
+            open.push(r);
+            next += 1;
+        }
+        // One that ends at this start holds only the empty queries here, asked first.
+        close(&mut open, start, !empty);
+        while let Some(&r) = order.get(next).filter(|&&r| ranges[r].0 == start) {
+            close(&mut open, start, !empty);
+            open.push(r);
+            next += 1;
+        }
+        let mut held: Vec<usize> = open
+            .iter()
+            .copied()
+            .filter(|&r| {
+                tick(1);
+                end <= ranges[r].1
+            })
+            .collect();
+        tick(held.len());
+        held.sort_unstable();
+        out[q] = held;
+    }
+    out
+}
+
 /// The chain of Type descriptors a definition nests under (ADR-002 amendment, 2026-08).
 ///
 /// Rule: walk every OTHER pending def whose byte range strictly contains `[start, end)`
@@ -2674,10 +2745,36 @@ struct PendingDef {
 /// fleet-wide guard against the recurrence class (73 query files, any future wide anchor),
 /// tested directly by `enclosing_chain_drops_equal_range_anchor_artifacts`.
 fn enclosing_chain(pending: &[PendingDef], start: usize, end: usize) -> Vec<Descriptor> {
-    let mut containers: Vec<&PendingDef> = pending
-        .iter()
-        .filter(|p| p.start <= start && end <= p.end && !(p.start == start && p.end == end))
-        .collect();
+    crate::behaviour::cobol_tick(pending.len());
+    chain_of(
+        pending
+            .iter()
+            .filter(|p| p.start <= start && end <= p.end && !(p.start == start && p.end == end))
+            .collect(),
+    )
+}
+
+/// [`enclosing_chain`] for every pending def, from one sweep ([`holders`]) instead of a scan of
+/// all pending defs per def (#627). Same chains.
+fn enclosing_chains(pending: &[PendingDef]) -> Vec<Vec<Descriptor>> {
+    let ranges: Vec<(usize, usize)> = pending.iter().map(|p| (p.start, p.end)).collect();
+    holders(&ranges, &ranges)
+        .into_iter()
+        .enumerate()
+        .map(|(i, held_by)| {
+            chain_of(
+                held_by
+                    .into_iter()
+                    .filter(|&j| ranges[j] != ranges[i])
+                    .map(|j| &pending[j])
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// The chain from a def's containers, in `pending` order (see [`enclosing_chain`]).
+fn chain_of(mut containers: Vec<&PendingDef>) -> Vec<Descriptor> {
     // Drop anchor artifacts: non-Type records range-equal to a Type record (see doc above).
     let type_ranges: Vec<(usize, usize)> = containers
         .iter()
@@ -4312,6 +4409,7 @@ fn extract_name_module_pairs(
 
 /// The smallest definition whose byte range contains `pos` — the enclosing scope of a reference.
 fn enclosing(defs: &[DefRec], pos: usize) -> Option<SymbolId> {
+    crate::behaviour::cobol_tick(defs.len());
     defs.iter()
         .filter(|d| d.start <= pos && pos < d.end)
         .min_by_key(|d| d.end - d.start)
@@ -4538,9 +4636,31 @@ fn declared_callable_names(node: tree_sitter::Node, src: &[u8]) -> Vec<String> {
 }
 
 fn enclosing_def(defs: &[DefRec], pos: usize) -> Option<&DefRec> {
+    crate::behaviour::cobol_tick(defs.len());
     defs.iter()
         .filter(|d| d.start <= pos && pos < d.end)
         .min_by_key(|d| d.end - d.start)
+}
+
+/// [`enclosing_def`] at each of `positions`, from one sweep ([`holders`]) instead of a scan of
+/// every definition per position (#627). Same answers.
+fn enclosing_defs<'d>(defs: &'d [DefRec], positions: &[usize]) -> Vec<Option<&'d DefRec>> {
+    let ranges: Vec<(usize, usize)> = defs.iter().map(|d| (d.start, d.end)).collect();
+    let at: Vec<(usize, usize)> = positions
+        .iter()
+        .map(|&pos| (pos, pos.saturating_add(1)))
+        .collect();
+    holders(&ranges, &at)
+        .into_iter()
+        .zip(positions)
+        .map(|(held_by, &pos)| {
+            held_by
+                .into_iter()
+                .map(|j| &defs[j])
+                .filter(|d| pos < d.end)
+                .min_by_key(|d| d.end - d.start)
+        })
+        .collect()
 }
 
 fn def_range(def: Option<&DefRec>) -> (usize, usize) {
@@ -5892,6 +6012,11 @@ impl TreeSitterExtractor {
             fact.args.sort_by_key(|arg| arg.pos);
         }
 
+        // One per file: the classifier's per-file facts are computed once and shared by every
+        // definition (#582: per-definition walks were quadratic on large COBOL programs), and the
+        // COBOL span fixup reads its paragraph ends from the same tree index (#627).
+        let mut behaviour_facts = crate::behaviour::FileFacts::default();
+
         // ── Pass 2: mint definition ids (ADR-002 amendment — type-nested identity) ──
         // MUST run before the COBOL span fixup below: the fixup mutates `def_nodes`, which this
         // pass populates. Ids are minted from `PendingDef`'s PRE-fixup header ranges, so they do
@@ -5924,12 +6049,13 @@ impl TreeSitterExtractor {
             );
             let mut identities = Vec::with_capacity(pending.len());
             let mut overloads: HashMap<SymbolId, Vec<usize>> = HashMap::new();
+            let mut chains = enclosing_chains(&pending);
             for (i, p) in pending.iter().enumerate() {
                 if !p.emit {
                     identities.push(None);
                     continue;
                 }
-                let mut chain = enclosing_chain(&pending, p.start, p.end);
+                let mut chain = std::mem::take(&mut chains[i]);
                 // `@code_<kind>.owner`: the owner type name captured in the def's own match
                 // (Go receiver, C++ `Foo::` qualifier, Ruby `def self.m`) becomes the
                 // INNERMOST Type descriptor — where containment can never supply it.
@@ -6005,9 +6131,6 @@ impl TreeSitterExtractor {
                 }
             }
 
-            // One per file: the classifier's per-file facts are computed once and shared by every
-            // definition (#582: per-definition walks were quadratic on large COBOL programs).
-            let mut behaviour_facts = crate::behaviour::FileFacts::default();
             for (p, identity) in pending.iter().zip(&identities) {
                 // Non-emitting anchors contribute containment only.
                 let Some((_, symbol)) = identity else {
@@ -6151,7 +6274,7 @@ impl TreeSitterExtractor {
         // `Calls` edges, one per (from, to) pair (see `CobolFlowEdge`).
         let mut cobol_flow_edges: Vec<((SymbolId, SymbolId), CobolFlowEdge)> = Vec::new();
         if self.lang_name == "cobol" {
-            let end_map = cobol_paragraph_end_map(&tree);
+            let end_map = crate::behaviour::cobol_paragraph_ends(&mut behaviour_facts, &tree);
             // Attribution ranges too: a PERFORM, GO TO, CALL or data use inside a paragraph is
             // the paragraph's, not the whole program's (`enclosing` picks the smallest range, so
             // a paragraph inside a section wins over the section). Ids were minted above from the
@@ -6299,31 +6422,44 @@ impl TreeSitterExtractor {
             let program_of_call = cobol_call_programs(&tree, src);
             // A literal CALL of the program itself made before its first paragraph starts from
             // the program: a self-edge, so no ref (one made in a paragraph is kept above).
+            // Each literal call's and its program's enclosing definition, from one sweep (#627).
+            let asked: Vec<usize> = raw_refs
+                .iter()
+                .filter_map(|r| {
+                    program_of_call
+                        .get(&r.2)
+                        .filter(|c| c.1)
+                        .map(|c| [r.2, c.0])
+                })
+                .flatten()
+                .collect();
+            let held: HashMap<usize, Option<&DefRec>> = asked
+                .iter()
+                .copied()
+                .zip(enclosing_defs(&defs, &asked))
+                .collect();
             raw_refs.retain(|(name, ek, pos, _)| {
                 let Some(&(program, true)) = program_of_call.get(pos) else {
                     return true;
                 };
-                let module = enclosing_def(&defs, program);
+                let module = held[&program];
                 *ek != EdgeKind::Calls
-                    || enclosing_def(&defs, *pos).map(|d| d.start) != module.map(|d| d.start)
+                    || held[pos].map(|d| d.start) != module.map(|d| d.start)
                     || !module.is_some_and(|m| m.name.eq_ignore_ascii_case(name))
             });
+            let lines = LineIndex::new(src);
             for node in &mut def_nodes {
                 let start = node.location.span.start_byte as usize;
                 if let Some(&true_end) = end_map.get(&start) {
                     let cut = cobol_paragraph_span_end(
                         src,
+                        &lines,
                         node.location.span.end_byte as usize,
                         true_end,
                     );
-                    let line_start = src[..cut]
-                        .iter()
-                        .rposition(|b| *b == b'\n')
-                        .map_or(0, |i| i + 1);
                     node.location.span.end_byte = cut as u32;
-                    node.location.span.end_line =
-                        src[..cut].iter().filter(|b| **b == b'\n').count() as u32;
-                    node.location.span.end_col = (cut - line_start) as u32;
+                    node.location.span.end_line = lines.line(cut) as u32;
+                    node.location.span.end_col = (cut - lines.line_start(cut)) as u32;
                 }
             }
         }
@@ -6378,19 +6514,18 @@ impl TreeSitterExtractor {
         // COBOL: a program contains its sections and paragraphs, a section its paragraphs. Calls
         // and data uses start from the paragraph, so this edge is what keeps the program in a
         // field's or a callee's blast radius, and on the path from a JCL step to a called program.
-        for &i in &cobol_units {
+        // The smallest other definition holding each unit, the first in `defs` on a tie: one sweep
+        // over the definitions (#627: a scan of all of them per unit was quadratic).
+        let def_ranges: Vec<(usize, usize)> = defs.iter().map(|d| (d.start, d.end)).collect();
+        let unit_ranges: Vec<(usize, usize)> = cobol_units.iter().map(|&i| def_ranges[i]).collect();
+        for (&i, held_by) in cobol_units.iter().zip(holders(&def_ranges, &unit_ranges)) {
             let d = &defs[i];
-            let container = defs
-                .iter()
-                .enumerate()
-                .filter(|(j, c)| {
-                    *j != i
-                        && c.start <= d.start
-                        && d.end <= c.end
-                        && (c.start, c.end) != (d.start, d.end)
-                })
-                .min_by_key(|(_, c)| c.end - c.start);
-            if let Some((_, c)) = container {
+            let container = held_by
+                .into_iter()
+                .filter(|&j| def_ranges[j] != def_ranges[i])
+                .map(|j| &defs[j])
+                .min_by_key(|c| c.end - c.start);
+            if let Some(c) = container {
                 local_edges.push(
                     Edge::new(
                         c.symbol.clone(),
@@ -6624,13 +6759,19 @@ impl TreeSitterExtractor {
             }
         }
         let mut joined: HashMap<(usize, usize, String), JsBindingTarget> = HashMap::new();
-        for (name, ek, pos, span) in raw_refs {
+        // Each ref's enclosing definition, from one sweep (#627: a scan of all definitions per
+        // ref).
+        let ref_defs = {
+            let at: Vec<usize> = raw_refs.iter().map(|r| r.2).collect();
+            enclosing_defs(&defs, &at)
+        };
+        for ((name, ek, _pos, span), enclosing_ref) in raw_refs.into_iter().zip(ref_defs) {
             // Import refs don't need enclosing attribution — attributed to file.
             // Heritage refs: attributed to the enclosing type (or file if none).
             let from = if ek == EdgeKind::Imports {
                 file_symbol.clone()
             } else {
-                enclosing(&defs, pos).unwrap_or_else(|| file_symbol.clone())
+                enclosing_ref.map_or_else(|| file_symbol.clone(), |d| d.symbol.clone())
             };
             // A local binding's identity travels in the ref's NAME, because a parked ref keeps no
             // hints and a back-fill re-resolves it by name alone (wicked-estate#486): it becomes
@@ -12359,6 +12500,113 @@ public class PlainListener {
             vec![Descriptor::new("M", Suffix::Type)],
             "the equal-range Term artifact must be dropped, not truncate the chain"
         );
+    }
+
+    /// Small random range sets of every shape the sweep must answer like a scan: nested, equal,
+    /// overlapping, adjacent and empty ranges (#627). A fixed-seed generator, so a failure repeats.
+    fn random_ranges(seed: &mut u64, n: usize, span: usize) -> Vec<(usize, usize)> {
+        let mut next = || {
+            *seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (*seed >> 33) as usize
+        };
+        (0..n)
+            .map(|_| {
+                let start = next() % span;
+                let len = match next() % 4 {
+                    0 => 0,
+                    1 => next() % 3,
+                    _ => next() % span,
+                };
+                (start, start + len)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn holders_match_a_scan_627() {
+        let mut seed = 627;
+        for round in 0..2_000 {
+            let span = 2 + round % 40;
+            let ranges = random_ranges(&mut seed, round % 25, span);
+            let mut queries = random_ranges(&mut seed, round % 15, span);
+            queries.extend(ranges.iter().copied());
+            let got = holders(&ranges, &queries);
+            for (q, &(start, end)) in queries.iter().enumerate() {
+                let want: Vec<usize> = (0..ranges.len())
+                    .filter(|&r| ranges[r].0 <= start && end <= ranges[r].1)
+                    .collect();
+                assert_eq!(
+                    got[q], want,
+                    "round {round}: query {:?} of ranges {ranges:?}",
+                    queries[q]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enclosing_defs_match_enclosing_def_627() {
+        let mut seed = 62_700;
+        for round in 0..2_000 {
+            let span = 2 + round % 40;
+            // Definitions ending at the last byte value too: a ref there is held by none.
+            let defs: Vec<DefRec> = random_ranges(&mut seed, round % 25, span)
+                .into_iter()
+                .chain([(usize::MAX - 1, usize::MAX), (usize::MAX, usize::MAX)])
+                .enumerate()
+                .map(|(i, (start, end))| DefRec {
+                    symbol: SymbolId::from(format!("d{i}")),
+                    start,
+                    end,
+                    name: format!("d{i}"),
+                })
+                .collect();
+            let positions: Vec<usize> = (0..span + 2).chain([usize::MAX]).collect();
+            let got = enclosing_defs(&defs, &positions);
+            for (k, &pos) in positions.iter().enumerate() {
+                assert_eq!(
+                    got[k].map(|d| &d.symbol),
+                    enclosing_def(&defs, pos).map(|d| &d.symbol),
+                    "round {round}: byte {pos}"
+                );
+            }
+            assert!(got.last().is_some_and(Option::is_none), "round {round}");
+        }
+    }
+
+    #[test]
+    fn enclosing_chains_match_enclosing_chain_627() {
+        let kinds = ["class", "module", "function", "field", "struct", "method"];
+        let mut seed = 6_270;
+        for round in 0..1_000 {
+            let span = 2 + round % 30;
+            let pending: Vec<PendingDef> = random_ranges(&mut seed, round % 20, span)
+                .into_iter()
+                .enumerate()
+                .map(|(i, (start, end))| PendingDef {
+                    kind: kinds[(start + i) % kinds.len()].to_string(),
+                    name: format!("n{}", (end + i) % 3),
+                    start,
+                    end,
+                    span: Span::ZERO,
+                    signature: None,
+                    emit: i % 5 != 0,
+                    decl: false,
+                    owner: None,
+                    param_slots: Vec::new(),
+                })
+                .collect();
+            let chains = enclosing_chains(&pending);
+            for (i, p) in pending.iter().enumerate() {
+                assert_eq!(
+                    chains[i],
+                    enclosing_chain(&pending, p.start, p.end),
+                    "round {round}: def {i}"
+                );
+            }
+        }
     }
 
     // ── TS-S1: `@flow.<semantics>.<evidence>.<construct>` is parsed, not enumerated ──────

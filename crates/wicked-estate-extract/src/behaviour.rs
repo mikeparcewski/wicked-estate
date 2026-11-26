@@ -221,6 +221,26 @@ pub struct FileFacts<'t> {
     cobol_free_format: Option<(&'t [u8], bool)>,
 }
 
+impl<'t> FileFacts<'t> {
+    /// The file's `CobolTree`, built on first use and rebuilt for another tree.
+    fn cobol_tree(&mut self, tree: &'t tree_sitter::Tree) -> &mut CobolTree<'t> {
+        let root = tree.root_node().id();
+        if self.cobol.as_ref().is_some_and(|t| t.root_id != root) {
+            self.cobol = None;
+        }
+        self.cobol.get_or_insert_with(|| CobolTree::new(tree))
+    }
+}
+
+/// Each COBOL paragraph or section header's start byte -> the end of its paragraph or section
+/// (see `CobolTree::paragraph_ends`), from the same per-file tree the classifier navigates.
+pub(crate) fn cobol_paragraph_ends<'t>(
+    facts: &mut FileFacts<'t>,
+    tree: &'t tree_sitter::Tree,
+) -> std::collections::HashMap<usize, usize> {
+    facts.cobol_tree(tree).paragraph_ends()
+}
+
 #[cfg(test)]
 #[path = "behaviour_reference.rs"]
 mod reference;
@@ -268,11 +288,6 @@ pub fn classify_in<'t>(
         Family::Cobol => crate::treesitter::COBOL_HEADERS,
     };
     if let Family::Cobol = family {
-        let root = tree.root_node().id();
-        let cobol_tree = match &mut facts.cobol {
-            Some(t) if t.root_id == root => t,
-            slot => slot.insert(CobolTree::new(tree)),
-        };
         let free_format = match facts.cobol_free_format {
             Some((seen, free)) if std::ptr::eq(seen, src) => free,
             _ => {
@@ -283,6 +298,7 @@ pub fn classify_in<'t>(
                 free
             }
         };
+        let cobol_tree = facts.cobol_tree(tree);
         let got = match cobol_tree.header_at(start, end) {
             Some(header) => cobol(cobol_tree, header, src, free_format),
             None => Behaviour::Real,
@@ -402,9 +418,9 @@ fn cobol(tree: &mut CobolTree<'_>, h: u32, src: &[u8], free_format: bool) -> Beh
     }
     let mut statements = 0usize;
     let mut ended_by_header = false;
-    let mut next = tree.next(h);
+    let mut next = tree.next_of(h);
     while let Some(i) = next {
-        next = tree.next(i);
+        next = tree.next_of(i);
         let n = tree.node(i);
         if crate::treesitter::is_cobol_header(n) {
             // A header the grammar built from a verb (`COMMIT.`, `ROLLBACK.`) is a statement it
@@ -435,7 +451,7 @@ fn cobol(tree: &mut CobolTree<'_>, h: u32, src: &[u8], free_format: bool) -> Beh
     // (a MISSING period on `END DECLARATIVES`, say); an ERROR or MISSING in the main procedure
     // code that follows a valid `END DECLARATIVES.` does not make it real.
     let scan_root = tree
-        .parent(h)
+        .parent_of(h)
         .filter(|&p| tree.node(p).kind() == "procedure_declaratives")
         .unwrap_or(0);
     if !ended_by_header && tree.error_after_division(scan_root, end) {
@@ -516,18 +532,18 @@ fn cobol_exit_only_source_ok(
     let region_end = if ended_by_header {
         region_end
     } else {
-        let mut ancestor = tree.parent(h);
+        let mut ancestor = tree.parent_of(h);
         let mut next_token = None;
         'ancestors: while let Some(node) = ancestor {
-            let mut next = tree.next(node);
+            let mut next = tree.next_of(node);
             while let Some(sibling) = next {
                 if !tree.node(sibling).is_extra() {
                     next_token = Some(tree.node(sibling).start_byte());
                     break 'ancestors;
                 }
-                next = tree.next(sibling);
+                next = tree.next_of(sibling);
             }
-            ancestor = tree.parent(node);
+            ancestor = tree.parent_of(node);
         }
         region_end.max(next_token.map_or(src.len(), line_start))
     };
@@ -636,16 +652,18 @@ fn cobol_area_exit_only(area: &str) -> bool {
 thread_local! {
     /// The COBOL classifier's steps on this thread (tests): a node built or scanned, a navigation
     /// or lookup, a binary search, a sort's length, a source byte read. Per thread, so it counts
-    /// every tree and cache a test's calls build, rebuilt ones included. The #582 guards assert
-    /// it grows linearly with the file.
+    /// every tree and cache a test's calls build, rebuilt ones included. The extractor's per-file
+    /// passes (#627: the paragraph ends, the line index, the containment sweep) count here too.
+    /// The #582 guards assert it grows linearly with the file.
     static COBOL_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Set by the counted-work test on its thread: `classify_in` skips the quadratic oracle.
     static COBOL_ORACLE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Count `steps` of the COBOL classifier's work (tests only; a no-op in the product build).
+/// Count `steps` of the COBOL classifier's work (tests only; a no-op in the product build). The
+/// extractor's per-file COBOL passes count theirs too (#627).
 #[inline]
-fn cobol_tick(steps: usize) {
+pub(crate) fn cobol_tick(steps: usize) {
     #[cfg(test)]
     COBOL_WORK.with(|w| w.set(w.get() + steps));
     #[cfg(not(test))]
@@ -748,12 +766,12 @@ impl<'t> CobolTree<'t> {
         self.nodes[i as usize]
     }
 
-    fn parent(&self, i: u32) -> Option<u32> {
+    fn parent_of(&self, i: u32) -> Option<u32> {
         cobol_tick(1);
         Some(self.parent[i as usize]).filter(|&p| p != NO_NODE)
     }
 
-    fn next(&self, i: u32) -> Option<u32> {
+    fn next_of(&self, i: u32) -> Option<u32> {
         cobol_tick(1);
         Some(self.next[i as usize]).filter(|&n| n != NO_NODE)
     }
@@ -769,19 +787,49 @@ impl<'t> CobolTree<'t> {
     /// parent is not a procedure division or declaratives. A section's own statements stop at its
     /// first paragraph.
     fn body_end(&self, h: u32) -> Option<usize> {
-        let parent = self.parent(h)?;
+        self.next_header_start(h, crate::treesitter::COBOL_HEADERS)
+    }
+
+    /// Every real paragraph or section header's start byte -> the end of its paragraph or section
+    /// (#627; was `cobol_paragraph_end_map`'s tree-sitter walk): for a paragraph, the next header's
+    /// start; for a section, the next SECTION header's start, so a section spans its paragraphs.
+    /// Else the end of its `procedure_division` / `procedure_declaratives`; a header with another
+    /// parent has none. The span fixup's, and so the attribution's, boundary. A paragraph walks
+    /// its own statements and a section its own paragraphs, so the walks are linear in the file.
+    fn paragraph_ends(&self) -> std::collections::HashMap<usize, usize> {
+        let mut out = std::collections::HashMap::new();
+        for h in 0..self.nodes.len() as u32 {
+            let header = self.node(h);
+            if !crate::treesitter::is_cobol_header(header) {
+                continue;
+            }
+            let ends: &[&str] = if header.kind() == "section_header" {
+                &["section_header"]
+            } else {
+                crate::treesitter::COBOL_HEADERS
+            };
+            if let Some(end) = self.next_header_start(h, ends) {
+                out.insert(header.start_byte(), end);
+            }
+        }
+        out
+    }
+
+    /// The start of the first real header of a kind in `ends` among `h`'s following siblings,
+    /// else its procedure parent's end; `None` when the parent is not a procedure division or
+    /// declaratives.
+    fn next_header_start(&self, h: u32, ends: &[&str]) -> Option<usize> {
+        let parent = self.parent_of(h)?;
         if !crate::treesitter::COBOL_PROC_PARENTS.contains(&self.node(parent).kind()) {
             return None;
         }
-        let mut next = self.next(h);
+        let mut next = self.next_of(h);
         while let Some(i) = next {
             let sib = self.node(i);
-            if crate::treesitter::COBOL_HEADERS.contains(&sib.kind())
-                && crate::treesitter::is_cobol_header(sib)
-            {
+            if ends.contains(&sib.kind()) && crate::treesitter::is_cobol_header(sib) {
                 return Some(sib.start_byte());
             }
-            next = self.next(i);
+            next = self.next_of(i);
         }
         Some(self.node(parent).end_byte())
     }
@@ -2210,17 +2258,154 @@ mod tests {
                 let n = ix.node(i);
                 let id = |o: Option<u32>| o.map(|j| ix.node(j).id());
                 assert_eq!(
-                    id(ix.parent(i)),
+                    id(ix.parent_of(i)),
                     n.parent().map(|p| p.id()),
                     "parent of {n:?}"
                 );
                 assert_eq!(
-                    id(ix.next(i)),
+                    id(ix.next_of(i)),
                     n.next_sibling().map(|s| s.id()),
                     "next of {n:?}"
                 );
             }
         }
+    }
+
+    /// The COBOL classifier and the paragraph-end path navigate through `CobolTree`'s arrays only
+    /// (#627; #628 round 2, F2). tree-sitter's `next_sibling` / `prev_sibling` / `parent` /
+    /// `child(i)` cost the node's index among its siblings and `descendant_for_byte_range` a
+    /// descent, so one such call per paragraph of a flat procedure division is quadratic in the
+    /// file. The counted-work guard cannot see that work: it happens inside tree-sitter.
+    #[test]
+    fn cobol_paragraph_paths_call_no_tree_sitter_navigation_627() {
+        const NAVIGATION: &[&str] = &[
+            ".next_sibling(",
+            ".prev_sibling(",
+            ".parent(",
+            ".child(",
+            "descendant_for_byte_range",
+        ];
+        // Each item: its first line, at column 0, in one of these files, through its closing
+        // brace at column 0. The span fixup is a block of `extract_parsed`: from its banner to
+        // the next one.
+        const REGIONS: &[(&str, &str)] = &[(
+            "        // ── COBOL paragraph span fixup",
+            "        // ── File node + Contains edges",
+        )];
+        const ITEMS: &[&str] = &[
+            "fn cobol(",
+            "fn cobol_exit_only_source_ok(",
+            "impl<'t> CobolTree<'t> {",
+            "impl<'t> FileFacts<'t> {",
+            "pub(crate) fn cobol_paragraph_ends<'t>(",
+        ];
+        let files = [include_str!("behaviour.rs"), include_str!("treesitter.rs")];
+        let blocks = ITEMS
+            .iter()
+            .map(|item| (format!("\n{item}"), "\n}\n"))
+            .chain(REGIONS.iter().map(|(from, to)| (format!("\n{from}"), *to)));
+        let mut found = Vec::new();
+        for (item, end) in blocks {
+            let body = files
+                .iter()
+                .find_map(|src| {
+                    let at = src.find(&item)? + 1;
+                    let len = src[at..].find(end)?;
+                    Some(&src[at..at + len])
+                })
+                .unwrap_or_else(|| panic!("{item} not found"));
+            let item = item.trim();
+            for line in body.lines() {
+                let code = line.split("//").next().unwrap_or("");
+                for nav in NAVIGATION {
+                    if code.contains(nav) {
+                        found.push(format!("{item} calls {nav}: {}", line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "tree-sitter navigation:\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// The paragraph ends `CobolTree` gives the span fixup equal the tree-sitter walk they
+    /// replace (#627), on the corpus plus sections, declaratives and nested programs.
+    #[test]
+    fn cobol_paragraph_ends_match_tree_sitter_627() {
+        fn walked(tree: &tree_sitter::Tree) -> std::collections::HashMap<usize, usize> {
+            let end = |header: TsNode<'_>| -> Option<usize> {
+                let ends: &[&str] = if header.kind() == "section_header" {
+                    &["section_header"]
+                } else {
+                    crate::treesitter::COBOL_HEADERS
+                };
+                let parent = header.parent()?;
+                if !crate::treesitter::COBOL_PROC_PARENTS.contains(&parent.kind()) {
+                    return None;
+                }
+                let mut next = header.next_sibling();
+                while let Some(sib) = next {
+                    if ends.contains(&sib.kind()) && crate::treesitter::is_cobol_header(sib) {
+                        return Some(sib.start_byte());
+                    }
+                    next = sib.next_sibling();
+                }
+                Some(parent.end_byte())
+            };
+            let mut out = std::collections::HashMap::new();
+            let mut stack = vec![tree.root_node()];
+            while let Some(node) = stack.pop() {
+                if crate::treesitter::is_cobol_header(node) {
+                    if let Some(e) = end(node) {
+                        out.insert(node.start_byte(), e);
+                    }
+                }
+                let mut cursor = node.walk();
+                let at = stack.len();
+                stack.extend(node.children(&mut cursor));
+                stack[at..].reverse();
+            }
+            out
+        }
+        let mut corpus = cobol_corpus();
+        corpus.push(fixed(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. SECTS.",
+            "PROCEDURE DIVISION.",
+            "DECLARATIVES.",
+            "ERR-SEC SECTION.",
+            "    USE AFTER ERROR PROCEDURE ON INFILE.",
+            "ERR-PARA.",
+            "    DISPLAY 'E'.",
+            "END DECLARATIVES.",
+            "MAIN-SEC SECTION.",
+            "A-PARA.",
+            "    PERFORM B-PARA.",
+            "B-PARA.",
+            "    EXIT.",
+            "OTHER-SEC SECTION.",
+            "    DISPLAY 'O'.",
+            "C-PARA.",
+            "    GOBACK.",
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. INNER.",
+            "PROCEDURE DIVISION.",
+            "I-PARA.",
+            "    EXIT PROGRAM.",
+            "END PROGRAM INNER.",
+            "END PROGRAM SECTS.",
+        ]));
+        let mut sections = 0;
+        for src in &corpus {
+            let tree = parse_cobol(src);
+            let got = CobolTree::new(&tree).paragraph_ends();
+            assert_eq!(got, walked(&tree), "paragraph ends of:\n{src}");
+            sections += tree.root_node().to_sexp().matches("section_header").count();
+        }
+        assert!(sections >= 3, "{sections} section headers in the corpus");
     }
 
     #[test]
@@ -2312,9 +2497,11 @@ mod tests {
 
     /// Work at `n` and `4n` copies of a shape. Linear work at most quadruples; the fixed part only
     /// lowers the ratio, and the sorts' and binary searches' log factor raises it a little
-    /// (4.15x and 4.20x today). So the bound is 4.4x. A quadratic part grows sixteenfold, so it
+    /// (4.13x and 4.15x today). So the bound is 4.4x. A quadratic part grows sixteenfold, so it
     /// shows once it is more than about 2% of the work at `n`; each per-file cache removed, or a
-    /// binary search made linear, fails it. Counted steps, not wall-clock time (#604).
+    /// binary search made linear, fails it. The extractor's COBOL passes count too (#627): the
+    /// containment sweep made to keep adjacent paragraph spans open fails it at 11.8x, and one
+    /// sweep per paragraph at 13.5x. Counted steps, not wall-clock time (#604).
     fn assert_linear_work(shape: &str, make: impl Fn(usize) -> String, n: usize) {
         let (small, small_stubs) = cobol_work(&make(n));
         let (big, big_stubs) = cobol_work(&make(4 * n));
@@ -2368,8 +2555,26 @@ mod tests {
             let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
             fixed(&lines)
         };
+        // A literal CALL in every paragraph (#627: each one's program and paragraph were looked
+        // up by a scan of every definition).
+        let calls = |n: usize| -> String {
+            let mut lines = vec![
+                "IDENTIFICATION DIVISION.".to_string(),
+                "PROGRAM-ID. CALLPGM.".to_string(),
+                "PROCEDURE DIVISION.".to_string(),
+            ];
+            for i in 0..n {
+                lines.push(format!("P{i}."));
+                lines.push("    CALL 'OTHER'.".to_string());
+                lines.push(format!("P{i}-EXIT."));
+                lines.push("    EXIT.".to_string());
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            fixed(&lines)
+        };
         assert_linear_work("exit ranges", exit_ranges, 400);
         assert_linear_work("programs", programs, 200);
+        assert_linear_work("calls", calls, 400);
     }
 
     fn cobol_tags_raw(code: &str) -> std::collections::BTreeMap<String, (String, Option<String>)> {
