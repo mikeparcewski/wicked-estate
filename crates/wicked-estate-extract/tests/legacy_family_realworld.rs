@@ -258,17 +258,25 @@ fn cfml_within(shape: &str, text: String, secs: u64) -> wicked_estate_core::Extr
 /// estate#631: cfml's `scan_comment` counts `<!--` nesting. On a comment that never closes it
 /// scanned to the end of the file and failed, and error recovery retried it at every later `<!`,
 /// each scan running to the end again: quadratic (20,000 openers took 4.4 s in the pinned CLI,
-/// four times longer per doubling). Each shape here has 60,000 to 100,000 openers.
+/// four times longer per doubling). Each shape here has 60,000 to 100,000 openers, one or two a
+/// line.
 #[test]
 fn cfml_unterminated_or_unbalanced_comments_extract_in_linear_time_631() {
     for (shape, text) in [
-        ("unterminated openers", "<!--".repeat(100_000)),
+        ("unterminated openers", "<!--\n".repeat(100_000)),
         (
             "unbalanced nested comments",
             "<!-- a <!-- b -->\n".repeat(30_000),
         ),
     ] {
-        cfml_within(shape, text, 30);
+        // Short lines, so the minified-file guard (any line over 50,000 characters) does not
+        // skip the parse: a skipped parse answers no nodes at all, not even the File node.
+        let ex = cfml_within(shape, text, 30);
+        assert!(
+            ex.nodes.iter().any(|n| n.kind == NodeKind::File),
+            "{shape}: no File node, so the parse was skipped; got {:?}",
+            names(&ex)
+        );
     }
 }
 
