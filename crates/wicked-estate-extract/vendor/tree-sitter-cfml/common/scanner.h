@@ -303,6 +303,7 @@ static bool scan_comment(TSLexer *lexer, bool is_cfquery_context) {
     unsigned dashes = 0;
     unsigned direction = -1;
     unsigned nesting = 1;
+    bool closed = false; // WICKED PATCH 4 (wicked-estate#631): set at each `-->`; see the end.
 
     while (lexer->lookahead) {
         switch (lexer->lookahead) {
@@ -317,6 +318,7 @@ static bool scan_comment(TSLexer *lexer, bool is_cfquery_context) {
             case '>':
                 if (dashes >= 2) {
                     --nesting;
+                    closed = true; // WICKED PATCH 4
                     lexer->result_symbol = CFML_COMMENT;
                     advance(lexer);
                     lexer->mark_end(lexer);
@@ -349,7 +351,15 @@ static bool scan_comment(TSLexer *lexer, bool is_cfquery_context) {
         }
         advance(lexer);
     }
-    return false;
+    // WICKED PATCH 4 (wicked-estate#631): a comment still open at the end of the input is a
+    // comment, not a failed scan. Upstream returned false here, and error recovery retried the
+    // scan at every later `<!`, each one reading to the end again: quadratic. It ends at its last
+    // `-->` (marked above), or at the end of the input when nothing closed.
+    if (!closed) {
+        lexer->mark_end(lexer);
+    }
+    lexer->result_symbol = CFML_COMMENT;
+    return true;
 }
 
 static WhitespaceResult scan_whitespace_and_comments(TSLexer *lexer, bool *scanned_comment, bool consume, bool is_cfquery_context) {

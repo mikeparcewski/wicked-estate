@@ -39,9 +39,7 @@ SINGLE_DEADLINE_S = 20
 MAX_SEED_BYTES = 64 * 1024
 # Known super-linear shapes, each with its open issue. A timeout on one is reported, not failed;
 # fixing the issue deletes the entry. Anything else that times out fails the run.
-KNOWN_SLOW = {
-    ("tree-sitter-cfml/cfml", "repeat:<!--"): "#631 (scan_comment rescans an unterminated nested comment to EOF)",
-}
+KNOWN_SLOW: dict = {}
 
 
 def regen():

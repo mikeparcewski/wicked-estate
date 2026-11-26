@@ -94,6 +94,7 @@ UPSTREAM_DECLARATIONS = {
                 b"    while (lexer->lookahead != '\"') {\n",
             ),),
             # wicked-estate#636: deserialize reads a zero-padded copy; four start tags free their names.
+            # wicked-estate#631: scan_comment ends an unclosed comment instead of failing.
             "common/scanner.h": (
                 (
                     b'static void deserialize(Scanner *scanner, const char *buffer, unsigned length, bool is_cfquery_context) {\n'
@@ -144,6 +145,117 @@ UPSTREAM_DECLARATIONS = {
                     b'        case CF_ELSE:\n'
                     b'            lexer->result_symbol = CF_ELSE_TAG_NAME;\n'
                     b'            return true;\n',
+                ),
+                # wicked-estate#631: a comment still open at the end of the input is a comment.
+                (
+                    b'    unsigned nesting = 1;\n'
+                    b'    bool closed = false; // WICKED PATCH 4 (wicked-estate#631): set at each `-->`; see the end.\n'
+                    b'\n'
+                    b'    while (lexer->lookahead) {\n'
+                    b'        switch (lexer->lookahead) {\n'
+                    b"            case '-':\n"
+                    b'                ++dashes;\n'
+                    b'                if ( direction == 1 && dashes >= 2 ) {\n'
+                    b'                    ++nesting;\n'
+                    b'                    direction = -1;\n'
+                    b'                    dashes = 0;\n'
+                    b'                }\n'
+                    b'                break;\n'
+                    b"            case '>':\n"
+                    b'                if (dashes >= 2) {\n'
+                    b'                    --nesting;\n'
+                    b'                    closed = true; // WICKED PATCH 4\n'
+                    b'                    lexer->result_symbol = CFML_COMMENT;\n'
+                    b'                    advance(lexer);\n'
+                    b'                    lexer->mark_end(lexer);\n'
+                    b'                    if ( nesting == 0 ) {\n'
+                    b'                        return true;\n'
+                    b'                    }\n'
+                    b'                    dashes = 0;\n'
+                    b'                    direction = -1;\n'
+                    b'                    continue;\n'
+                    b'                }\n'
+                    b'                direction = -1;\n'
+                    b'                dashes = 0;\n'
+                    b'                break;\n'
+                    b"            case '<':\n"
+                    b'                direction = 0;\n'
+                    b'                dashes = 0;\n'
+                    b'                break;\n'
+                    b"            case '!':\n"
+                    b'                if ( direction == 0 ) {\n'
+                    b'                    direction = 1;\n'
+                    b'                    break;\n'
+                    b'                }\n'
+                    b'                direction = -1;\n'
+                    b'                dashes = 0;\n'
+                    b'                break;\n'
+                    b'            default:\n'
+                    b'                direction = -1;\n'
+                    b'                dashes = 0;\n'
+                    b'                break;\n'
+                    b'        }\n'
+                    b'        advance(lexer);\n'
+                    b'    }\n'
+                    b'    // WICKED PATCH 4 (wicked-estate#631): a comment still open at the end of the input is a\n'
+                    b'    // comment, not a failed scan. Upstream returned false here, and error recovery retried the\n'
+                    b'    // scan at every later `<!`, each one reading to the end again: quadratic. It ends at its last\n'
+                    b'    // `-->` (marked above), or at the end of the input when nothing closed.\n'
+                    b'    if (!closed) {\n'
+                    b'        lexer->mark_end(lexer);\n'
+                    b'    }\n'
+                    b'    lexer->result_symbol = CFML_COMMENT;\n'
+                    b'    return true;\n'
+                    b'}\n',
+                    b'    unsigned nesting = 1;\n'
+                    b'\n'
+                    b'    while (lexer->lookahead) {\n'
+                    b'        switch (lexer->lookahead) {\n'
+                    b"            case '-':\n"
+                    b'                ++dashes;\n'
+                    b'                if ( direction == 1 && dashes >= 2 ) {\n'
+                    b'                    ++nesting;\n'
+                    b'                    direction = -1;\n'
+                    b'                    dashes = 0;\n'
+                    b'                }\n'
+                    b'                break;\n'
+                    b"            case '>':\n"
+                    b'                if (dashes >= 2) {\n'
+                    b'                    --nesting;\n'
+                    b'                    lexer->result_symbol = CFML_COMMENT;\n'
+                    b'                    advance(lexer);\n'
+                    b'                    lexer->mark_end(lexer);\n'
+                    b'                    if ( nesting == 0 ) {\n'
+                    b'                        return true;\n'
+                    b'                    }\n'
+                    b'                    dashes = 0;\n'
+                    b'                    direction = -1;\n'
+                    b'                    continue;\n'
+                    b'                }\n'
+                    b'                direction = -1;\n'
+                    b'                dashes = 0;\n'
+                    b'                break;\n'
+                    b"            case '<':\n"
+                    b'                direction = 0;\n'
+                    b'                dashes = 0;\n'
+                    b'                break;\n'
+                    b"            case '!':\n"
+                    b'                if ( direction == 0 ) {\n'
+                    b'                    direction = 1;\n'
+                    b'                    break;\n'
+                    b'                }\n'
+                    b'                direction = -1;\n'
+                    b'                dashes = 0;\n'
+                    b'                break;\n'
+                    b'            default:\n'
+                    b'                direction = -1;\n'
+                    b'                dashes = 0;\n'
+                    b'                break;\n'
+                    b'        }\n'
+                    b'        advance(lexer);\n'
+                    b'    }\n'
+                    b'    return false;\n'
+                    b'}\n',
                 ),
             ),
         },
@@ -516,7 +628,7 @@ class UpstreamDeclarationTests(unittest.TestCase):
                               + UPSTREAM_DECLARATIONS["tree-sitter-vb6"]["files"]["src/grammar.json"]])
 
     def test_a_marked_local_patch_is_upstream_plus_that_patch_only(self):
-        # #636: two fixes in cfml's shared scanner. The file stays pinned to upstream's blob; the
+        # #636 and #631: three fixes in cfml's shared scanner. The file stays pinned to upstream's blob; the
         # record holds each marked edit, and undoing them must give upstream's bytes back exactly.
         d = UPSTREAM_DECLARATIONS["tree-sitter-cfml"]
         rel = "common/scanner.h"
@@ -541,7 +653,8 @@ class UpstreamDeclarationTests(unittest.TestCase):
             scanner.write_bytes(undone)
             self.assertEqual(declaration_problems(vendor, self.notice),
                              [f"tree-sitter-cfml: {rel} does not carry its recorded patch 1",
-                              f"tree-sitter-cfml: {rel} does not carry its recorded patch 2"])
+                              f"tree-sitter-cfml: {rel} does not carry its recorded patch 2",
+                              f"tree-sitter-cfml: {rel} does not carry its recorded patch 3"])
             # NOTICE and the PROVENANCE row say the tree is patched.
             scanner.write_bytes(text)
             block = notice_block(self.notice, "tree-sitter-cfml")
