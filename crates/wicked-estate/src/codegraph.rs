@@ -1026,6 +1026,22 @@ pub fn prepare(
     ))
 }
 
+/// Whether this run's fingerprint for an unchanged file matches the stored one. A fallback made
+/// at mapping time (`no-defs`, `ambiguous-def`) is decided again on every run from the same
+/// facts, so `ok` with the same facts matches it; anything else must be equal (#659 round 1).
+fn same_as_stored(fp: &str, stored: Option<&String>) -> bool {
+    let Some(stored) = stored else {
+        return false;
+    };
+    if stored == fp {
+        return true;
+    }
+    let mapping_fallback = ["skipped:no-defs|", "skipped:ambiguous-def|"]
+        .iter()
+        .find_map(|p| stored.strip_prefix(p));
+    matches!((mapping_fallback, fp.strip_prefix("ok|")), (Some(a), Some(b)) if a == b)
+}
+
 impl Prepared {
     pub(crate) fn new(
         prefix: &str,
@@ -1065,7 +1081,7 @@ impl Prepared {
             .filter(|p| {
                 fingerprints
                     .get(*p)
-                    .is_some_and(|fp| stored.get(*p) != Some(fp))
+                    .is_some_and(|fp| !same_as_stored(fp, stored.get(*p)))
             })
             .cloned()
             .collect();
@@ -1304,6 +1320,33 @@ fn byte_col(
         .unwrap_or(col)
 }
 
+/// Codegraph's columns as byte columns for [`Prepared::resolve`], holding one file's text at a
+/// time (the callers visit files in order), so converting every site of a large run never holds
+/// the whole source population in memory (estate#653, #659 round 1).
+struct ByteCols<'a> {
+    text: &'a dyn Fn(&str) -> Option<String>,
+    file: Option<(String, Option<SourceLines>)>,
+}
+
+impl<'a> ByteCols<'a> {
+    fn new(text: &'a dyn Fn(&str) -> Option<String>) -> Self {
+        ByteCols { text, file: None }
+    }
+
+    /// Codegraph's (1-based line, UTF-16 column) in `path` as a byte column; the column as given
+    /// when the text is unavailable (on ASCII text the two agree).
+    fn col(&mut self, path: &str, line: u32, col: u32) -> u32 {
+        if self.file.as_ref().is_none_or(|(p, _)| p != path) {
+            self.file = Some((path.to_string(), (self.text)(path).map(SourceLines::new)));
+        }
+        self.file
+            .as_ref()
+            .and_then(|(_, src)| src.as_ref())
+            .and_then(|src| src.byte_col(line, col))
+            .unwrap_or(col)
+    }
+}
+
 /// Codegraph id → estate id for the definitions of the switched `Ok` files, plus the estate
 /// nodes minted for codegraph definitions estate's extraction lacks.
 #[derive(Default)]
@@ -1315,11 +1358,6 @@ pub(crate) struct IdMap {
     /// (a definition matched more than one node) or `no-defs` (codegraph found no definition
     /// where estate found some).
     pub ambiguous: BTreeMap<String, &'static str>,
-    /// Byte columns of the codegraph edges (by index into the snapshot's edges) and unresolved
-    /// rows sourced in the files extracted this run: codegraph counts UTF-16 code units, and
-    /// every comparison with estate's spans must be in bytes (estate#653).
-    pub edge_cols: HashMap<usize, u32>,
-    pub unresolved_cols: HashMap<usize, u32>,
 }
 
 impl Prepared {
@@ -1655,27 +1693,6 @@ impl Prepared {
             map.ids.insert(d.id.clone(), id);
             map.minted.push(node);
         }
-        // Sites in the files extracted this run, in bytes, for `resolve`.
-        for (i, e) in self.snap.edges.iter().enumerate() {
-            let (Some(line), Some(col)) = (e.line, e.col) else {
-                continue;
-            };
-            let Some(src) = self.snap.nodes.get(&e.source) else {
-                continue;
-            };
-            let path = format!("{}{}", self.prefix, src.file);
-            if mint_in.contains(&path) {
-                map.edge_cols
-                    .insert(i, byte_col(&mut sources, text, &path, line, col));
-            }
-        }
-        for (i, u) in self.snap.unresolved.iter().enumerate() {
-            let path = format!("{}{}", self.prefix, u.file);
-            if mint_in.contains(&path) {
-                map.unresolved_cols
-                    .insert(i, byte_col(&mut sources, text, &path, u.line, u.col));
-            }
-        }
         // An ambiguous file keeps estate's pipeline: drop its mappings and mints.
         if !map.ambiguous.is_empty() {
             let amb = &map.ambiguous;
@@ -1737,15 +1754,17 @@ impl Prepared {
     /// codegraph-only edges), the estate refs codegraph bound nothing for (unchanged, for
     /// estate's resolvers to try against files codegraph does not answer for), and codegraph's
     /// own unresolved rows at sites no estate ref covered (with the `codegraph:` prefix).
+    /// `text` returns a file's stored source: codegraph's UTF-16 columns are compared and
+    /// stored as estate's byte columns (estate#653).
     pub(crate) fn resolve(
         &self,
         refs: &[UnresolvedRef],
         ids: &IdMap,
         extracted: &HashSet<String>,
+        text: &dyn Fn(&str) -> Option<String>,
     ) -> (Vec<Edge>, Vec<UnresolvedRef>, Vec<UnresolvedRef>) {
         let sites = self.sites();
-        // A site's column in bytes, estate's unit (estate#653).
-        let site_col = |i: usize| ids.edge_cols.get(&i).copied().or(self.snap.edges[i].col);
+        let mut cols = ByteCols::new(text);
         let mut consumed = self.consumed.lock().unwrap_or_else(|e| e.into_inner());
         let mut edges = Vec::new();
         let mut unbound = Vec::new();
@@ -1785,13 +1804,23 @@ impl Prepared {
                         .collect()
                 })
                 .unwrap_or_default();
-            let exact: Vec<usize> = hits
-                .iter()
-                .copied()
-                .filter(|i| site_col(*i) == Some(r.location.span.start_col))
-                .collect();
-            if !exact.is_empty() || per_key.get(&key).copied().unwrap_or(0) > 1 {
-                hits = exact;
+            // A column decides only between several sites, or between refs sharing the key; it is
+            // compared in bytes, from the ref's file (the site's file: the key holds it).
+            let shared = per_key.get(&key).copied().unwrap_or(0) > 1;
+            if hits.len() > 1 || shared {
+                let exact: Vec<usize> = hits
+                    .iter()
+                    .copied()
+                    .filter(|i| {
+                        let e = &self.snap.edges[*i];
+                        e.line.zip(e.col).is_some_and(|(line, col)| {
+                            cols.col(&r.location.file, line, col) == r.location.span.start_col
+                        })
+                    })
+                    .collect();
+                if !exact.is_empty() || shared {
+                    hits = exact;
+                }
             }
             let mut bound = false;
             let mut site_dropped = 0usize;
@@ -1827,8 +1856,17 @@ impl Prepared {
                 unbound.push(r.clone());
             }
         }
-        // Codegraph-only edges sourced in files extracted this run.
-        for (i, e) in self.snap.edges.iter().enumerate() {
+        // Codegraph-only edges sourced in files extracted this run, one file at a time (their
+        // columns are converted from the file's text).
+        let mut order: Vec<usize> = (0..self.snap.edges.len()).collect();
+        order.sort_by_key(|i| {
+            self.snap
+                .nodes
+                .get(&self.snap.edges[*i].source)
+                .map(|n| n.file.as_str())
+        });
+        for i in order {
+            let e = &self.snap.edges[i];
             if consumed.contains(&i) || accounted.contains(&i) {
                 continue;
             }
@@ -1853,7 +1891,10 @@ impl Prepared {
             if source == target {
                 continue;
             }
-            let col = site_col(i).unwrap_or(0);
+            let col = e
+                .line
+                .zip(e.col)
+                .map_or(0, |(line, col)| cols.col(&path, line, col));
             let span = Span {
                 start_byte: 0,
                 end_byte: 0,
@@ -1871,7 +1912,9 @@ impl Prepared {
             ));
         }
         // Codegraph's unresolved rows at sites no estate ref covered.
-        for (i, u) in self.snap.unresolved.iter().enumerate() {
+        let mut order: Vec<&CgUnresolved> = self.snap.unresolved.iter().collect();
+        order.sort_by_key(|u| u.file.as_str());
+        for u in order {
             let path = format!("{}{}", self.prefix, u.file);
             if !extracted.contains(&path) || ids.ambiguous.contains_key(&path) {
                 continue;
@@ -1887,13 +1930,14 @@ impl Prepared {
                 continue;
             };
             covered.insert(key);
+            let col = cols.col(&path, u.line, u.col);
             let span = Span {
                 start_byte: 0,
                 end_byte: 0,
                 start_line: u.line.saturating_sub(1),
-                start_col: ids.unresolved_cols.get(&i).copied().unwrap_or(u.col),
+                start_col: col,
                 end_line: u.line.saturating_sub(1),
-                end_col: ids.unresolved_cols.get(&i).copied().unwrap_or(u.col),
+                end_col: col,
             };
             unresolved.push(UnresolvedRef {
                 from: from.clone(),
@@ -2306,7 +2350,7 @@ mod tests {
             )
         };
         let refs = vec![call(at("new A()")), call(at("new B()"))];
-        let (edges, _, _) = prepared.resolve(&refs, &ids, &HashSet::new());
+        let (edges, _, _) = prepared.resolve(&refs, &ids, &HashSet::new(), &stored_text);
         let mut bound: Vec<(u32, String)> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Calls)

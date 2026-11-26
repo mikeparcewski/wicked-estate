@@ -497,13 +497,14 @@ fn resolve_with_codegraph(
     index: &InMemoryIndex,
     codegraph: Option<(&codegraph::Prepared, &codegraph::IdMap)>,
     extracted: &HashSet<String>,
+    text: &dyn Fn(&str) -> Option<String>,
 ) -> Result<wicked_estate_resolve::Resolution> {
     let Some((cg, ids)) = codegraph else {
         return resolve_all_with_coverage(resolvers, refs, index);
     };
     let (owned, rest): (Vec<_>, Vec<_>) = refs.iter().cloned().partition(|r| cg.owns(r, ids));
     let mut resolution = resolve_all_with_coverage(resolvers, &rest, index)?;
-    let (mut edges, unbound, mut unresolved) = cg.resolve(&owned, ids, extracted);
+    let (mut edges, unbound, mut unresolved) = cg.resolve(&owned, ids, extracted, text);
     // A ref codegraph bound nothing for goes to estate's resolvers, which may bind it only into
     // files codegraph does not answer for: a file that fell back (its callers would otherwise
     // lose every edge into it), a file in an unswitched language, a stylesheet or a JSON file.
@@ -2579,7 +2580,8 @@ fn index_path_inner(
     );
     // Files whose minted nodes this run deletes: the last run answered them and this one does
     // not (codegraph off or failed, the file fell back, or its language was narrowed out). One
-    // report covers every such path (estate#597).
+    // report covers every such path (estate#597); a file that falls back later in the run gets a
+    // second report after mapping (estate#656).
     let reextracted_ok = |path: &str, fp: &str| {
         fp.starts_with("ok|")
             && work_by_rel.contains_key(path)
@@ -3515,19 +3517,33 @@ fn index_path_inner(
     }
     // The minted nodes are written with this run's edges, but every resolver below must already
     // see them: a later run reads them from the store (estate#654).
+    // They are new definitions too: the backfill re-tries refs parked on their names, from
+    // files this run did not extract (#659 round 1).
     if let Some(ids) = &codegraph_ids {
         for n in &ids.minted {
+            if !n.name.is_empty() {
+                for probe in node_backfill_probes(n) {
+                    if seen_probes.insert(probe.clone()) {
+                        backfill_probes.push(probe);
+                    }
+                }
+            }
             index.insert(n.clone());
         }
     }
     let codegraph_pair = codegraph_state.as_ref().zip(codegraph_ids.as_ref());
-    let resolution = resolve_with_codegraph(
-        resolvers,
-        &all_refs,
-        &index,
-        codegraph_pair,
-        &extracted_files,
-    )?;
+    let resolution = {
+        let reader: &dyn GraphRead = &*store;
+        let text = |file: &str| reader.file_content(file).ok().flatten();
+        resolve_with_codegraph(
+            resolvers,
+            &all_refs,
+            &index,
+            codegraph_pair,
+            &extracted_files,
+            &text,
+        )?
+    };
     let call_ref_hints = call_value_ref_hints(&all_refs);
     let (call_flow_nodes, call_flow_edges) =
         call_value_flow(&resolution.site_edges, &index, &call_ref_hints)?;
@@ -3590,13 +3606,18 @@ fn index_path_inner(
     if !rederive_refs.is_empty() {
         let mut targets = changed_symbols.clone();
         targets.extend(extracted_symbols);
-        let rederived = resolve_with_codegraph(
-            resolvers,
-            &rederive_refs,
-            &index,
-            codegraph_pair,
-            &HashSet::new(),
-        )?;
+        let rederived = {
+            let reader: &dyn GraphRead = &*store;
+            let text = |file: &str| reader.file_content(file).ok().flatten();
+            resolve_with_codegraph(
+                resolvers,
+                &rederive_refs,
+                &index,
+                codegraph_pair,
+                &HashSet::new(),
+                &text,
+            )?
+        };
         let sites: HashSet<CallSiteKey> = rederived
             .site_edges
             .iter()
