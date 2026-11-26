@@ -2531,6 +2531,102 @@ fn cobol_fd_records(division: tree_sitter::Node, src: &[u8]) -> HashMap<String, 
     out
 }
 
+/// Where control that reaches each header of `asked` lands, as the first bytes of headers with a
+/// node (#622). A header with a node lands on itself. One with none (an integer-named paragraph or
+/// section) is passed through, to where it falls (`falls`) and where its EXIT SECTION leaves to
+/// (`exits`). Both moves go forward in the source.
+///
+/// The landings are built once, in reverse source order, as a shared graph instead of a set per
+/// header: an unnoded header with one way on shares that way's entry, and one with two holds its
+/// own landings and links to the entries it reaches. So a chain of unnoded headers that many moves
+/// reach is one entry, and no header copies another's landings: the graph is linear in the
+/// headers. Each asked entry is then enumerated once, by one walk of the part of the graph it
+/// reaches, and its answer is kept for the moves that ask again.
+fn cobol_landings(
+    noded: impl Fn(usize) -> bool,
+    falls: &HashMap<usize, usize>,
+    exits: &HashMap<usize, usize>,
+    asked: &[usize],
+) -> HashMap<usize, Vec<usize>> {
+    let tick = crate::behaviour::cobol_tick;
+    let mut unnoded: Vec<usize> = falls
+        .iter()
+        .chain(exits)
+        .flat_map(|(&from, &to)| [from, to])
+        .chain(asked.iter().copied())
+        .filter(|&h| !noded(h))
+        .collect();
+    unnoded.sort_unstable();
+    unnoded.dedup();
+    // An entry: (the noded headers it lands on directly, the entries it links to).
+    let mut graph: Vec<(Vec<usize>, Vec<usize>)> = Vec::new();
+    // Each unnoded header's entry; `None`: control that reaches it lands nowhere.
+    let mut entry: HashMap<usize, Option<usize>> = HashMap::new();
+    for &h in unnoded.iter().rev() {
+        let (mut leaves, mut links) = (Vec::new(), Vec::new());
+        for &next in [falls.get(&h), exits.get(&h)].into_iter().flatten() {
+            if noded(next) {
+                leaves.push(next);
+            } else if let Some(&Some(e)) = entry.get(&next) {
+                links.push(e);
+            }
+        }
+        leaves.sort_unstable();
+        leaves.dedup();
+        links.sort_unstable();
+        links.dedup();
+        tick(1 + leaves.len() + links.len());
+        let e = if leaves.is_empty() && links.len() <= 1 {
+            links.first().copied()
+        } else {
+            graph.push((leaves, links));
+            Some(graph.len() - 1)
+        };
+        entry.insert(h, e);
+    }
+    let mut answers: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut by_entry: HashMap<usize, Vec<usize>> = HashMap::new();
+    // The enumeration that last visited each entry.
+    let mut seen: Vec<usize> = vec![usize::MAX; graph.len()];
+    for (pass, &h) in asked.iter().enumerate() {
+        tick(1);
+        if answers.contains_key(&h) {
+            continue;
+        }
+        let at = if noded(h) {
+            vec![h]
+        } else {
+            match entry.get(&h).copied().flatten() {
+                None => Vec::new(),
+                Some(e) => by_entry
+                    .entry(e)
+                    .or_insert_with(|| {
+                        let mut at = Vec::new();
+                        let mut stack = vec![e];
+                        seen[e] = pass;
+                        while let Some(e) = stack.pop() {
+                            let (leaves, links) = &graph[e];
+                            tick(1 + leaves.len() + links.len());
+                            at.extend(leaves);
+                            for &l in links {
+                                if seen[l] != pass {
+                                    seen[l] = pass;
+                                    stack.push(l);
+                                }
+                            }
+                        }
+                        at.sort_unstable();
+                        at.dedup();
+                        at
+                    })
+                    .clone(),
+            }
+        };
+        answers.insert(h, at);
+    }
+    answers
+}
+
 /// Every COBOL paragraph header of the file, by first byte: the section header it sits in, as
 /// (first byte, name as the header spells it, uppercased), or `None` (a paragraph before any
 /// section). Sections are not listed, and a section counts whether or not it emits a node (one
@@ -6463,11 +6559,8 @@ impl TreeSitterExtractor {
                     .get(start)
                     .map(|&k| defs[units[k]].symbol.clone())
             };
-            // A header with no node (an integer-named paragraph) is passed through: control that
-            // reaches it lands on the noded headers it reaches in turn, where it falls and where
-            // its EXIT SECTION leaves to (#622). Each unnoded header's landings are computed once,
-            // in reverse source order (both moves go forward), so a chain of unnoded headers that
-            // many exits reach is walked once, not once per exit.
+            // A header with no node (an integer-named paragraph or section) is passed through
+            // (#622): see [`cobol_landings`].
             let falls_from: HashMap<usize, usize> = shape
                 .falls
                 .iter()
@@ -6478,40 +6571,27 @@ impl TreeSitterExtractor {
                 .iter()
                 .map(|&(from, to, _)| (from, to))
                 .collect();
-            let mut unnoded: Vec<usize> = falls_from
+            let asked: Vec<usize> = shape
+                .falls
                 .iter()
-                .chain(&exits_from)
-                .flat_map(|(&from, &to)| [from, to])
+                .chain(&shape.exits)
+                .filter(|(from, _, _)| unit_by_start.contains_key(from))
+                .map(|&(_, to, _)| to)
                 .chain(shape.starts.iter().copied())
-                .filter(|h| !unit_by_start.contains_key(h))
                 .collect();
-            unnoded.sort_unstable();
-            unnoded.dedup();
-            let mut lands: HashMap<usize, Vec<usize>> = HashMap::new();
-            for &h in unnoded.iter().rev() {
-                let mut at: Vec<usize> = Vec::new();
-                for next in [falls_from.get(&h), exits_from.get(&h)]
+            let lands = cobol_landings(
+                |h| unit_by_start.contains_key(&h),
+                &falls_from,
+                &exits_from,
+                &asked,
+            );
+            let landing = |h: usize| -> Vec<SymbolId> {
+                lands
+                    .get(&h)
                     .into_iter()
                     .flatten()
-                {
-                    if unit_by_start.contains_key(next) {
-                        at.push(*next);
-                    } else if let Some(more) = lands.get(next) {
-                        at.extend(more);
-                    }
-                }
-                at.sort_unstable();
-                at.dedup();
-                crate::behaviour::cobol_tick(at.len() + 1);
-                lands.insert(h, at);
-            }
-            let landing = |h: usize| -> Vec<SymbolId> {
-                let at: Vec<SymbolId> = match lands.get(&h) {
-                    Some(at) => at.iter().filter_map(&unit).collect(),
-                    None => unit(&h).into_iter().collect(),
-                };
-                crate::behaviour::cobol_tick(at.len() + 1);
-                at
+                    .filter_map(&unit)
+                    .collect()
             };
             // An EXIT SECTION's move into the next section is a fall-through too (#622).
             for (from, to, span) in shape.falls.iter().chain(&shape.exits) {
@@ -12654,6 +12734,61 @@ public class PlainListener {
                 (start, start + len)
             })
             .collect()
+    }
+
+    /// wicked-estate#622: [`cobol_landings`] answers what a walk of every move from the asked
+    /// header finds: the first headers with a node on each way on, through any unnoded ones.
+    #[test]
+    fn cobol_landings_match_a_walk_622() {
+        let mut seed: u64 = 622;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as usize
+        };
+        for round in 0..2_000 {
+            let n = 1 + round % 30;
+            let noded: Vec<bool> = (0..n).map(|_| next() % 3 == 0).collect();
+            let mut falls = HashMap::new();
+            let mut exits = HashMap::new();
+            for h in 0..n {
+                if next() % 4 != 0 && h + 1 < n {
+                    falls.insert(h, h + 1);
+                }
+                if next() % 3 == 0 {
+                    let to = h + 1 + next() % (n - h);
+                    if to < n {
+                        exits.insert(h, to);
+                    }
+                }
+            }
+            let asked: Vec<usize> = (0..n).chain(0..n).collect();
+            let got = cobol_landings(|h| noded[h], &falls, &exits, &asked);
+            for h in 0..n {
+                let mut want = Vec::new();
+                let mut stack = vec![h];
+                let mut seen = vec![false; n];
+                while let Some(at) = stack.pop() {
+                    if noded[at] {
+                        want.push(at);
+                        continue;
+                    }
+                    for &to in [falls.get(&at), exits.get(&at)].into_iter().flatten() {
+                        if !seen[to] {
+                            seen[to] = true;
+                            stack.push(to);
+                        }
+                    }
+                }
+                want.sort_unstable();
+                want.dedup();
+                assert_eq!(
+                    got[&h], want,
+                    "round {round}: header {h}, noded {noded:?}, falls {falls:?}, exits {exits:?}"
+                );
+            }
+        }
     }
 
     #[test]
