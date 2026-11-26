@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use wicked_estate_core::{GraphRead, SymbolId};
 use wicked_estate_memory_core::{
-    CaptureRequest, Facets, MemoryApi, MemoryListItem, RecallQuery, Scope,
+    CaptureRequest, Facets, MemoryApi, MemoryListItem, RecallQuery, Scope, Tier,
 };
 
 pub fn dispatch(
@@ -79,6 +79,32 @@ fn parse_facets(id: &Value, args: &Value, key: &str) -> Result<Facets, Value> {
     }
 }
 
+/// The `scope` argument of a memory WRITE (`memory.capture`, `memory.learn`), validated fail-loud:
+/// the engine's lenient `Scope::parse` silently discards malformed (colonless / empty-kind /
+/// empty-id) segments, which re-routes the write to a DIFFERENT scope than the caller asked for —
+/// typically root "" — where the caller's documented `memory.erase scope_prefix` can never find it
+/// again. Reject at the wire instead. Omitted / null / empty scope stays valid (root is the
+/// documented default; wicked producers serialize `Option::None` as JSON null). A present
+/// NON-string scope (number/object/array/bool) is invalid params, not an implicit root write —
+/// same misrouting failure mode. Answers the raw path and its parsed [`Scope`].
+fn write_scope_arg<'a>(id: &Value, args: &'a Value) -> Result<(&'a str, Scope), Value> {
+    let raw = match args.get("scope") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(s)) => s.as_str(),
+        Some(other) => {
+            return Err(json_rpc_error(
+                id,
+                -32602,
+                &format!("invalid scope: expected a string of kind:id segments, got {other}"),
+            ));
+        }
+    };
+    match Scope::parse_strict(raw) {
+        Ok(scope) => Ok((raw, scope)),
+        Err(e) => Err(json_rpc_error(id, -32602, &format!("invalid scope: {e}"))),
+    }
+}
+
 fn dispatch_capture(
     id: &Value,
     args: &Value,
@@ -90,29 +116,10 @@ fn dispatch_capture(
         Some(c) => c.to_string(),
         None => return json_rpc_error(id, -32602, "content required"),
     };
-    // FAIL-LOUD scope validation: the engine's lenient `Scope::parse` silently
-    // discards malformed (colonless / empty-kind / empty-id) segments, which
-    // re-routes the write to a DIFFERENT scope than the caller asked for —
-    // typically root "" — where the caller's documented `memory.erase
-    // scope_prefix` can never find it again. Reject at the wire instead.
-    // Omitted / null / empty scope stays valid (root is the documented
-    // default; wicked producers serialize `Option::None` as JSON null). A
-    // present NON-string scope (number/object/array/bool) is invalid params,
-    // not an implicit root write — same misrouting failure mode.
-    let scope = match args.get("scope") {
-        None | Some(Value::Null) => "",
-        Some(Value::String(s)) => s.as_str(),
-        Some(other) => {
-            return json_rpc_error(
-                id,
-                -32602,
-                &format!("invalid scope: expected a string of kind:id segments, got {other}"),
-            );
-        }
+    let scope = match write_scope_arg(id, args) {
+        Ok((raw, _)) => raw,
+        Err(e) => return e,
     };
-    if let Err(e) = Scope::parse_strict(scope) {
-        return json_rpc_error(id, -32602, &format!("invalid scope: {e}"));
-    }
     let about: Option<Vec<String>> = args.get("about").and_then(|v| v.as_array()).map(|a| {
         a.iter()
             .filter_map(|x| x.as_str().map(str::to_owned))
@@ -337,9 +344,37 @@ fn dispatch_learn(
                 .collect()
         })
         .unwrap_or_default();
+    // estate#619: `scope` and `tier` are honoured or refused, never dropped. Scope follows
+    // `memory.capture`'s fail-loud rule ([`write_scope_arg`]). Tier is the schema's enum;
+    // omitted / null = semantic, what `learn` always stored.
+    let scope = match write_scope_arg(id, args) {
+        Ok((_, scope)) => scope,
+        Err(e) => return e,
+    };
+    let tier = match args.get("tier") {
+        None | Some(Value::Null) => Tier::Semantic,
+        Some(Value::String(t)) if t == "semantic" => Tier::Semantic,
+        Some(Value::String(t)) if t == "procedural" => Tier::Procedural,
+        Some(other) => {
+            return json_rpc_error(
+                id,
+                -32602,
+                &format!("invalid tier: expected \"semantic\" or \"procedural\", got {other}"),
+            );
+        }
+    };
     let symbol_epochs = fetch_epochs(store, &symbols);
-    match memory.learn(&fact, &symbols, &symbol_epochs, now) {
-        Ok(memory_id) => mcp_result(id, json!({"memory_id": memory_id})),
+    match memory.learn_at(&fact, &symbols, &symbol_epochs, &scope, tier, now) {
+        Ok(Some(memory_id)) => mcp_result(id, json!({"memory_id": memory_id})),
+        Ok(None) => json_rpc_error(
+            id,
+            -32602,
+            &format!(
+                "this memory store cannot learn at scope {:?} with tier {}",
+                scope.as_path(),
+                tier.as_str()
+            ),
+        ),
         Err(e) => json_rpc_error(id, -32603, &e.to_string()),
     }
 }
