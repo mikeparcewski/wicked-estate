@@ -2266,7 +2266,11 @@ mod tests {
                 }
             }
         }
-        assert!(found.is_empty(), "tree-sitter navigation:\n{}", found.join("\n"));
+        assert!(
+            found.is_empty(),
+            "tree-sitter navigation:\n{}",
+            found.join("\n")
+        );
     }
 
     #[test]
