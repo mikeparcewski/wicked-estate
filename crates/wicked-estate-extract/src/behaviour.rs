@@ -2223,6 +2223,52 @@ mod tests {
         }
     }
 
+    /// The COBOL classifier and the paragraph-end path navigate through `CobolTree`'s arrays only
+    /// (#627; #628 round 2, F2). tree-sitter's `next_sibling` / `prev_sibling` / `parent` /
+    /// `child(i)` cost the node's index among its siblings and `descendant_for_byte_range` a
+    /// descent, so one such call per paragraph of a flat procedure division is quadratic in the
+    /// file. The counted-work guard cannot see that work: it happens inside tree-sitter.
+    #[test]
+    fn cobol_paragraph_paths_call_no_tree_sitter_navigation_627() {
+        const NAVIGATION: &[&str] = &[
+            ".next_sibling(",
+            ".prev_sibling(",
+            ".parent(",
+            ".child(",
+            "descendant_for_byte_range",
+        ];
+        // Each item: its first line, at column 0, in one of these files.
+        const ITEMS: &[&str] = &[
+            "fn cobol(",
+            "fn cobol_exit_only_source_ok(",
+            "impl<'t> CobolTree<'t> {",
+            "fn cobol_paragraph_end_map(",
+            "fn cobol_paragraph_end(",
+            "fn cobol_next_header_start(",
+        ];
+        let files = [include_str!("behaviour.rs"), include_str!("treesitter.rs")];
+        let mut found = Vec::new();
+        for item in ITEMS {
+            let body = files
+                .iter()
+                .find_map(|src| {
+                    let at = src.find(&format!("\n{item}"))? + 1;
+                    let len = src[at..].find("\n}\n")?;
+                    Some(&src[at..at + len])
+                })
+                .unwrap_or_else(|| panic!("{item} not found"));
+            for line in body.lines() {
+                let code = line.split("//").next().unwrap_or("");
+                for nav in NAVIGATION {
+                    if code.contains(nav) {
+                        found.push(format!("{item} calls {nav}: {}", line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "tree-sitter navigation:\n{}", found.join("\n"));
+    }
+
     #[test]
     fn cobol_edge_shapes_classify_as_before_582() {
         // The oracle in classify_in fails the test on any difference.
