@@ -3167,7 +3167,7 @@ mod tests {
                     && n.name == "assist"
                     && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
             })
-            .map(|n| n.id.0)
+            .map(|n| n.symbol.0)
             .collect();
         assert_eq!(minted.len(), 1, "util.ts's assist is minted");
         let bound = store
