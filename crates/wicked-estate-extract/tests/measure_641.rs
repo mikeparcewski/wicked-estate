@@ -62,6 +62,19 @@ fn flat_performs(n: usize) -> String {
     program("FLAT", &["01  WS-A PIC X(10).".to_string()], &body)
 }
 
+/// A flat procedure division of data uses and literal CALLs (refs that `tag_roles` and the
+/// supplement's ownership pass read per reference).
+fn flat_data_uses(n: usize) -> String {
+    let mut body = Vec::new();
+    for i in 0..n {
+        body.push(format!("P{i}."));
+        body.push("    MOVE 'A' TO WS-A".to_string());
+        body.push("    CALL 'SUBPGM'.".to_string());
+    }
+    body.push("    GOBACK.".to_string());
+    program("USES", &["01  WS-A PIC X(10).".to_string()], &body)
+}
+
 fn time(text: &str) -> (f64, usize, usize) {
     let start = Instant::now();
     let ex = CicsSqlExtractor::new()
@@ -82,7 +95,7 @@ fn measure_cics_sql_extract_scaling_641() {
     if std::env::var_os("MEASURE_641").is_none() {
         return;
     }
-    let shapes: [Shape; 3] = [
+    let shapes: [Shape; 4] = [
         ("a paragraph per CICS LINK", cics_links, 16_000),
         (
             "sequential programs, a field and a data use each",
@@ -92,6 +105,11 @@ fn measure_cics_sql_extract_scaling_641() {
         (
             "a flat procedure division of PERFORMs",
             flat_performs,
+            16_000,
+        ),
+        (
+            "a flat procedure division of data uses and CALLs",
+            flat_data_uses,
             16_000,
         ),
     ];
