@@ -1140,6 +1140,7 @@ pub(crate) fn tag_roles(
                         "perform_procedure",
                         "perform_statement_call_proc",
                         "goto_statement",
+                        "alter_option", // wicked-estate#622: ALTER P TO PROCEED TO Q
                     ],
                     4,
                 );
@@ -3761,6 +3762,24 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// wicked-estate#622: an ALTER `PROCEED TO` target that names no paragraph of its division is
+    /// a ref by name with the label role, like an unresolved GO TO, and never a data use.
+    #[test]
+    fn an_unresolved_alter_target_is_a_label_ref_622() {
+        let ex = run(
+            "cbl/P.cbl",
+            &program(
+                "       01 W PIC 9.\n",
+                "           ALTER CHECK-PARA TO PROCEED TO ALT-NOWHERE.\n       CHECK-PARA.\n           GO TO END-PARA.\n       END-PARA.\n           EXIT.\n",
+            ),
+        );
+        let r = refs_named(&ex, EdgeKind::Calls, "ALT-NOWHERE");
+        assert_eq!(r.len(), 1, "{:?}", calls(&ex));
+        assert_eq!(hint_str(r[0], ROLE_KEY), Some(ROLE_LABEL));
+        assert_eq!(hint_list(r[0], PROGRAMS_KEY), ["P"]);
+        assert!(refs_named(&ex, EdgeKind::References, "ALT-NOWHERE").is_empty());
     }
 
     // ── wicked-estate#544: logical source ──────────────────────────────────────────────────

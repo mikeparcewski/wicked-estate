@@ -6463,35 +6463,71 @@ impl TreeSitterExtractor {
                     .get(start)
                     .map(|&k| defs[units[k]].symbol.clone())
             };
-            // A header with no node (an integer-named paragraph) is passed through: control
-            // that falls into it lands on the first noded header it falls into.
+            // A header with no node (an integer-named paragraph) is passed through: control that
+            // reaches it lands on the noded headers it reaches in turn, where it falls and where
+            // its EXIT SECTION leaves to (#622). Each unnoded header's landings are computed once,
+            // in reverse source order (both moves go forward), so a chain of unnoded headers that
+            // many exits reach is walked once, not once per exit.
             let falls_from: HashMap<usize, usize> = shape
                 .falls
                 .iter()
                 .map(|&(from, to, _)| (from, to))
                 .collect();
-            let landing = |mut h: usize| loop {
-                if unit_by_start.contains_key(&h) {
-                    return Some(h);
+            let exits_from: HashMap<usize, usize> = shape
+                .exits
+                .iter()
+                .map(|&(from, to, _)| (from, to))
+                .collect();
+            let mut unnoded: Vec<usize> = falls_from
+                .iter()
+                .chain(&exits_from)
+                .flat_map(|(&from, &to)| [from, to])
+                .chain(shape.starts.iter().copied())
+                .filter(|h| !unit_by_start.contains_key(h))
+                .collect();
+            unnoded.sort_unstable();
+            unnoded.dedup();
+            let mut lands: HashMap<usize, Vec<usize>> = HashMap::new();
+            for &h in unnoded.iter().rev() {
+                let mut at: Vec<usize> = Vec::new();
+                for next in [falls_from.get(&h), exits_from.get(&h)]
+                    .into_iter()
+                    .flatten()
+                {
+                    if unit_by_start.contains_key(next) {
+                        at.push(*next);
+                    } else if let Some(more) = lands.get(next) {
+                        at.extend(more);
+                    }
                 }
-                h = *falls_from.get(&h)?;
+                at.sort_unstable();
+                at.dedup();
+                crate::behaviour::cobol_tick(at.len() + 1);
+                lands.insert(h, at);
+            }
+            let landing = |h: usize| -> Vec<SymbolId> {
+                let at: Vec<SymbolId> = match lands.get(&h) {
+                    Some(at) => at.iter().filter_map(&unit).collect(),
+                    None => unit(&h).into_iter().collect(),
+                };
+                crate::behaviour::cobol_tick(at.len() + 1);
+                at
             };
             // An EXIT SECTION's move into the next section is a fall-through too (#622).
             for (from, to, span) in shape.falls.iter().chain(&shape.exits) {
-                // Only from a noded unit: a chain of unnoded headers is walked once, by the unit
-                // that falls into it.
+                // Only from a noded unit: an unnoded one's moves are reached through `lands`.
                 let Some(from) = unit(from) else {
                     continue;
                 };
-                if let Some(to) = landing(*to).and_then(|t| unit(&t)) {
-                    add(from, to, *span, CobolHow::FallThrough);
+                for to in landing(*to) {
+                    add(from.clone(), to, *span, CobolHow::FallThrough);
                 }
             }
             for start in &shape.starts {
-                if let (Some(program), Some(to)) =
-                    (program_at(*start), landing(*start).and_then(|t| unit(&t)))
-                {
-                    add(program, to, Span::ZERO, CobolHow::Statement);
+                if let Some(program) = program_at(*start) {
+                    for to in landing(*start) {
+                        add(program.clone(), to, Span::ZERO, CobolHow::Statement);
+                    }
                 }
             }
             for (pos, handler) in &shape.handlers {

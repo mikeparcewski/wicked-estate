@@ -2577,6 +2577,40 @@ mod tests {
         assert_linear_work("calls", calls, 400);
     }
 
+    /// wicked-estate#622: every paragraph of a section runs EXIT SECTION into the next section,
+    /// which is named by an integer and so has no node, as are its paragraphs: each exit lands
+    /// where that chain of unnoded headers ends. The chain is walked once, not once per exit: the
+    /// walk counts its steps, and a walk per exit counts the whole chain n times.
+    #[test]
+    fn exits_into_a_chain_of_unnoded_headers_are_linear_work_622() {
+        let exits = |n: usize| -> String {
+            let mut lines = vec![
+                "IDENTIFICATION DIVISION.".to_string(),
+                "PROGRAM-ID. EXITSPGM.".to_string(),
+                "PROCEDURE DIVISION.".to_string(),
+                "MAIN-SECTION SECTION.".to_string(),
+            ];
+            for i in 0..n {
+                lines.push(format!("P{i}."));
+                lines.push("    IF WS-FLAG = 'Y'".to_string());
+                lines.push("        EXIT SECTION".to_string());
+                lines.push("    END-IF.".to_string());
+                lines.push(format!("P{i}-EXIT."));
+                lines.push("    EXIT.".to_string());
+            }
+            lines.push("2000 SECTION.".to_string());
+            for i in 0..n {
+                lines.push(format!("{}.", 3000 + i));
+                lines.push("    DISPLAY 'X'.".to_string());
+            }
+            lines.push("END-PARA.".to_string());
+            lines.push("    GOBACK.".to_string());
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            fixed(&lines)
+        };
+        assert_linear_work("exits into unnoded headers", exits, 400);
+    }
+
     fn cobol_tags_raw(code: &str) -> std::collections::BTreeMap<String, (String, Option<String>)> {
         tags("src/PROG.cbl", "cobol", code)
             .into_iter()

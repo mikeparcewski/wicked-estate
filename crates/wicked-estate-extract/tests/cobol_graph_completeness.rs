@@ -2556,9 +2556,46 @@ fn exit_section_falls_into_the_next_section_622() {
         ),
     );
     assert_eq!(callers_of(&ex, "LATER-SECTION"), ["FIRST-PARA"]);
+    // The EXIT SECTION is conditional, so FIRST-PARA still falls into SECOND-PARA.
+    assert_eq!(callers_of(&ex, "SECOND-PARA"), ["FIRST-PARA"]);
     assert_eq!(flow_tags(&ex, "FIRST-PARA", "LATER-SECTION"), (true, false));
     assert!(
         reaches_call(&ex, "EXITPGM", "LATERPGM"),
+        "LATER-PARA's CALL is not in the program's lineage"
+    );
+}
+
+#[test]
+fn exit_section_from_an_integer_named_paragraph_falls_into_the_next_section_622() {
+    // 1000 has no node, so MAIN-SECTION, which falls into it, lands where 1000 goes: SECOND-PARA
+    // by falling through and LATER-SECTION by its EXIT SECTION.
+    let ex = extract(
+        "NUMEXIT",
+        &program(
+            "NUMEXIT",
+            DATA,
+            &[
+                "MAIN-SECTION SECTION.",
+                "1000.",
+                "    IF WS-FLAG = 'Y'",
+                "        EXIT SECTION",
+                "    END-IF.",
+                "    DISPLAY 'A'.",
+                "SECOND-PARA.",
+                "    GOBACK.",
+                "LATER-SECTION SECTION.",
+                "LATER-PARA.",
+                "    CALL 'LATERPGM'.",
+            ],
+        ),
+    );
+    assert_eq!(callers_of(&ex, "LATER-SECTION"), ["MAIN-SECTION"]);
+    assert_eq!(
+        flow_tags(&ex, "MAIN-SECTION", "LATER-SECTION"),
+        (true, false)
+    );
+    assert!(
+        reaches_call(&ex, "NUMEXIT", "LATERPGM"),
         "LATER-PARA's CALL is not in the program's lineage"
     );
 }
