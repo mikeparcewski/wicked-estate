@@ -1104,6 +1104,40 @@ fn name_tail(raw: &str) -> String {
     tail.trim_end_matches("()").to_string()
 }
 
+/// A file's text with its line starts, to turn codegraph's positions into byte offsets.
+struct SourceLines {
+    text: String,
+    starts: Vec<usize>,
+}
+
+impl SourceLines {
+    fn new(text: String) -> Self {
+        let mut starts = vec![0];
+        starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+        SourceLines { text, starts }
+    }
+
+    /// The byte offset of codegraph's (1-based line, 0-based column). Codegraph parses with
+    /// web-tree-sitter (its bundle's package.json pins `web-tree-sitter` ^0.25.3), which reads
+    /// a JS string as UTF-16, so a column counts UTF-16 code units; on ASCII text that is the
+    /// byte column. A column past the line's end stops at the end of the line (before `\r\n`).
+    /// `None` for a line the text does not have.
+    fn byte_at(&self, line: u32, col: u32) -> Option<usize> {
+        let start = *self.starts.get((line as usize).checked_sub(1)?)?;
+        let rest = &self.text[start..];
+        let line_text = rest.split('\n').next().unwrap_or(rest);
+        let line_text = line_text.strip_suffix('\r').unwrap_or(line_text);
+        let mut units = 0u32;
+        for (i, c) in line_text.char_indices() {
+            if units >= col {
+                return Some(start + i);
+            }
+            units += c.len_utf16() as u32;
+        }
+        Some(start + line_text.len())
+    }
+}
+
 /// Codegraph id → estate id for the definitions of the switched `Ok` files, plus the estate
 /// nodes minted for codegraph definitions estate's extraction lacks.
 #[derive(Default)]
@@ -1121,8 +1155,16 @@ impl Prepared {
     /// Map codegraph definitions onto estate nodes. `nodes` is the post-write population (the
     /// resolution index); `mint_in` names the files extracted this run, the only ones whose
     /// unmatched definitions get new nodes (an unchanged file's were minted when it changed).
-    pub(crate) fn id_map(&self, nodes: &[&Node], mint_in: &HashSet<String>) -> IdMap {
+    /// `text` returns a file's stored source (estate path), from which a minted node's byte span
+    /// is computed, so `symbol_source` returns its body (estate#590).
+    pub(crate) fn id_map(
+        &self,
+        nodes: &[&Node],
+        mint_in: &HashSet<String>,
+        text: &dyn Fn(&str) -> Option<String>,
+    ) -> IdMap {
         let mut map = IdMap::default();
+        let mut sources: HashMap<String, Option<SourceLines>> = HashMap::new();
         // Estate candidates per (file, name, class).
         let mut estate: HashMap<(&str, &str, KindClass), Vec<&Node>> = HashMap::new();
         let mut files_lang: HashMap<&str, &Language> = HashMap::new();
@@ -1343,9 +1385,22 @@ impl Prepared {
                 *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) += 1;
                 continue;
             };
+            // The byte span from codegraph's positions in the stored text (the bytes codegraph
+            // read: the mirror is the redacted source, same length and line breaks). A file
+            // whose text is unavailable keeps the zero span (no source, as before).
+            let bytes = sources
+                .entry(path.clone())
+                .or_insert_with(|| text(path.as_str()).map(SourceLines::new))
+                .as_ref()
+                .and_then(|src| {
+                    let start = src.byte_at(d.start_line, d.start_col)?;
+                    let end = src.byte_at(d.end_line, d.end_col)?;
+                    (start < end).then_some((start, end))
+                });
+            let (start_byte, end_byte) = bytes.unwrap_or((0, 0));
             let span = Span {
-                start_byte: 0,
-                end_byte: 0,
+                start_byte: start_byte as u32,
+                end_byte: end_byte as u32,
                 start_line: d.start_line.saturating_sub(1),
                 start_col: d.start_col,
                 end_line: d.end_line.saturating_sub(1),
@@ -1923,6 +1978,26 @@ mod tests {
         );
         // A definition estate already has keeps estate's id: no second `g` node.
         assert_eq!(nodes.iter().filter(|n| n.name == "g").count(), 1);
+    }
+
+    #[test]
+    fn codegraph_positions_map_to_byte_offsets_590() {
+        // Line 2 holds a 2-byte char (1 UTF-16 unit) and a 4-byte one (2 units) before `x`;
+        // line 3 ends in CRLF.
+        let src = SourceLines::new("a\n\u{e9}\u{1f600}x = 1\nyz\r\n".to_string());
+        assert_eq!(src.byte_at(1, 0), Some(0));
+        assert_eq!(src.byte_at(2, 0), Some(2));
+        assert_eq!(src.byte_at(2, 1), Some(4), "after the 2-byte char");
+        assert_eq!(src.byte_at(2, 3), Some(8), "after the surrogate pair");
+        assert_eq!(&src.text[8..9], "x");
+        assert_eq!(src.byte_at(3, 2), Some(16), "the end of `yz`");
+        assert_eq!(
+            src.byte_at(3, 99),
+            Some(16),
+            "past the end stops before CRLF"
+        );
+        assert_eq!(src.byte_at(0, 0), None);
+        assert_eq!(src.byte_at(5, 0), None);
     }
 
     #[test]

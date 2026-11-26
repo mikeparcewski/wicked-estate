@@ -3385,7 +3385,11 @@ fn index_path_inner(
     let extracted_files: HashSet<String> = changed.iter().map(|fw| fw.rel.clone()).collect();
     let codegraph_ids = codegraph_state.as_ref().map(|cg| {
         let nodes: Vec<&Node> = index.nodes().collect();
-        let ids = cg.id_map(&nodes, &extracted_files);
+        // The stored text of a file extracted this run: minted nodes take their byte spans
+        // from it (estate#590).
+        let reader: &dyn GraphRead = &*store;
+        let text = |file: &str| reader.file_content(file).ok().flatten();
+        let ids = cg.id_map(&nodes, &extracted_files, &text);
         for (path, reason) in &ids.ambiguous {
             eprintln!("CODEGRAPH-SKIPPED: {path} {reason}");
         }
