@@ -2144,19 +2144,41 @@ mod tests {
         let cfg = config(tmp.path());
         let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
         index(&mut store, &root, Some(&cfg), Some(&sql));
-        let calls = edges(&store, EdgeKind::Calls);
-        let both = calls_from(&calls, "ts-typescript . . . src/same/both().");
-        let a_run = "ts-typescript . . . src/same/A#run().";
-        let b_run = "ts-typescript . . . src/same/B#run().";
-        for target in [a_run, b_run] {
-            assert_eq!(
-                both.iter()
-                    .filter(|(_, t, by)| t == target && by.starts_with("codegraph:"))
-                    .count(),
-                1,
-                "one call binds {target}: {both:?}"
-            );
-        }
+        // Each target is called once, from its own call's site (byte columns 79 and 95). The
+        // site a ref did not bind is still imported as a codegraph-only edge, so the counts
+        // alone cannot tell; the edge's site can.
+        let line = text.lines().nth(1).unwrap().to_string();
+        let at = |call: &str| (prefix.len() + line.find(call).unwrap()) as u32;
+        let mut sites: Vec<(String, u32)> = store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.kind == EdgeKind::Calls
+                    && e.source.0 == "ts-typescript . . . src/same/both()."
+                    && e.resolved_by.starts_with("codegraph:")
+                    && e.target.0.ends_with("#run().")
+            })
+            .map(|e| {
+                let col = e.location.as_ref().map_or(u32::MAX, |l| l.span.start_col);
+                (e.target.0, col)
+            })
+            .collect();
+        sites.sort();
+        assert_eq!(
+            sites,
+            vec![
+                (
+                    "ts-typescript . . . src/same/A#run().".to_string(),
+                    at("new A()")
+                ),
+                (
+                    "ts-typescript . . . src/same/B#run().".to_string(),
+                    at("new B()")
+                ),
+            ],
+            "each call binds its own site"
+        );
     }
 
     #[test]
