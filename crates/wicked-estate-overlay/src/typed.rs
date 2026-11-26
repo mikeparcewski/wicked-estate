@@ -252,6 +252,24 @@ impl XedgeReader {
         self.typed_query("tgt_store", "tgt_id", store, id, rels, limit)
     }
 
+    /// Whether any cross-edge, plain or typed, has `(engine, id)` at either end, in one
+    /// statement (one read snapshot). A missing `typed_xedges` table counts as empty.
+    pub fn has_link(&self, engine: &str, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("xedge mutex poisoned");
+        let plain = "EXISTS (SELECT 1 FROM xedges WHERE (tgt_engine = ?1 AND tgt_id = ?2) \
+                     OR (src_engine = ?1 AND src_id = ?2))";
+        let sql = if typed_table_exists(&conn)? {
+            format!(
+                "SELECT {plain} OR EXISTS (SELECT 1 FROM typed_xedges WHERE \
+                 (tgt_store = ?1 AND tgt_id = ?2) OR (src_store = ?1 AND src_id = ?2))"
+            )
+        } else {
+            format!("SELECT {plain}")
+        };
+        conn.query_row(&sql, params![engine, id], |r| r.get::<_, bool>(0))
+            .map_err(map_err)
+    }
+
     /// SQLite's `PRAGMA data_version` on this reader's connection: it changes whenever another
     /// connection commits to `xedge.db` (a reader compares it before and after a multi-step read).
     pub fn data_version(&self) -> Result<u64> {

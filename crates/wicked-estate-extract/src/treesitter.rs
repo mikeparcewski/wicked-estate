@@ -2765,6 +2765,32 @@ fn ts_span(n: tree_sitter::Node) -> Span {
     }
 }
 
+/// A span that ends right after a line break, stopped at the end of that line instead (#593).
+/// tree-sitter-vb-dotnet ends a method, property, type or namespace block with its terminator,
+/// the newline after `End Sub` / `End Function` / `End Property` / `End Class`, so the node runs
+/// on to column 0 of the next line. Returns the end byte and the span.
+fn without_line_terminator(src: &[u8], span: Span) -> (usize, Span) {
+    let end = span.end_byte as usize;
+    if span.end_col != 0 || end <= span.start_byte as usize || src.get(end - 1) != Some(&b'\n') {
+        return (end, span);
+    }
+    let mut trimmed = end - 1;
+    if trimmed > span.start_byte as usize && src[trimmed - 1] == b'\r' {
+        trimmed -= 1;
+    }
+    let line_start = src[..trimmed]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    let span = Span {
+        end_byte: trimmed as u32,
+        end_line: span.end_line.saturating_sub(1),
+        end_col: (trimmed - line_start) as u32,
+        ..span
+    };
+    (trimmed, span)
+}
+
 /// Logical module path for a file: the path without its extension (drives stable symbol ids).
 fn module_path(path: &str) -> String {
     match path.rsplit_once('.') {
@@ -6006,12 +6032,17 @@ impl TreeSitterExtractor {
                         Some((params_kind, slots)) if *params_kind == anchor_kind => slots.clone(),
                         _ => Vec::new(),
                     };
+                    let (end, span) = if self.lang_name == "vbnet" {
+                        without_line_terminator(src, ts_span(anchor_node))
+                    } else {
+                        (anchor_node.end_byte(), ts_span(anchor_node))
+                    };
                     pending.push(PendingDef {
                         kind: anchor_kind.to_string(),
                         name: name_text.clone(),
                         start: anchor_node.start_byte(),
-                        end: anchor_node.end_byte(),
-                        span: ts_span(anchor_node),
+                        end,
+                        span,
                         signature,
                         emit,
                         decl,

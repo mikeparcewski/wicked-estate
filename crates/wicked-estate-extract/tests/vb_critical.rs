@@ -498,3 +498,57 @@ fn all_vb_grammars_load() {
         );
     }
 }
+
+/// estate#593: a VB.NET definition spans its first signature line through its `End Sub` /
+/// `End Function` / `End Property` line, whatever the signature's line breaks. The grammar's
+/// method, property and type blocks end with their terminator, so the node runs on to column 0
+/// of the next line; the span must stop at the end of the `End …` line.
+#[test]
+fn vbnet_definition_spans_end_on_their_end_line_593() {
+    let src = r#"Public Class Inspector
+    Public Function BeforeSendRequest(ByRef request As Message,
+                                      channel As IClientChannel) As Object
+        Dim x = 1
+        Return Nothing
+    End Function
+
+    Public Sub Other(a As Integer, _
+                     b As Integer)
+        Foo()
+    End Sub
+
+    Public Property Name As String
+        Get
+            Return "n"
+        End Get
+        Set(value As String)
+        End Set
+    End Property
+End Class
+"#;
+    let lines: Vec<&str> = src.lines().collect();
+    let e = vbnet(src);
+    for (name, first, last, end_text) in [
+        ("BeforeSendRequest", 1u32, 5u32, "End Function"),
+        ("Other", 7, 10, "End Sub"),
+        ("Name", 12, 18, "End Property"),
+        ("Inspector", 0, 19, "End Class"),
+    ] {
+        let n = e
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("{name} is a definition"));
+        let s = n.location.span;
+        assert_eq!(
+            (s.start_line, s.end_line, s.end_col as usize),
+            (first, last, lines[last as usize].len()),
+            "{name}: lines {first}..={last}, ending at the end of its `{end_text}` line"
+        );
+        let body = &src[s.start_byte as usize..s.end_byte as usize];
+        assert!(
+            body.ends_with(end_text),
+            "{name}'s bytes end with `{end_text}`: {body:?}"
+        );
+    }
+}

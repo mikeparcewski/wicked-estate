@@ -59,7 +59,8 @@
 //!
 //! Stored parked rows carry no hints (only the 7 site columns persist), so hint-driven
 //! resolution (`ImportMapResolver`) never fires on back-fill. Those refs self-heal when their
-//! file changes or a full re-index runs (#141).
+//! file changes or a full re-index runs (#141). This holds for a row the codegraph fall-through
+//! parked (`codegraph:<name>`, estate#596) as for any other.
 //!
 //! ## Many repos, one graph
 //!
@@ -85,6 +86,7 @@ macro_rules! eprintln {
     }};
 }
 
+pub mod codegraph;
 pub mod confined;
 pub mod freshness;
 pub mod link;
@@ -470,6 +472,282 @@ fn call_site_key(location: &Location) -> CallSiteKey {
         location.span.start_byte,
         location.span.end_byte,
     )
+}
+
+/// Resolve `refs`: with codegraph on, the refs codegraph owns (switched files, owned kinds) are
+/// answered from its facts and the rest go to estate's resolvers; the two results are merged as
+/// `resolve_all_with_coverage` merges resolvers (per-site edges kept, one edge per
+/// `(source, target, kind)` at the highest confidence).
+fn resolve_with_codegraph(
+    resolvers: &[&dyn Resolver],
+    refs: &[wicked_estate_core::UnresolvedRef],
+    index: &InMemoryIndex,
+    codegraph: Option<(&codegraph::Prepared, &codegraph::IdMap)>,
+    extracted: &HashSet<String>,
+) -> Result<wicked_estate_resolve::Resolution> {
+    let Some((cg, ids)) = codegraph else {
+        return resolve_all_with_coverage(resolvers, refs, index);
+    };
+    let (owned, rest): (Vec<_>, Vec<_>) = refs.iter().cloned().partition(|r| cg.owns(r, ids));
+    let mut resolution = resolve_all_with_coverage(resolvers, &rest, index)?;
+    let (mut edges, unbound, mut unresolved) = cg.resolve(&owned, ids, extracted);
+    // A ref codegraph bound nothing for goes to estate's resolvers, which may bind it only into
+    // files codegraph does not answer for: a file that fell back (its callers would otherwise
+    // lose every edge into it), a file in an unswitched language, a stylesheet or a JSON file.
+    // Inside codegraph's files its verdict stands, so whatever stays unbound parks. The
+    // resolvers see the whole index (estate#594), so a name is as unique, and candidates rank,
+    // as on estate's own pipeline. Each resolver's pick that lands in a codegraph file is
+    // dropped; the picks of the others stand, as estate's own pipeline keeps every resolver's
+    // edge (`resolve_all_with_coverage`), and a ref with no pick left parks.
+    let through = fall_through(resolvers, &unbound, index, cg, ids)?;
+    // A fact codegraph could not import (its target has no estate node) counts only when the
+    // fall-through did not bind the ref either.
+    cg.settle_dropped(&through.unresolved);
+    edges.extend(through.site_edges);
+    unresolved.extend(through.unresolved.iter().map(codegraph::park));
+    merge_resolution(&mut resolution, edges, unresolved);
+    Ok(resolution)
+}
+
+/// Estate's resolvers on refs codegraph bound nothing for, each resolver's picks in files
+/// codegraph answers for dropped ([`OutsideCodegraph`]).
+fn fall_through(
+    resolvers: &[&dyn Resolver],
+    refs: &[wicked_estate_core::UnresolvedRef],
+    index: &InMemoryIndex,
+    cg: &codegraph::Prepared,
+    ids: &codegraph::IdMap,
+) -> Result<wicked_estate_resolve::Resolution> {
+    let outside: Vec<OutsideCodegraph<'_>> = resolvers
+        .iter()
+        .map(|inner| OutsideCodegraph {
+            inner: *inner,
+            cg,
+            ids,
+        })
+        .collect();
+    let outside: Vec<&dyn Resolver> = outside.iter().map(|r| r as &dyn Resolver).collect();
+    resolve_all_with_coverage(&outside, refs, index)
+}
+
+/// Add another resolver pass's site edges and unresolved refs to `resolution`, deduplicating
+/// edges as `resolve_all_with_coverage` does: one per `(source, target, kind)`, highest
+/// confidence kept.
+fn merge_resolution(
+    resolution: &mut wicked_estate_resolve::Resolution,
+    edges: Vec<Edge>,
+    unresolved: Vec<wicked_estate_core::UnresolvedRef>,
+) {
+    let mut best: HashMap<(String, String, String), Edge> = resolution
+        .edges
+        .drain(..)
+        .map(|e| (e.dedup_key(), e))
+        .collect();
+    for edge in &edges {
+        best.entry(edge.dedup_key())
+            .and_modify(|incumbent| {
+                if edge.confidence > incumbent.confidence {
+                    *incumbent = edge.clone();
+                }
+            })
+            .or_insert_with(|| edge.clone());
+    }
+    let mut merged: Vec<Edge> = best.into_values().collect();
+    merged.sort_by_key(Edge::dedup_key);
+    resolution.edges = merged;
+    resolution.site_edges.extend(edges);
+    resolution.unresolved.extend(unresolved);
+}
+
+/// Back-fill's resolution of previously parked rows (#141). A row the fall-through parked as
+/// `codegraph:<name>` (estate#596) belongs to an unchanged caller, so codegraph's answer for it
+/// still stands: it goes through the same fall-through as on the main pass and re-parks under
+/// the prefix when it stays unbound. Every other row resolves as before.
+fn resolve_backfill(
+    resolvers: &[&dyn Resolver],
+    candidates: &[wicked_estate_core::UnresolvedRef],
+    index: &InMemoryIndex,
+    codegraph: Option<(&codegraph::Prepared, &codegraph::IdMap)>,
+) -> Result<wicked_estate_resolve::Resolution> {
+    let Some((cg, ids)) = codegraph else {
+        return resolve_all_with_coverage(resolvers, candidates, index);
+    };
+    let mut plain = Vec::new();
+    let mut unparked = Vec::new();
+    for r in candidates {
+        match codegraph::unpark(r) {
+            Some(u) => unparked.push(u),
+            None => plain.push(r.clone()),
+        }
+    }
+    let mut resolution = resolve_all_with_coverage(resolvers, &plain, index)?;
+    if !unparked.is_empty() {
+        let through = fall_through(resolvers, &unparked, index, cg, ids)?;
+        let still = through.unresolved.iter().map(codegraph::park).collect();
+        merge_resolution(&mut resolution, through.site_edges, still);
+    }
+    Ok(resolution)
+}
+
+/// What the last `CODEGRAPH-OFF` report on this thread said, for tests.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MintedReport {
+    pub minted: usize,
+    pub files: usize,
+    pub linked: Vec<String>,
+    pub line: String,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LAST_MINTED_REPORT: std::cell::RefCell<Option<MintedReport>> =
+        const { std::cell::RefCell::new(None) };
+    /// The xedge.db a test run reads; `None` reads none (tests never read a real home).
+    pub(crate) static TEST_XEDGE_DB: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The xedge.db the MCP server opens (wicked-estate-mcp `main.rs`, `xedge_path`):
+/// `WICKED_XEDGE_DB`, else `xedge.db` under `WICKED_HOME`, else under `$HOME/.wicked`, else under
+/// `.wicked`.
+fn xedge_db_path(var: impl Fn(&str) -> Option<String>) -> String {
+    var("WICKED_XEDGE_DB").unwrap_or_else(|| {
+        let home = var("WICKED_HOME").unwrap_or_else(|| {
+            var("HOME")
+                .map(|h| format!("{h}/.wicked"))
+                .unwrap_or_else(|| ".wicked".to_string())
+        });
+        format!("{home}/xedge.db")
+    })
+}
+
+#[cfg(not(test))]
+fn xedge_db_for_run() -> Option<String> {
+    Some(xedge_db_path(|k| std::env::var(k).ok()))
+}
+
+#[cfg(test)]
+fn xedge_db_for_run() -> Option<String> {
+    TEST_XEDGE_DB.with(|t| t.borrow().clone())
+}
+
+/// A run that stops codegraph answering for a file (switched off, the file fell back, or its
+/// language narrowed out) re-extracts it with estate's pipeline, which drops the nodes codegraph
+/// minted there. Say so before it happens, and name the minted ids something outside codegraph's
+/// own facts links to: a graph edge (an annotation), or a knowledge or memory link in xedge.db.
+/// Those links dangle once the node is gone. xedge.db is read only if it exists, never written.
+fn report_minted_going_away(store: &dyn GraphStoreMutExt, files: &HashSet<String>) -> Result<()> {
+    let minted: Vec<Node> = store
+        .all_nodes()?
+        .into_iter()
+        .filter(|n| {
+            files.contains(&n.location.file)
+                && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+        })
+        .collect();
+    if minted.is_empty() {
+        return Ok(());
+    }
+    let (mut xedges, mut xedge_note) = match xedge_db_for_run() {
+        // A `file:` URI (the MCP accepts one) is opened as given; a missing target then reads
+        // as unreadable rather than absent.
+        Some(path) if path.starts_with("file:") || Path::new(&path).is_file() => {
+            match wicked_estate_overlay::XedgeReader::open_read_only(&path) {
+                Ok(reader) => (Some(reader), format!("xedges read from {path}")),
+                Err(e) => (
+                    None,
+                    format!("xedge.db at {path} unreadable ({e}), not counted"),
+                ),
+            }
+        }
+        Some(path) => (None, format!("no xedge.db at {path}")),
+        None => (None, "no xedge.db".to_string()),
+    };
+    let mut linked = Vec::new();
+    for n in &minted {
+        let mut outside = store
+            .neighbors(&n.symbol, wicked_estate_core::Direction::Dependents)?
+            .iter()
+            .any(|e| e.kind != EdgeKind::Contains && !e.resolved_by.starts_with("codegraph:"));
+        if !outside {
+            if let Some(reader) = &xedges {
+                match reader.has_link(wicked_estate_overlay::ESTATE_ENGINE, &n.symbol.0) {
+                    Ok(hit) => outside = hit,
+                    Err(e) => {
+                        xedge_note = format!("{xedge_note}, unreadable ({e}), not counted");
+                        xedges = None;
+                    }
+                }
+            }
+        }
+        if outside {
+            linked.push(n.symbol.0.clone());
+        }
+    }
+    let minted_files = minted
+        .iter()
+        .map(|n| n.location.file.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    // Every linked id is named: each is a link the user loses.
+    let line = format!(
+        "CODEGRAPH-OFF: {} node(s) codegraph minted in {} file(s) leave the graph; {} carry links from outside codegraph's facts (graph edges, or knowledge and memory links; {}), which will dangle{}",
+        minted.len(),
+        minted_files,
+        linked.len(),
+        xedge_note,
+        if linked.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", linked.join(", "))
+        }
+    );
+    #[cfg(test)]
+    LAST_MINTED_REPORT.with(|r| {
+        *r.borrow_mut() = Some(MintedReport {
+            minted: minted.len(),
+            files: minted_files,
+            linked: linked.clone(),
+            line: line.clone(),
+        })
+    });
+    eprintln!("{line}");
+    Ok(())
+}
+
+/// An estate resolver whose edges into files codegraph answers for are dropped (see
+/// [`resolve_with_codegraph`]).
+struct OutsideCodegraph<'a> {
+    inner: &'a dyn Resolver,
+    cg: &'a codegraph::Prepared,
+    ids: &'a codegraph::IdMap,
+}
+
+impl Resolver for OutsideCodegraph<'_> {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn tier(&self) -> wicked_estate_core::ResolutionTier {
+        self.inner.tier()
+    }
+
+    fn resolve(
+        &self,
+        refs: &[wicked_estate_core::UnresolvedRef],
+        index: &dyn wicked_estate_core::SymbolIndex,
+    ) -> Result<Vec<Edge>> {
+        let mut edges = self.inner.resolve(refs, index)?;
+        // A target the index does not hold (a synthetic infra or rules endpoint) is never one
+        // of codegraph's definitions, so it stays.
+        edges.retain(|e| {
+            index
+                .get(&e.target)
+                .is_none_or(|n| !self.cg.answers_file(&n.location.file, self.ids))
+        });
+        Ok(edges)
+    }
 }
 
 fn call_value_ref_hints(
@@ -1412,7 +1690,19 @@ pub fn index_path_as(
     root: &Path,
     repo: Option<&str>,
 ) -> Result<GraphStats> {
-    let stats = match index_path_inner(store, root, repo) {
+    index_path_with(store, root, repo, None)
+}
+
+/// [`index_path_as`] with codegraph handling the hybrid languages (see [`codegraph`]). `None`
+/// is estate's own pipeline for every language; a repo an earlier run covered with codegraph
+/// re-extracts those files once.
+pub fn index_path_with(
+    store: &mut dyn GraphStoreMutExt,
+    root: &Path,
+    repo: Option<&str>,
+    codegraph: Option<&codegraph::CodegraphConfig>,
+) -> Result<GraphStats> {
+    let stats = match index_path_inner(store, root, repo, codegraph) {
         Ok(stats) => stats,
         Err(e) => {
             // #438: an error may leave the destructive write batch open — `begin_batch` is a no-op
@@ -1526,6 +1816,7 @@ fn index_path_inner(
     store: &mut dyn GraphStoreMutExt,
     root: &Path,
     repo: Option<&str>,
+    codegraph_cfg: Option<&codegraph::CodegraphConfig>,
 ) -> Result<GraphStats> {
     let t = std::time::Instant::now();
 
@@ -1804,6 +2095,17 @@ fn index_path_inner(
     }
 
     let mut files = collect_source_files(root);
+    // Codegraph's resolvers read project config files (tsconfig paths, package roots); keep
+    // their label-free paths for the mirror before the walk list is filtered to sources.
+    let codegraph_configs: Vec<String> = match codegraph_cfg {
+        Some(_) => files
+            .iter()
+            .filter(|p| codegraph::is_resolver_config(p))
+            .map(|p| rel(root, p))
+            .filter(|r| !wicked_estate_extract::redact::is_excluded(r))
+            .collect(),
+        None => Vec::new(),
+    };
 
     // Admit extra-edge rule targets the main walk cannot see (hidden dot-dir files). Rule-matched
     // files that are ALSO ordinary source files stay deduped — they get both passes below.
@@ -2131,6 +2433,132 @@ fn index_path_inner(
         stored_digest_by_rel.insert(rel.clone(), stored);
     }
 
+    // ── CODEGRAPH (the hybrid languages, see `codegraph`) ────────────────────────────────────
+    // Runs before the closure computations below, so the files it forces take every path a
+    // changed file takes. The fingerprints the last run stored decide which unchanged files
+    // re-extract: codegraph's facts for them moved, their verdict flipped, or codegraph was
+    // switched on or off for them.
+    let fingerprints_key = repo_scope::meta_key(repo, codegraph::FINGERPRINTS_META);
+    let stored_fingerprints =
+        codegraph::parse_fingerprints(store.meta_get_key(&fingerprints_key).as_deref());
+    let mut codegraph_state: Option<codegraph::Prepared> = None;
+    // Unchanged files re-extracted for codegraph's sake: seeded into `changed_seed` (so the
+    // closures below treat them as changed) and forced past the digest check like
+    // `forced_importers`.
+    let mut codegraph_forced: HashSet<String> = HashSet::new();
+    if let Some(cfg) = codegraph_cfg {
+        let files: Vec<codegraph::MirrorFile> = work_by_rel
+            .values()
+            .filter(|fw| cfg.switched_path(&fw.raw))
+            .map(|fw| codegraph::MirrorFile {
+                raw: fw.raw.clone(),
+                digest: fw.digest.clone(),
+            })
+            .collect();
+        let unchanged: Vec<String> = work_by_rel
+            .values()
+            .filter(|fw| cfg.switched_path(&fw.raw) && !changed_seed.contains(&fw.rel))
+            .map(|fw| fw.rel.clone())
+            .collect();
+        // The digest each switched file was classified with: the mirror takes only those bytes.
+        let classified: HashMap<String, String> = files
+            .iter()
+            .map(|f| (f.raw.clone(), f.digest.clone()))
+            .collect();
+        // The mirror holds exactly the text estate extracts from (#405 redaction, same length
+        // and line breaks), read through the confined root. A minified file estate does not
+        // extract is mirrored empty: codegraph would otherwise report facts about it that have
+        // no estate node to land on (a vendored jquery.min.js held 884 of Alamofire's 1,065).
+        let read = |raw: &str| -> Option<String> {
+            let text = confined_root.as_ref()?.read_rel_to_string(Path::new(raw))?;
+            // A file saved since it was classified is left out of the mirror (it keeps estate's
+            // pipeline this run, `not-mirrored`), so mirror.json never records one revision's
+            // digest for another's text (estate#657). The next run mirrors it.
+            if classified
+                .get(raw)
+                .is_some_and(|d| *d != file_digest(text.as_bytes()))
+            {
+                return None;
+            }
+            let redacted = wicked_estate_extract::redact::redact_source(raw, &text);
+            // Resolver configs are mirrored whole: a one-line tsconfig is not minified source.
+            let blank =
+                !codegraph::is_resolver_config(Path::new(raw)) && is_minified_or_huge(&redacted);
+            Some(if blank { String::new() } else { redacted })
+        };
+        let input = codegraph::PrepareInput {
+            root,
+            prefix: scope.as_deref().unwrap_or(""),
+            files,
+            configs: codegraph_configs.clone(),
+            read: &read,
+            unchanged,
+            stored: stored_fingerprints.clone(),
+        };
+        match codegraph::prepare(cfg, input) {
+            Ok((prepared, forced)) => {
+                for line in prepared.skipped_lines() {
+                    eprintln!("{line}");
+                }
+                codegraph_forced.extend(forced);
+                codegraph_state = Some(prepared);
+            }
+            Err(reason) if !stored_fingerprints.is_empty() => {
+                // The store holds codegraph's facts (minted ids that knowledge and memory may
+                // link to). One failed run must not switch the whole repo to the other producer:
+                // stop before any node or edge is written, so the last good graph stays (the run's
+                // `indexing` marker stays set, as for any failed index). Only an explicit
+                // switch-off (no --codegraph) hands the files back to estate.
+                let msg = format!(
+                    "CODEGRAPH-FAILED: {reason}; the graph keeps its last good state. Fix the run, or index without --codegraph to hand these files back to estate's pipeline"
+                );
+                eprintln!("{msg}");
+                return Err(wicked_estate_core::Error::Invalid(msg));
+            }
+            Err(reason) => {
+                eprintln!(
+                    "CODEGRAPH-FALLBACK: {reason}; estate's own pipeline runs for every file"
+                );
+            }
+        }
+    }
+    // Files the last codegraph run answered that it does not cover now (codegraph off or
+    // failed, or the file's language dropped out of `--codegraph-languages`) go back to estate's
+    // resolvers. This run's fingerprints omit them, so the next run does not force them again.
+    codegraph_forced.extend(
+        stored_fingerprints
+            .iter()
+            .filter(|(path, fp)| {
+                fp.starts_with("ok|")
+                    && work_by_rel.contains_key(*path)
+                    && codegraph_state
+                        .as_ref()
+                        .and_then(|cg| cg.verdict(path))
+                        .is_none()
+            })
+            .map(|(path, _)| path.clone()),
+    );
+    // Files whose minted nodes this run deletes: the last run answered them and this one does
+    // not (codegraph off or failed, the file fell back, or its language was narrowed out). One
+    // report covers every such path (estate#597).
+    let leaving: HashSet<String> = stored_fingerprints
+        .iter()
+        .filter(|(path, fp)| {
+            fp.starts_with("ok|")
+                && work_by_rel.contains_key(*path)
+                && (changed_seed.contains(*path) || codegraph_forced.contains(*path))
+                && !matches!(
+                    codegraph_state.as_ref().and_then(|cg| cg.verdict(path)),
+                    Some(codegraph::Verdict::Ok)
+                )
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    if !leaving.is_empty() {
+        report_minted_going_away(store, &leaving)?;
+    }
+    changed_seed.extend(codegraph_forced.iter().cloned());
+
     // Call-derived value-flow edges can be stored with a changed callee-owned parameter/return
     // endpoint but sourced from an unchanged caller's call-site facts. Re-extract the reverse
     // Calls/flows_to closure before remove_file() deletes those endpoint edges, otherwise a
@@ -2330,7 +2758,8 @@ fn index_path_inner(
         // readable, though its bytes (and so its digest) never changed.
         let forced = forced_importers.contains(&rel)
             || forced_value_flow_callers.contains(&rel)
-            || prev_unreadable.contains(&rel);
+            || prev_unreadable.contains(&rel)
+            || codegraph_forced.contains(&rel);
         if !force_full && !forced && stored.as_deref() == Some(&fw.digest) {
             // UNCHANGED: skip extraction entirely; its nodes/edges already in the store.
             //
@@ -2454,6 +2883,8 @@ fn index_path_inner(
     let mut backfill_probes = Vec::new();
     let mut seen_probes = HashSet::new();
     let mut read_digests = Vec::new();
+    // Files whose bytes changed between classification and extraction (estate#657).
+    let changed_during_run = std::sync::Mutex::new(Vec::new());
     let mut chunk_start = 0;
     for pass in 0..2 {
         while chunk_start < changed.len() {
@@ -2494,6 +2925,12 @@ fn index_path_inner(
                             }
                         }
                     };
+                    if source.as_ref().is_some_and(|s| s.digest != fw.digest) {
+                        changed_during_run
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(fw.rel.clone());
+                    }
                     // Every readable source keeps its chunk-time digest, even when extraction
                     // is skipped. Documents retain their raw-byte classification digest.
                     chunk_digests
@@ -2968,7 +3405,43 @@ fn index_path_inner(
         // is unique inside the repo stays unique no matter how many repos share the graph.
         InMemoryIndex::build(reader, scope.as_deref())?
     };
-    let resolution = resolve_all_with_coverage(resolvers, &all_refs, &index)?;
+    let extracted_files: HashSet<String> = changed.iter().map(|fw| fw.rel.clone()).collect();
+    // A switched file saved after the mirror read it: codegraph's facts and the definitions just
+    // extracted come from different revisions, so it keeps estate's pipeline this run. The next
+    // run mirrors the new text (its digest differs from mirror.json's) and re-extracts it (its
+    // fingerprint records the fallback). estate#657.
+    if let Some(cg) = codegraph_state.as_mut() {
+        let mut late = changed_during_run
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
+        late.sort();
+        late.dedup();
+        for path in late {
+            if cg.fall_back(&path, "changed-during-run") {
+                eprintln!("CODEGRAPH-SKIPPED: {path} changed-during-run");
+            }
+        }
+    }
+    let codegraph_ids = codegraph_state.as_ref().map(|cg| {
+        let nodes: Vec<&Node> = index.nodes().collect();
+        // The stored text of a file extracted this run: minted nodes take their byte spans
+        // from it (estate#590).
+        let reader: &dyn GraphRead = &*store;
+        let text = |file: &str| reader.file_content(file).ok().flatten();
+        let ids = cg.id_map(&nodes, &extracted_files, &text);
+        for (path, reason) in &ids.ambiguous {
+            eprintln!("CODEGRAPH-SKIPPED: {path} {reason}");
+        }
+        ids
+    });
+    let codegraph_pair = codegraph_state.as_ref().zip(codegraph_ids.as_ref());
+    let resolution = resolve_with_codegraph(
+        resolvers,
+        &all_refs,
+        &index,
+        codegraph_pair,
+        &extracted_files,
+    )?;
     let call_ref_hints = call_value_ref_hints(&all_refs);
     let (call_flow_nodes, call_flow_edges) =
         call_value_flow(&resolution.site_edges, &index, &call_ref_hints)?;
@@ -2988,6 +3461,10 @@ fn index_path_inner(
     for (file, digest) in &read_digests {
         store.set_file_digest(file, digest)?;
         let _ = store.log_change(ChangeOp::Upsert, file);
+    }
+    if let Some(ids) = &codegraph_ids {
+        store.upsert_nodes(&ids.minted)?;
+        store.upsert_edges(&ids.minted_edges)?;
     }
     store.upsert_nodes(&call_flow_nodes)?;
     store.upsert_edges(&resolution.edges)?;
@@ -3027,7 +3504,13 @@ fn index_path_inner(
     if !rederive_refs.is_empty() {
         let mut targets = changed_symbols.clone();
         targets.extend(extracted_symbols);
-        let rederived = resolve_all_with_coverage(resolvers, &rederive_refs, &index)?;
+        let rederived = resolve_with_codegraph(
+            resolvers,
+            &rederive_refs,
+            &index,
+            codegraph_pair,
+            &HashSet::new(),
+        )?;
         let sites: HashSet<CallSiteKey> = rederived
             .site_edges
             .iter()
@@ -3096,11 +3579,18 @@ fn index_path_inner(
         }
         let mut seen: HashSet<(String, String, EdgeKind, String, u32, u32, u32)> = HashSet::new();
         let mut candidates: Vec<wicked_estate_core::UnresolvedRef> = Vec::new();
-        // Name lane: exact indexed lookups for extracted and lost nodes' probe forms.
+        // Name lane: exact indexed lookups for extracted and lost nodes' probe forms. With
+        // codegraph on, a ref the fall-through left unbound parked as `codegraph:<name>`
+        // (estate#596), so that form is probed too.
         for probe in &backfill_probes {
-            for r in store.unresolved_refs_for_name(probe)? {
-                if admissible(&r) && seen.insert(site_key(&r)) {
-                    candidates.push(r);
+            let parked = codegraph_pair
+                .is_some()
+                .then(|| format!("{}{probe}", wicked_estate_core::refs::CODEGRAPH_REF_PREFIX));
+            for name in std::iter::once(probe).chain(parked.as_ref()) {
+                for r in store.unresolved_refs_for_name(name)? {
+                    if admissible(&r) && seen.insert(site_key(&r)) {
+                        candidates.push(r);
+                    }
                 }
             }
         }
@@ -3113,7 +3603,7 @@ fn index_path_inner(
             }
         }
         if !candidates.is_empty() {
-            let backfill = resolve_all_with_coverage(resolvers, &candidates, &index)?;
+            let backfill = resolve_backfill(resolvers, &candidates, &index, codegraph_pair)?;
             let still: HashSet<_> = backfill.unresolved.iter().map(site_key).collect();
             let bound: Vec<wicked_estate_core::UnresolvedRef> = candidates
                 .iter()
@@ -3224,6 +3714,24 @@ fn index_path_inner(
     // The plugin-override key follows the same write-LAST rule (ADR-010): stamped only once the
     // re-extraction under the current override state durably completed.
     store.meta_set_key(&override_key, cur_overrides);
+    // Codegraph fingerprints follow the same write-LAST rule: a failed run compares against the
+    // last good one. Off or fallen back: the key is cleared, so the next run with codegraph on
+    // re-extracts every switched file.
+    match &codegraph_state {
+        Some(cg) => {
+            let dropped = *cg.dropped_edges.lock().unwrap_or_else(|e| e.into_inner());
+            #[cfg(test)]
+            codegraph::LAST_DROPPED.with(|c| c.set(Some(dropped)));
+            if dropped > 0 {
+                eprintln!(
+                    "CODEGRAPH: {dropped} fact(s) not imported (an endpoint has no estate node)"
+                );
+            }
+            store.meta_set_key(&fingerprints_key, &cg.fingerprints_json());
+        }
+        None if !stored_fingerprints.is_empty() => store.meta_set_key(&fingerprints_key, ""),
+        None => {}
+    }
 
     let stats = store.stats()?;
     // Warn when the DB crosses 500 MB — a signal to run `compact`.

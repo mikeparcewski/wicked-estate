@@ -13,7 +13,7 @@ categories = ["development-tools", "parsing", "command-line-utilities"]
 # tests/lineage_cli.rs and tests/mcp_name_parity.rs need the path-only wicked-estate-mcp
 # dev-dependency below, which `cargo publish` strips: shipped, each would be a test target the
 # published crate cannot compile.
-exclude = ["tests/lineage_cli.rs", "tests/mcp_name_parity.rs"]
+exclude = ["tests/lineage_cli.rs", "tests/mcp_name_parity.rs", "tests/codegraph_recorded_cli.rs"]
 
 [[bin]]
 name = "wicked-estate"
@@ -29,6 +29,9 @@ wicked-estate-resolve = { path = "../wicked-estate-resolve", version = "0.36.2" 
 wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.36.2" }
 wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.36.2" }
 wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.36.2" }
+# CODEGRAPH-OFF reads xedge.db (knowledge and memory links) read-only (estate#597). A new direct
+# dependency of this crate; the shipped wicked-estate-mcp binary already links it.
+wicked-estate-overlay = { path = "../wicked-estate-overlay", version = "0.36.2" }
 anyhow.workspace = true
 async-trait = "0.1.92"
 dirs = "6"
@@ -40,6 +43,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = tr
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
+# Codegraph import: read codegraph's SQLite output (the same bundled SQLite as the store, one
+# library per process) and pin its bundle by sha256.
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
 
 [features]
 # Real semantic embeddings end-to-end for `index --embeddings` + `semantic`. Enable a tier
@@ -55,6 +62,12 @@ postgres = ["wicked-estate-store/postgres"]
 # Off by default to keep the base binary dependency-light (roxmltree/quick-xml/calamine).
 xml-rules = ["wicked-estate-extract/xml-rules"]     # Camunda DMN, Progress Corticon (.dmn/.ers/.erf/.ecore)
 excel-rules = ["wicked-estate-extract/excel-rules"] # Excel/XLSX decision tables
+# TEST BUILDS ONLY (estate#595): `index --codegraph` reads codegraph's facts from the recorded SQL
+# that WICKED_ESTATE_CODEGRAPH_RECORDED names instead of running codegraph, so consumers' CI can
+# write a `--codegraph` store from tests/fixtures/codegraph. No release build enables it, and
+# scripts/smoke-binary.py fails a shipped binary that carries it, and a build without debug
+# assertions (any release profile) refuses to compile with it.
+codegraph-fixture = []
 
 [dev-dependencies]
 tempfile = "3"

@@ -87,6 +87,113 @@ jobs:
           npm install -g --no-audit --no-fund typescript@5.9.3 typescript-language-server@6.0.2
           cargo test -p wicked-estate-resolve --test lsp_live -- --nocapture
 
+  # ── estate#595: the recorded-SQL codegraph hook is a test-only feature, so nothing in `gate`
+  #    compiles it. This job lints and tests the feature build; release builds never enable it,
+  #    and the install smoke test (gate-os, binaries.yml) fails a shipped binary that carries it. ──
+  codegraph-fixture:
+    name: codegraph fixture store (test-only feature)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: codegraph-fixture
+      - name: clippy (-D warnings, --features codegraph-fixture)
+        run: cargo clippy -p wicked-estate --features codegraph-fixture --all-targets -- -D warnings
+      - name: test (--features codegraph-fixture)
+        run: |
+          cargo test -p wicked-estate --features codegraph-fixture --lib codegraph::
+          cargo test -p wicked-estate --features codegraph-fixture --test codegraph_recorded_cli
+      # A build without debug assertions refuses the feature (compile_error!), so no optimized
+      # binary can take codegraph's facts from injected SQL.
+      - name: a release build refuses --features codegraph-fixture
+        shell: bash
+        run: |
+          if cargo check --release -p wicked-estate --features codegraph-fixture 2> "$RUNNER_TEMP/release-check.log"; then
+            echo "a release build accepted codegraph-fixture"; exit 1
+          fi
+          grep -q "codegraph-fixture feature is for test builds only" "$RUNNER_TEMP/release-check.log"
+      # The gate store (#584 HOLD gate b): the coverage fixture indexed with `--codegraph` by this
+      # exact head, the recorded codegraph database standing in for the run.
+      - name: build the codegraph gate store
+        run: |
+          cargo build -p wicked-estate --features codegraph-fixture --bin wicked-estate
+          cargo build -p wicked-estate-mcp --bin wicked-estate-mcp
+          python3 scripts/codegraph-fixture-store.py store target/debug/wicked-estate "$RUNNER_TEMP/codegraph-gate"
+          cp target/debug/wicked-estate-mcp "$RUNNER_TEMP/codegraph-gate/"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: codegraph-gate-store
+          path: |
+            ${{ runner.temp }}/codegraph-gate/codegraph-gate.db
+            ${{ runner.temp }}/codegraph-gate/wicked-estate-mcp
+          retention-days: 14
+
+  # ── #584 HOLD gate b: the consumers read the gate store this head wrote. Each runs its own
+  #    named contract test from its main; the test prints a `codegraph gate:` line, and a run
+  #    without it (a skip, a filter that matched nothing) fails here. ───────────────────────────
+  codegraph-gate-core:
+    name: codegraph gate (wicked-core reads the store)
+    needs: codegraph-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: codegraph-gate-store
+          path: ${{ runner.temp }}/codegraph-gate
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: mikeparcewski/wicked-core
+          ref: main
+          path: core
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: core
+          key: codegraph-gate-core
+      - name: core's contract test on the gate store
+        working-directory: core
+        shell: bash
+        env:
+          WICKED_CODEGRAPH_FIXTURE_STORE: ${{ runner.temp }}/codegraph-gate/codegraph-gate.db
+        run: |
+          cargo test --locked -p wicked-core --lib codegraph_gate_tests -- --nocapture 2>&1 | tee "$RUNNER_TEMP/core-gate.log"
+          grep -q "codegraph gate: core read" "$RUNNER_TEMP/core-gate.log"
+
+  codegraph-gate-garden:
+    name: codegraph gate (wicked-garden reads the store)
+    needs: codegraph-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: codegraph-gate-store
+          path: ${{ runner.temp }}/codegraph-gate
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: mikeparcewski/wicked-garden
+          ref: main
+          path: garden
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.13"
+      - name: garden's contract test on the gate store
+        working-directory: garden
+        shell: bash
+        env:
+          WICKED_CODEGRAPH_FIXTURE_STORE: ${{ runner.temp }}/codegraph-gate/codegraph-gate.db
+          WICKED_ESTATE_MCP_BIN: ${{ runner.temp }}/codegraph-gate/wicked-estate-mcp
+        run: |
+          chmod +x "$WICKED_ESTATE_MCP_BIN"
+          python -m pip install --quiet pytest
+          python -m pytest tests/test_estate_codegraph_gate.py -q -s -p no:cacheprovider 2>&1 | tee "$RUNNER_TEMP/garden-gate.log"
+          grep -q "codegraph gate: garden" "$RUNNER_TEMP/garden-gate.log"
+
   # ── #360: the same gate on macOS and Windows, plus the install smoke test of release binaries.
   #    Grammar plugins load .so/.dylib/.dll, SQLite and 11 grammars are compiled from C, several
   #    tests shell out to git, and paths are normalised for the evidence layer — none of it ran
