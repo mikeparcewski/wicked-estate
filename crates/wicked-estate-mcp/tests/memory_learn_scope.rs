@@ -77,16 +77,18 @@ const FACT: &str = "clamp is the guard every caller relies on for bounds";
 #[test]
 fn learn_stores_at_the_given_scope_and_tier_and_stays_out_of_other_projects_619() {
     let mut rig = Rig::new();
+    // `memory.learn` answers the memory's symbol id; `memory.list` keys items by the raw id, so
+    // the tests find the learned memory by its content.
     let learned = rig.ok(
         "memory.learn",
         json!({"content": FACT, "symbols": [], "scope": "project:a", "tier": "procedural"}),
     );
-    let learned_id = learned["memory_id"].as_str().unwrap().to_string();
+    assert!(learned["memory_id"].is_string(), "{learned}");
 
     let in_a = rig.listed("project:a");
     let item = in_a
         .iter()
-        .find(|m| m["memory_id"].as_str() == Some(learned_id.as_str()))
+        .find(|m| m["content"].as_str() == Some(FACT))
         .unwrap_or_else(|| panic!("learned memory not listed under project:a: {in_a:?}"));
     assert_eq!(item["scope"], "project:a", "{item}");
     assert_eq!(item["tier"], "procedural", "{item}");
@@ -108,11 +110,11 @@ fn learn_stores_at_the_given_scope_and_tier_and_stays_out_of_other_projects_619(
 fn learn_without_scope_or_tier_keeps_the_root_semantic_default_619() {
     let mut rig = Rig::new();
     let learned = rig.ok("memory.learn", json!({"content": FACT, "symbols": []}));
-    let learned_id = learned["memory_id"].as_str().unwrap().to_string();
+    assert!(learned["memory_id"].is_string(), "{learned}");
     let all = rig.listed("");
     let item = all
         .iter()
-        .find(|m| m["memory_id"].as_str() == Some(learned_id.as_str()))
+        .find(|m| m["content"].as_str() == Some(FACT))
         .unwrap_or_else(|| panic!("learned memory not listed: {all:?}"));
     assert_eq!(item["scope"], "", "{item}");
     assert_eq!(item["tier"], "semantic", "{item}");
