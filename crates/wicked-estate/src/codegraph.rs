@@ -2621,6 +2621,71 @@ mod tests {
         assert!(!holds_point(&store));
     }
 
+    /// estate#656 (1): a file codegraph answered last run that falls back at mapping time
+    /// (`no-defs` here: codegraph now finds no definition where estate finds some) loses its
+    /// minted nodes. That happens after `CODEGRAPH-OFF` was decided, so the loss went unreported
+    /// and the stored verdict still said `ok`. The report names the linked node, and the
+    /// fingerprint records the fallback.
+    #[test]
+    fn a_file_that_falls_back_at_mapping_time_reports_its_minted_nodes_656() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
+        let minted = minted_in(&store, |f| f == "src/p/Shapes.java");
+        assert!(minted > 0);
+        let (xedge, writer) = xedge_about_point(tmp.path());
+        let no_defs = format!(
+            "{FIXTURE_SQL}\n\
+             DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = 'src/p/Shapes.java') \
+             OR target IN (SELECT id FROM nodes WHERE file_path = 'src/p/Shapes.java');\n\
+             DELETE FROM unresolved_refs WHERE file_path = 'src/p/Shapes.java';\n\
+             DELETE FROM nodes WHERE file_path = 'src/p/Shapes.java' AND kind <> 'file';"
+        );
+        let report = index_reporting(&mut store, Some(&cfg), Some(&no_defs), &xedge)
+            .expect("a CODEGRAPH-OFF report for the late fallback");
+        drop(writer);
+        assert_eq!(report.minted, minted, "{report:?}");
+        assert_eq!(report.files, 1, "{report:?}");
+        assert_eq!(report.linked, vec![MINTED_POINT.to_string()], "{report:?}");
+        assert!(!holds_point(&store));
+        let fps = parse_fingerprints(store.meta_get_key(FINGERPRINTS_META).as_deref());
+        assert!(
+            fps.get("src/p/Shapes.java")
+                .is_some_and(|fp| fp.starts_with("skipped:no-defs|")),
+            "{fps:?}"
+        );
+    }
+
+    /// estate#656 (2): the no-change early return skipped the codegraph meta. Switching off an
+    /// unchanged repo whose stored verdicts are all skipped forced no file, so the run returned
+    /// early and kept the old fingerprints; a later failed `--codegraph` run then reported
+    /// `CODEGRAPH-FAILED` as if codegraph's facts were live. The switch-off clears them.
+    #[test]
+    fn switching_off_an_unchanged_repo_clears_the_fingerprints_656() {
+        let all_skipped = format!(
+            "{FIXTURE_SQL}\nUPDATE files SET errors = '[{{\"message\":\"too big\",\"severity\":\"error\",\"code\":\"size_exceeded\"}}]', node_count = 0;"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(&all_skipped));
+        let fps = parse_fingerprints(store.meta_get_key(FINGERPRINTS_META).as_deref());
+        assert!(
+            !fps.is_empty() && fps.values().all(|fp| fp.starts_with("skipped:")),
+            "{fps:?}"
+        );
+        index(&mut store, &fixture_root(), None, None);
+        assert_eq!(
+            store
+                .meta_get_key(FINGERPRINTS_META)
+                .as_deref()
+                .unwrap_or(""),
+            "",
+            "codegraph is off: no fingerprints stay"
+        );
+    }
+
     /// `path` as an SQLite `file:` URI, on Windows too (`file:///C:/...`).
     fn file_uri(path: &str) -> String {
         let p = path.replace('\\', "/");
