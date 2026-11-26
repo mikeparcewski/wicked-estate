@@ -1926,6 +1926,32 @@ mod tests {
     }
 
     #[test]
+    fn a_minted_definition_returns_its_source_590() {
+        // estate#590: a minted node carried a zero byte span, so symbol_source (FetchContent,
+        // ContextBundle) returned nothing for it.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(FIXTURE_SQL));
+        let nodes = store.all_nodes().unwrap();
+        let point = nodes
+            .iter()
+            .find(|n| n.name == "Point" && n.kind == NodeKind::Class)
+            .expect("the record Point is a node");
+        assert_eq!(
+            point.metadata.get("origin").and_then(|v| v.as_str()),
+            Some("codegraph"),
+            "Point is minted from codegraph's definition"
+        );
+        assert_eq!(
+            store.symbol_source(point).unwrap().as_deref(),
+            Some("record Point(int a) { int g() { return a; } }"),
+            "span {:?}",
+            point.location.span
+        );
+    }
+
+    #[test]
     fn a_site_codegraph_left_unresolved_parks_with_the_prefix_and_never_binds_by_name() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = config(tmp.path());
