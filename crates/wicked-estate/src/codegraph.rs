@@ -2217,6 +2217,41 @@ mod tests {
         );
     }
 
+    /// estate#652 (R-B codex-check on #584, W20): a caller's fingerprint named each target by
+    /// file, qualified name and kind, which two overloads share. A call that moved from one
+    /// overload to the other left the caller's fingerprint, so an unchanged caller kept the old
+    /// overload's `Calls` edge. The fingerprint separates the overloads, by their source order
+    /// (an edit above them does not move it), and changes with the edge's `resolvedBy`.
+    #[test]
+    fn a_call_moving_between_overloads_changes_the_callers_fingerprint_652() {
+        let fingerprint = |extra: &str| {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(&format!("{FIXTURE_SQL}\n{extra}"))
+                .unwrap();
+            Snapshot::from_conn(&conn).unwrap().fingerprints()["src/p/Shapes.java"].clone()
+        };
+        let base = fingerprint("");
+        // Edge 25 is `f(String)` calling `f(String)`; point it at `f(int)` (line 3).
+        let swapped = fingerprint(
+            "UPDATE edges SET target = 'method:a272bd91777c853fafe660afa6501ff6' WHERE id = 25;",
+        );
+        assert_ne!(base, swapped, "the call moved to the other overload");
+        let rebound = fingerprint(
+            "UPDATE edges SET metadata = '{\"confidence\":0.7,\"resolvedBy\":\"name-match\",\"refName\":\"f\"}' WHERE id = 25;",
+        );
+        assert_ne!(base, rebound, "the call was bound another way");
+        // An edit above both overloads moves their lines, not their order.
+        let shifted = fingerprint(
+            "UPDATE nodes SET start_line = start_line + 1, end_line = end_line + 1 \
+             WHERE id IN ('method:a272bd91777c853fafe660afa6501ff6', \
+             'method:e9a6208e271a7b5a5649e0d8f256ede7');",
+        );
+        assert_eq!(
+            base, shifted,
+            "an edit above the overloads keeps the fingerprint"
+        );
+    }
+
     #[test]
     fn a_heritage_ref_takes_only_a_heritage_site() {
         // Round-1 fold (codex F3): an `Extends` ref took a same-line `references` or
