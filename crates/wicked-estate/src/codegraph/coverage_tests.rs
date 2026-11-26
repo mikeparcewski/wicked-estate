@@ -282,3 +282,40 @@ fn the_gate_store_holds_each_shape_the_import_writes_595() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn a_minted_csharp_record_in_a_block_namespace_gets_estates_id_591() {
+    // estate#591: estate's C# ids never nest under a `namespace X { … }` block (csharp.scm
+    // captures no namespace), so a minted id must not either. `Money` is a record (estate's C#
+    // extraction has no records) in `namespace Cov { … }`, next to estate's own class `Credit`.
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, _) = index_coverage(tmp.path());
+    let nodes = store.all_nodes().unwrap();
+    let in_ledger = |name: &str| {
+        nodes
+            .iter()
+            .find(|n| n.location.file == "src/csharp/Ledger.cs" && n.name == name)
+            .unwrap_or_else(|| panic!("{name} is a node in Ledger.cs"))
+    };
+    let credit = in_ledger("Credit");
+    assert!(
+        credit.metadata.get("origin").is_none(),
+        "Credit is estate's own node"
+    );
+    assert!(
+        !credit.symbol.0.contains("Cov#"),
+        "estate's C# id does not nest under the namespace: {}",
+        credit.symbol.0
+    );
+    let money = in_ledger("Money");
+    assert_eq!(
+        money.metadata.get("origin").and_then(|v| v.as_str()),
+        Some("codegraph"),
+        "Money is minted"
+    );
+    assert_eq!(
+        money.symbol.0,
+        credit.symbol.0.replace("Credit#", "Money#"),
+        "the minted id follows estate's scheme"
+    );
+}
