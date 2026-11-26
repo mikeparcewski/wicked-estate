@@ -319,3 +319,74 @@ fn a_minted_csharp_record_in_a_block_namespace_gets_estates_id_591() {
         "the minted id follows estate's scheme"
     );
 }
+
+/// Round-1 fold (codex F10, P1): the state dir sits under the indexed root by default
+/// (`.wicked-estate/graph.db.codegraph`), so a checkout can carry a symlink there. The mirror
+/// writes followed it: a link at `tree/src` took the repo's (redacted) sources to wherever it
+/// pointed, and a linked `.wicked-estate` moved the whole state dir. A run must refuse a symlink
+/// anywhere on the state dir's path below the root or inside it, write nothing through it, and
+/// fall back to estate's pipeline.
+#[cfg(unix)]
+#[test]
+fn a_symlink_on_the_state_dirs_path_is_never_written_through() {
+    for planted in [
+        ".wicked-estate",
+        ".wicked-estate/graph.db.codegraph/tree/src",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = coverage_copy(tmp.path());
+        let canary = tmp.path().join("canary");
+        std::fs::create_dir_all(&canary).unwrap();
+        let link = root.join(planted);
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&canary, &link).unwrap();
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        let cfg = CodegraphConfig {
+            bundle: tmp.path().join("no-bundle"),
+            state_dir: root.join(".wicked-estate/graph.db.codegraph"),
+            languages: Vec::new(),
+            timeout: Duration::from_secs(5),
+        };
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = Some(gate_sql()));
+        crate::index_path_with(&mut store, &root, None, Some(&cfg)).unwrap();
+        TEST_DATABASE_SQL.with(|t| *t.borrow_mut() = None);
+        let written: Vec<_> = walkdir_files(&canary);
+        assert!(
+            written.is_empty(),
+            "{planted}: nothing is written through the link: {written:?}"
+        );
+        assert!(
+            !store
+                .all_edges()
+                .unwrap()
+                .iter()
+                .any(|e| e.resolved_by.starts_with("codegraph:")),
+            "{planted}: the run fell back to estate's pipeline"
+        );
+        assert!(
+            store
+                .all_nodes()
+                .unwrap()
+                .iter()
+                .any(|n| n.location.file == "src/csharp/Ledger.cs"),
+            "{planted}: estate's pipeline indexed the repo"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn walkdir_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let e = e.unwrap();
+            if e.file_type().unwrap().is_dir() {
+                stack.push(e.path());
+            } else {
+                out.push(e.path());
+            }
+        }
+    }
+    out
+}

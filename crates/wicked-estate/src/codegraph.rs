@@ -1999,6 +1999,92 @@ mod tests {
         assert_eq!(nodes.iter().filter(|n| n.name == "g").count(), 1);
     }
 
+    /// Round-1 fold (codex F5): two codegraph definitions of one name on one line, both minted.
+    /// `snap.nodes` is a HashMap, so their order was the map's, and the overload ordinal could
+    /// swap between runs of the same source. Synthetic rows (labelled), on line 6 of Shapes.java.
+    const SAME_LINE_TWINS: &str = "
+        INSERT INTO nodes VALUES('method:synthetic-h20','method','h','p::Shapes::h','src/p/Shapes.java','java',6,6,20,30,NULL,'int ()',NULL,0,0,0,0,NULL,NULL,NULL,0);
+        INSERT INTO nodes VALUES('method:synthetic-h2','method','h','p::Shapes::h','src/p/Shapes.java','java',6,6,2,12,NULL,'int ()',NULL,0,0,0,0,NULL,NULL,NULL,0);
+        INSERT INTO edges VALUES(901,'class:24c5e42ecf936a2beb512baf5d879067','method:synthetic-h20','contains',NULL,NULL,NULL,NULL);
+        INSERT INTO edges VALUES(902,'class:24c5e42ecf936a2beb512baf5d879067','method:synthetic-h2','contains',NULL,NULL,NULL,NULL);";
+
+    #[test]
+    fn same_line_minted_twins_take_their_ordinals_in_source_order_every_run() {
+        let sql = format!("{FIXTURE_SQL}\n{SAME_LINE_TWINS}");
+        for run in 0..12 {
+            let tmp = tempfile::tempdir().unwrap();
+            let cfg = config(tmp.path());
+            let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+            index(&mut store, &fixture_root(), Some(&cfg), Some(&sql));
+            let mut twins: Vec<(String, u32)> = store
+                .all_nodes()
+                .unwrap()
+                .into_iter()
+                .filter(|n| n.name == "h")
+                .map(|n| (n.symbol.0, n.location.span.start_col))
+                .collect();
+            twins.sort();
+            assert_eq!(
+                twins,
+                vec![
+                    ("ts-java . . . src/p/Shapes/Shapes#h(+1).".to_string(), 20),
+                    ("ts-java . . . src/p/Shapes/Shapes#h().".to_string(), 2),
+                ],
+                "run {run}: the first in source keeps the bare id"
+            );
+        }
+    }
+
+    #[test]
+    fn a_one_line_nested_definition_hangs_under_its_minted_owner() {
+        // Round-1 fold (codex F6): `Inner` sits inside the minted record `Point` on the same
+        // line, and sorts before it by name. Minted first, it found no owner id and hung under
+        // the File. A synthetic row (labelled), inside Point's span on line 5.
+        let sql = format!(
+            "{FIXTURE_SQL}
+            INSERT INTO nodes VALUES('class:synthetic-inner','class','Inner','p::Shapes::Point::Inner','src/p/Shapes.java','java',5,5,22,46,NULL,NULL,NULL,0,0,0,0,NULL,NULL,NULL,0);
+            INSERT INTO edges VALUES(903,'class:39d4cae6d10a7215f9b17606b4c1cd8f','class:synthetic-inner','contains',NULL,NULL,NULL,NULL);"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &fixture_root(), Some(&cfg), Some(&sql));
+        let inner = "ts-java . . . src/p/Shapes/Shapes#Point#Inner#";
+        let contains: Vec<String> = edges(&store, EdgeKind::Contains)
+            .into_iter()
+            .filter(|(_, t, _)| t == inner)
+            .map(|(s, _, _)| s)
+            .collect();
+        assert_eq!(
+            contains,
+            vec!["ts-java . . . src/p/Shapes/Shapes#Point#".to_string()],
+            "Point contains Inner"
+        );
+    }
+
+    #[test]
+    fn a_heritage_ref_takes_only_a_heritage_site() {
+        // Round-1 fold (codex F3): an `Extends` ref took a same-line `references` or
+        // `decorates` site, and the import wrote an inheritance edge to a field.
+        for heritage in [EdgeKind::Extends, EdgeKind::Implements] {
+            assert!(site_kind_fits(&heritage, "extends"), "{heritage:?}");
+            assert!(site_kind_fits(&heritage, "implements"), "{heritage:?}");
+            for other in [
+                "references",
+                "decorates",
+                "type_of",
+                "returns",
+                "overrides",
+                "exports",
+                "navigates",
+            ] {
+                assert!(!site_kind_fits(&heritage, other), "{heritage:?} {other}");
+            }
+        }
+        assert!(site_kind_fits(&EdgeKind::References, "references"));
+        assert!(site_kind_fits(&EdgeKind::References, "type_of"));
+    }
+
     #[test]
     fn codegraph_positions_map_to_byte_offsets_590() {
         // Line 2 holds a 2-byte char (1 UTF-16 unit) and a 4-byte one (2 units) before `x`;
