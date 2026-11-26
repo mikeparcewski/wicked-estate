@@ -764,10 +764,13 @@ thread_local! {
 }
 
 #[cfg(test)]
+type MirrorHook = Box<dyn FnMut(&str)>;
+
+#[cfg(test)]
 thread_local! {
     /// Called with `"before-mirror"` and `"after-mirror"` around a recorded run's mirror sync,
     /// so a test can change a file the way a save during `watch` does (estate#657).
-    pub(crate) static TEST_MIRROR_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&str)>>> =
+    pub(crate) static TEST_MIRROR_HOOK: std::cell::RefCell<Option<MirrorHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
