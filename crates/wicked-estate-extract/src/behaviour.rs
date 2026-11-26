@@ -2604,7 +2604,9 @@ mod tests {
                 lines.push(format!("{}.", 3000 + i));
                 lines.push("    DISPLAY 'X'.".to_string());
             }
+            // Not a stub: the guard counts the EXIT paragraphs, and a GOBACK body is one too.
             lines.push("END-PARA.".to_string());
+            lines.push("    DISPLAY 'END'.".to_string());
             lines.push("    GOBACK.".to_string());
             let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
             fixed(&lines)
@@ -2628,6 +2630,7 @@ mod tests {
                 lines.push(format!("Q{i}."));
                 lines.push("    EXIT.".to_string());
                 lines.push(format!("T{i}."));
+                lines.push("    DISPLAY 'T'.".to_string());
                 lines.push("    GOBACK.".to_string());
             }
             let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
