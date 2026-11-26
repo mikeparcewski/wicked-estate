@@ -314,11 +314,12 @@ unsafe extern "C" {
 pub const COBOL_UNPARSED_SPAN: &str = "cobol_unparsed_span";
 
 /// COBOL `Calls` edge metadata (#585): `true` when control reaches the target by running off the
-/// end of the source paragraph or section (among other ways, perhaps).
+/// end of the source paragraph or section, or by its `EXIT SECTION` into the next section (#622)
+/// (among other ways, perhaps).
 pub const COBOL_FALL_THROUGH: &str = "cobol_fall_through";
 /// COBOL `Calls` edge metadata (#585): `true` when every way the source reaches the target is
-/// conditional: one of the targets of a `GO TO … DEPENDING ON`, or a DECLARATIVES handler an
-/// I/O statement runs when it fails.
+/// conditional: one of the targets of a `GO TO … DEPENDING ON`, an `ALTER … PROCEED TO` target of
+/// an altered `GO TO.` (#622), or a DECLARATIVES handler an I/O statement runs when it fails.
 pub const COBOL_CONDITIONAL: &str = "cobol_conditional";
 
 /// How one COBOL unit reaches another.
@@ -1814,6 +1815,8 @@ fn cobol_division_of(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
 ///   the other by name, so it still resolves or parks.
 /// - `GO TO A [B …] [DEPENDING ON X]` transfers control to each label, looked up the same way;
 ///   a GO TO of a section runs its paragraphs.
+/// - `ALTER P TO PROCEED TO Q` makes Q a conditional target of P's `GO TO.` (see
+///   [`cobol_alter_calls`]).
 ///
 /// Each division's headers are collected and indexed once, and each range costs its lookups and
 /// the headers it calls, so this is linear in the tree and the calls it returns.
@@ -1821,27 +1824,19 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
     let mut out = Vec::new();
     let mut divisions: HashMap<usize, CobolDivision> = HashMap::new();
     let mut stack = vec![tree.root_node()];
-    // Every header from `s` through the last one `e` runs (a section through its last paragraph).
-    let run = |out: &mut Vec<CobolFlowCall>,
-               div: &CobolDivision,
-               s: usize,
-               e: usize,
-               pos,
-               span,
-               conditional| {
-        let h = &div.headers;
-        for p in &h[s..=h[e].last] {
-            out.push(CobolFlowCall {
-                name: p.name.clone(),
-                pos,
-                span,
-                header: Some(p.start),
-                conditional,
-            });
-        }
-    };
     while let Some(node) = stack.pop() {
         push_children(&mut stack, node);
+        if node.kind() == "alter_statement" {
+            let Some(d) = cobol_division_of(node).map(|d| {
+                &*divisions
+                    .entry(d.id())
+                    .or_insert_with(|| CobolDivision::of(d, src))
+            }) else {
+                continue;
+            };
+            cobol_alter_calls(&mut out, d, node, src);
+            continue;
+        }
         let is_goto = node.kind() == "goto_statement";
         if !is_goto && node.kind() != "perform_procedure" {
             continue;
@@ -1886,7 +1881,7 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
             for label in labels {
                 match (endpoint(label), div) {
                     (Some((_, Some(s))), Some(d)) => {
-                        run(&mut out, d, s, s, pos, ts_span(label), depending)
+                        cobol_run_calls(&mut out, d, (s, s), pos, ts_span(label), depending)
                     }
                     (Some((name, _)), _) => by_name(&mut out, name, label),
                     (None, _) => {}
@@ -1905,7 +1900,7 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
         let single = |out: &mut Vec<CobolFlowCall>, name: String, at: Option<usize>, label| match (
             at, div,
         ) {
-            (Some(i), Some(d)) => run(out, d, i, i, pos, ts_span(label), false),
+            (Some(i), Some(d)) => cobol_run_calls(out, d, (i, i), pos, ts_span(label), false),
             _ => by_name(out, name, label),
         };
         match labels.get(1).copied() {
@@ -1947,6 +1942,84 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
     out
 }
 
+/// The calls of a statement at `pos` that runs every header from `s` through the last one `e`
+/// (a section through its last paragraph), in source order.
+fn cobol_run_calls(
+    out: &mut Vec<CobolFlowCall>,
+    div: &CobolDivision,
+    (s, e): (usize, usize),
+    pos: usize,
+    span: Span,
+    conditional: bool,
+) {
+    let h = &div.headers;
+    for p in &h[s..=h[e].last] {
+        out.push(CobolFlowCall {
+            name: p.name.clone(),
+            pos,
+            span,
+            header: Some(p.start),
+            conditional,
+        });
+    }
+}
+
+/// The calls of an `ALTER P TO [PROCEED TO] Q …` (#622): each alteration makes Q a possible target
+/// of the `GO TO.` in paragraph P, so P's unit calls Q, conditionally (the alteration happens at
+/// run time). Both names are looked up as a GO TO's labels are, from the ALTER's section; a GO TO
+/// of a section runs its paragraphs. When P is not one header of the division the call has no
+/// source and is dropped; when Q is not, it is a call by name from P, to resolve later.
+fn cobol_alter_calls(
+    out: &mut Vec<CobolFlowCall>,
+    div: &CobolDivision,
+    alter: tree_sitter::Node,
+    src: &[u8],
+) {
+    let own = div.section_at(alter.start_byte());
+    let mut cursor = alter.walk();
+    for option in alter
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() == "alter_option")
+    {
+        let field = |name: &str| {
+            let mut cursor = option.walk();
+            option
+                .children_by_field_name(name, &mut cursor)
+                .collect::<Vec<_>>()
+        };
+        let words = |nodes: &[tree_sitter::Node]| -> Vec<String> {
+            nodes
+                .iter()
+                .flat_map(|&n| cobol_label_words(n, src))
+                .collect()
+        };
+        let (from, to) = (field("proc_name"), field("to"));
+        let Some(p) = div.endpoint(&words(&from), own) else {
+            continue;
+        };
+        let Some(&first) = to.first() else {
+            continue;
+        };
+        // The source is P's unit: any byte of it; its header's first byte is one.
+        let pos = div.headers[p].start;
+        let to_words = words(&to);
+        match div.endpoint(&to_words, own) {
+            Some(q) => cobol_run_calls(out, div, (q, q), pos, ts_span(first), true),
+            None => {
+                if let Some(name) = to_words.into_iter().next() {
+                    out.push(CobolFlowCall {
+                        name,
+                        pos,
+                        span: ts_span(first),
+                        header: None,
+                        conditional: true,
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// How control moves between the paragraphs and sections of COBOL PROCEDURE DIVISIONs where no
 /// statement names the target (#585), by header start byte:
 ///
@@ -1954,6 +2027,9 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
 ///   division, or its DECLARATIVES), with the next header's span. A unit falls through unless
 ///   its own statements end the run (see [`CobolRun`]). In DECLARATIVES nothing falls into a
 ///   section: each section is a handler, entered only on its condition.
+/// - `exits`: control leaves a section from a unit that runs `EXIT SECTION`, into the next
+///   section header of the same parent (not in DECLARATIVES, where a handler's EXIT SECTION
+///   returns to the statement that ran it).
 /// - `starts`: the unit where a program starts, the first header after DECLARATIVES, unless the
 ///   division's statements before it end the run.
 /// - `handlers`: `(I/O statement start, handler section start)`: a `USE AFTER ERROR` handler
@@ -1963,6 +2039,10 @@ fn cobol_flow_calls(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<CobolFlowCall> 
 #[derive(Default)]
 struct CobolShape {
     falls: Vec<(usize, usize, Span)>,
+    /// `EXIT SECTION` (#622): a unit that runs one moves on to the next section header of the
+    /// same parent, with that header's span. Kept apart from `falls`, whose map from a header to
+    /// the one it falls into stays one-to-one for walking unnoded headers.
+    exits: Vec<(usize, usize, Span)>,
     starts: Vec<usize>,
     handlers: Vec<(usize, usize)>,
     program_handlers: Vec<usize>,
@@ -2054,6 +2134,8 @@ struct CobolRun {
     pending: Option<(&'static str, &'static [&'static str])>,
     skipped: bool,
     exited: bool,
+    /// An `EXIT SECTION` was read (#622): control may leave for the next section.
+    exits_section: bool,
     ended: bool,
     unsure: bool,
 }
@@ -2140,6 +2222,7 @@ impl CobolRun {
                 let words: Vec<&str> = n.children(&mut cursor).map(|c| c.kind()).collect();
                 if words.iter().any(|w| matches!(*w, "PARAGRAPH" | "SECTION")) {
                     self.exited = true;
+                    self.exits_section |= words.contains(&"SECTION");
                 } else if words == ["EXIT"] {
                     self.unsure = true;
                 }
@@ -2215,12 +2298,24 @@ fn cobol_shape(tree: &tree_sitter::Tree, src: &[u8]) -> CobolShape {
             let mut owner: Option<tree_sitter::Node> = None;
             let mut section: Option<usize> = None;
             let mut run = CobolRun::default();
+            // The units of the open section that run EXIT SECTION, waiting for the next section.
+            let mut exiting: Vec<usize> = Vec::new();
             let mut cursor = parent.walk();
             for n in parent.children(&mut cursor) {
                 if n.kind() == "procedure_declaratives" {
                     continue;
                 }
                 if is_cobol_header(n) {
+                    if let Some(h) =
+                        owner.filter(|_| !declaratives && run.exits_section && section.is_some())
+                    {
+                        exiting.push(h.start_byte());
+                    }
+                    if n.kind() == "section_header" {
+                        for from in exiting.drain(..) {
+                            shape.exits.push((from, n.start_byte(), ts_span(n)));
+                        }
+                    }
                     match owner {
                         Some(h) if !run.ends() => {
                             if !(declaratives && n.kind() == "section_header") {
@@ -6381,7 +6476,8 @@ impl TreeSitterExtractor {
                 }
                 h = *falls_from.get(&h)?;
             };
-            for (from, to, span) in &shape.falls {
+            // An EXIT SECTION's move into the next section is a fall-through too (#622).
+            for (from, to, span) in shape.falls.iter().chain(&shape.exits) {
                 // Only from a noded unit: a chain of unnoded headers is walked once, by the unit
                 // that falls into it.
                 let Some(from) = unit(from) else {
