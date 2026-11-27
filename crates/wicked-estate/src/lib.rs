@@ -5295,6 +5295,76 @@ mod tests {
         }
     }
 
+    /// #663 round 1 (codex): the JSON rules files go through the source redactor before their
+    /// extractor, which masked every JSON value it does not trust, so the AWS rule was named
+    /// `REDACTED…`. Their identity fields survive; a `.JSON` file is a rules file too; a JSON
+    /// Schema with a `policyRule` property is not an Azure Policy and keeps its generic symbols.
+    #[test]
+    fn json_rules_keep_their_names_and_a_json_schema_stays_generic_620() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../wicked-estate-extract/tests/fixtures");
+        let tmp = tempfile::tempdir().unwrap();
+        for (from, to) in [
+            ("aws_config/restricted_ssh.json", "aws/restricted_ssh.json"),
+            (
+                "aws_config/restricted_ssh.json",
+                "aws/upper/restricted_ssh.JSON",
+            ),
+            (
+                "azure_policy/require_https_storage.json",
+                "azure/require_https_storage.json",
+            ),
+        ] {
+            let to = tmp.path().join(to);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(fixtures.join(from), &to).unwrap();
+        }
+        std::fs::write(
+            tmp.path().join("schema.json"),
+            r#"{"type":"object","properties":{"policyRule":{"type":"object"}}}"#,
+        )
+        .unwrap();
+        let mut store = MemStore::new();
+        index_path_as(&mut store, tmp.path(), None).unwrap();
+        let nodes = GraphRead::all_nodes(&store).unwrap();
+        let rules_in = |file: &str| -> Vec<String> {
+            let mut names: Vec<String> = nodes
+                .iter()
+                .filter(|n| n.location.file == file && n.kind == NodeKind::Rule)
+                .map(|n| n.name.clone())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(rules_in("aws/restricted_ssh.json"), vec!["restricted-ssh"]);
+        assert_eq!(
+            rules_in("aws/upper/restricted_ssh.JSON"),
+            vec!["restricted-ssh"]
+        );
+        assert_eq!(
+            rules_in("azure/require_https_storage.json"),
+            vec!["Require HTTPS on Storage Accounts"]
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.location.file == "aws/restricted_ssh.json"
+                    && n.name == "AWS::EC2::SecurityGroup"),
+            "the rule's resource type survives"
+        );
+        let schema: Vec<&NodeKind> = nodes
+            .iter()
+            .filter(|n| n.location.file == "schema.json")
+            .map(|n| &n.kind)
+            .collect();
+        assert!(
+            !schema
+                .iter()
+                .any(|k| matches!(k, NodeKind::Rule | NodeKind::RuleSet)),
+            "a JSON Schema is not a policy: {schema:?}"
+        );
+    }
+
     /// estate#620 (coord ruling: option a): the release binary is built with default features,
     /// and `xml-rules` is one, so Camunda DMN and Salesforce Flow (`.flow-meta.xml`) files index
     /// as rule nodes instead of NOT-INDEXED.
