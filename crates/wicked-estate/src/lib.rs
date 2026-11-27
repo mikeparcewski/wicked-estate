@@ -158,15 +158,23 @@ fn is_vb6_source(bytes: &[u8]) -> bool {
 const NOT_INDEXED_SECRET: &str = "matches the secret-file rule; never indexed";
 const NOT_INDEXED_READ: &str = "could not be read inside the repository root";
 const NOT_INDEXED_CTL: &str =
-    "mainframe control card (not VB6): no extractor yet (wicked-estate#447)";
+    "mainframe control card (not VB6): no extractor yet (wicked-estate#662)";
 
 fn not_indexed_reason(ext: &str) -> &'static str {
     match ext {
-        "ddl" | "db2" => "Db2 DDL: no DDL extractor yet (wicked-estate#447)",
-        "csd" => "CICS CSD resource definitions: no extractor yet (wicked-estate#447)",
-        "mac" => "HLASM macro library member: no macro extractor yet (wicked-estate#447)",
-        "ca7" | "controlm" => "scheduler definition: no extractor yet (wicked-estate#447)",
+        "ddl" | "db2" => "Db2 DDL: no DDL extractor yet (wicked-estate#662)",
+        "csd" => "CICS CSD resource definitions: no extractor yet (wicked-estate#662)",
+        "mac" => "HLASM macro library member: no macro extractor yet (wicked-estate#662)",
+        "ca7" | "controlm" => "scheduler definition: no extractor yet (wicked-estate#662)",
         "ctl" => NOT_INDEXED_CTL,
+        // estate#620: rules formats the release binary does not read.
+        "dmn" => "Camunda DMN: requires the 'xml-rules' feature",
+        "ers" | "erf" | "ecore" => "Progress Corticon: requires the 'xml-rules' feature",
+        "clp" => "CLIPS/Jess rules: extractor not wired into index yet (wicked-estate#667)",
+        "irl" => "IBM ODM IRL rules: extractor not wired into index yet (wicked-estate#667)",
+        "gdst" => {
+            "Drools GDST decision table: extractor not wired into index yet (wicked-estate#667)"
+        }
         _ => "no extractor for this file type",
     }
 }
@@ -5294,27 +5302,48 @@ mod tests {
     fn not_indexed_reasons_describe_export_formats() {
         // Red on main: no reason helper or NOT-INDEXED reporting exists.
         for (ext, reason) in [
-            ("ddl", "Db2 DDL: no DDL extractor yet (wicked-estate#447)"),
-            ("db2", "Db2 DDL: no DDL extractor yet (wicked-estate#447)"),
+            ("ddl", "Db2 DDL: no DDL extractor yet (wicked-estate#662)"),
+            ("db2", "Db2 DDL: no DDL extractor yet (wicked-estate#662)"),
             (
                 "csd",
-                "CICS CSD resource definitions: no extractor yet (wicked-estate#447)",
+                "CICS CSD resource definitions: no extractor yet (wicked-estate#662)",
             ),
             (
                 "mac",
-                "HLASM macro library member: no macro extractor yet (wicked-estate#447)",
+                "HLASM macro library member: no macro extractor yet (wicked-estate#662)",
             ),
             (
                 "ca7",
-                "scheduler definition: no extractor yet (wicked-estate#447)",
+                "scheduler definition: no extractor yet (wicked-estate#662)",
             ),
             (
                 "controlm",
-                "scheduler definition: no extractor yet (wicked-estate#447)",
+                "scheduler definition: no extractor yet (wicked-estate#662)",
             ),
             (
                 "ctl",
-                "mainframe control card (not VB6): no extractor yet (wicked-estate#447)",
+                "mainframe control card (not VB6): no extractor yet (wicked-estate#662)",
+            ),
+            // estate#620: the rules formats the release binary does not read say what they need:
+            // the opt-in feature that builds their extractor, or the issue that wires it.
+            ("dmn", "Camunda DMN: requires the 'xml-rules' feature"),
+            ("ers", "Progress Corticon: requires the 'xml-rules' feature"),
+            ("erf", "Progress Corticon: requires the 'xml-rules' feature"),
+            (
+                "ecore",
+                "Progress Corticon: requires the 'xml-rules' feature",
+            ),
+            (
+                "clp",
+                "CLIPS/Jess rules: extractor not wired into index yet (wicked-estate#667)",
+            ),
+            (
+                "irl",
+                "IBM ODM IRL rules: extractor not wired into index yet (wicked-estate#667)",
+            ),
+            (
+                "gdst",
+                "Drools GDST decision table: extractor not wired into index yet (wicked-estate#667)",
             ),
             ("unknown", "no extractor for this file type"),
             ("", "no extractor for this file type"),
@@ -5353,7 +5382,7 @@ mod tests {
                     ),
                     (
                         "export/REPROCT.ctl".to_string(),
-                        "mainframe control card (not VB6): no extractor yet (wicked-estate#447)"
+                        "mainframe control card (not VB6): no extractor yet (wicked-estate#662)"
                             .to_string(),
                     ),
                     (

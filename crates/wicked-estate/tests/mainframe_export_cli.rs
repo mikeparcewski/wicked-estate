@@ -54,32 +54,32 @@ fn assert_not_indexed_report(stderr: &str) {
     let expected = [
         (
             "ca7",
-            "scheduler definition: no extractor yet (wicked-estate#447)",
+            "scheduler definition: no extractor yet (wicked-estate#662)",
             "app/scheduler/CARDDEMO.ca7",
         ),
         (
             "controlm",
-            "scheduler definition: no extractor yet (wicked-estate#447)",
+            "scheduler definition: no extractor yet (wicked-estate#662)",
             "app/scheduler/CARDDEMO.controlm",
         ),
         (
             "csd",
-            "CICS CSD resource definitions: no extractor yet (wicked-estate#447)",
+            "CICS CSD resource definitions: no extractor yet (wicked-estate#662)",
             "app/csd/CARDDEMO.CSD",
         ),
         (
             "ctl",
-            "mainframe control card (not VB6): no extractor yet (wicked-estate#447)",
+            "mainframe control card (not VB6): no extractor yet (wicked-estate#662)",
             "app/ctl/REPROCT.ctl",
         ),
         (
             "ddl",
-            "Db2 DDL: no DDL extractor yet (wicked-estate#447)",
+            "Db2 DDL: no DDL extractor yet (wicked-estate#662)",
             "app/ddl/TRNTYPE.ddl",
         ),
         (
             "mac",
-            "HLASM macro library member: no macro extractor yet (wicked-estate#447)",
+            "HLASM macro library member: no macro extractor yet (wicked-estate#662)",
             "app/asm/CDMAC.mac",
         ),
         ("txt", "no extractor for this file type", "README.txt"),
