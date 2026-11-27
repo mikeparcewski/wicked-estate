@@ -85,8 +85,8 @@ impl wicked_estate_core::Extractor for AzurePolicyExtractor {
     }
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
-        // Detect by extension.
-        if !file.path.ends_with(".json") {
+        // Detect by extension (any case: the indexer admits `.JSON` too).
+        if !file.path.to_ascii_lowercase().ends_with(".json") {
             return Ok(Extraction::default());
         }
 
@@ -98,8 +98,15 @@ impl wicked_estate_core::Extractor for AzurePolicyExtractor {
             Some(p) if p.is_object() => p,
             _ => return Ok(Extraction::default()),
         };
+        // A policy rule has an `if` condition and a `then` effect; a JSON Schema that merely
+        // declares a `policyRule` property has neither (estate#667).
         let policy_rule = match props.get("policyRule") {
-            Some(pr) if pr.is_object() => pr,
+            Some(pr)
+                if pr.get("if").is_some_and(Value::is_object)
+                    && pr.get("then").is_some_and(Value::is_object) =>
+            {
+                pr
+            }
             _ => return Ok(Extraction::default()),
         };
 
@@ -245,8 +252,8 @@ impl wicked_estate_core::Extractor for AwsConfigRuleExtractor {
     }
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
-        // Detect by extension.
-        if !file.path.ends_with(".json") {
+        // Detect by extension (any case: the indexer admits `.JSON` too).
+        if !file.path.to_ascii_lowercase().ends_with(".json") {
             return Ok(Extraction::default());
         }
 
@@ -774,5 +781,295 @@ mod tests {
         );
         let fact_count = ex.nodes.iter().filter(|n| n.kind == NodeKind::Fact).count();
         assert_eq!(fact_count, 0, "no Fact nodes expected when Scope absent");
+    }
+
+    // ── estate#667 S2: the CLI redacts a file before extraction ────────────────
+
+    /// Extract `text` at `path` the way the indexer does: redacted first.
+    fn redacted(ex: &dyn Extractor, path: &str, text: &str) -> Extraction {
+        let text = crate::redact::redact_source(path, text);
+        ex.extract(&SourceFile {
+            path: path.to_string(),
+            language: Language::new("json"),
+            text,
+        })
+        .expect("extract")
+    }
+
+    /// The node values a test may inspect: names, docs and signatures.
+    fn texts(ex: &Extraction) -> String {
+        ex.nodes
+            .iter()
+            .map(|n| format!("{} {:?} {:?}", n.name, n.doc, n.signature))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// estate#667 S2: an Azure Policy definition keeps, after redaction, its name, its
+    /// description and its effect (one of the documented effects). Every other value stays
+    /// masked, including the condition's field selectors, which can be expressions or sit in
+    /// literal operands (#670 round 1): the condition keeps its structure only.
+    #[test]
+    fn azure_policy_keeps_its_names_after_redaction_and_masks_the_rest_667() {
+        let text = r#"{
+  "properties": {
+    "displayName": "Deploy vault diagnostics",
+    "mode": "Indexed",
+    "description": "Sends vault logs to the workspace.",
+    "parameters": { "workspaceId": { "type": "String", "defaultValue": "ws-default-q8z" } },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          { "field": "type", "equals": "cond-value-k3v" },
+          { "field": "location", "in": ["cond-list-m2p"] }
+        ]
+      },
+      "then": {
+        "effect": "deployIfNotExists",
+        "details": {
+          "type": "Microsoft.Insights/diagnosticSettings",
+          "deployment": {
+            "properties": {
+              "mode": "incremental",
+              "parameters": { "token": { "value": "deploy-param-x9w" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}"#;
+        let ex = redacted(&azure_extractor(), "policies/vault_diag.json", text);
+        let names: Vec<&str> = ex.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"Deploy vault diagnostics"), "{names:?}");
+        assert!(names.contains(&"deployIfNotExists"), "{names:?}");
+        let all = texts(&ex);
+        assert!(all.contains("Sends vault logs to the workspace."), "{all}");
+        let condition = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Condition)
+            .and_then(|n| n.signature.as_deref())
+            .expect("a condition");
+        let condition: Value = serde_json::from_str(condition).expect("the signature is JSON");
+        let terms = condition["allOf"].as_array().expect("allOf survives");
+        assert_eq!(terms.len(), 2, "{condition}");
+        assert!(
+            terms.iter().all(|t| t.get("field").is_some()),
+            "{condition}"
+        );
+        for secret in [
+            "cond-value-k3v",
+            "cond-list-m2p",
+            "ws-default-q8z",
+            "deploy-param-x9w",
+        ] {
+            assert!(!all.contains(secret), "{secret} stays masked: {all}");
+        }
+        let masked = crate::redact::redact_source("policies/vault_diag.json", text);
+        for secret in [
+            "cond-value-k3v",
+            "cond-list-m2p",
+            "ws-default-q8z",
+            "deploy-param-x9w",
+        ] {
+            assert!(!masked.contains(secret), "{secret} stays masked");
+        }
+    }
+
+    /// estate#667 S2: an AWS Config rule keeps its name, description, source and resource
+    /// types after redaction; its InputParameters stay masked, and a custom rule's source (a
+    /// Lambda ARN) does too (#670 round 1).
+    #[test]
+    fn aws_config_rule_keeps_its_names_after_redaction_and_masks_inputs_667() {
+        let text = r#"{
+  "ConfigRuleName": "restricted-ssh",
+  "Description": "Checks that security groups disallow open SSH.",
+  "InputParameters": "{\"authorizedTcpPorts\":\"input-param-r5t\"}",
+  "Scope": { "ComplianceResourceTypes": ["AWS::EC2::SecurityGroup"] },
+  "Source": { "Owner": "AWS", "SourceIdentifier": "INCOMING_SSH_DISABLED" }
+}"#;
+        let ex = redacted(&aws_extractor(), "config/restricted_ssh.json", text);
+        let all = texts(&ex);
+        for kept in [
+            "restricted-ssh",
+            "Checks that security groups disallow open SSH.",
+            "INCOMING_SSH_DISABLED",
+            "AWS::EC2::SecurityGroup",
+        ] {
+            assert!(all.contains(kept), "{kept} survives redaction: {all}");
+        }
+        let masked = crate::redact::redact_source("config/restricted_ssh.json", text);
+        assert!(!masked.contains("input-param-r5t"));
+        let custom = r#"{
+  "ConfigRuleName": "tagged-buckets",
+  "Source": {
+    "Owner": "CUSTOM_LAMBDA",
+    "SourceIdentifier": "arn:aws:lambda:us-east-1:000000000000:function:lambda-name-h4j"
+  }
+}"#;
+        let masked = crate::redact::redact_source("config/tagged.json", custom);
+        assert!(masked.contains("tagged-buckets"), "{masked}");
+        assert!(masked.contains("CUSTOM_LAMBDA"), "{masked}");
+        assert!(!masked.contains("lambda-name-h4j"), "{masked}");
+    }
+
+    /// #670 round 1 (codex P1s): what the trust rules keep is pinned to governance documents
+    /// and to values that cannot carry customer data. Each value below stays masked.
+    #[test]
+    fn json_rules_trust_keeps_no_customer_value_670() {
+        let cases = [
+            // A `field` member inside a literal count operand is data, not a selector.
+            (
+                "policies/count.json",
+                r#"{"properties": {"displayName": "Count", "policyRule": {
+  "if": {"count": {"value": [{"field": "secret-count-a1"}], "name": "e",
+         "where": {"field": "name", "equals": "x"}}, "greater": 0},
+  "then": {"effect": "deny"}}}}"#,
+                "secret-count-a1",
+            ),
+            // An effect expression can embed a customer value.
+            (
+                "policies/expr.json",
+                r#"{"properties": {"displayName": "Expr", "policyRule": {
+  "if": {"field": "type", "equals": "x"},
+  "then": {"effect": "[if(equals(parameters('t'), 'secret-expr-b2'), 'deny', 'audit')]"}}}}"#,
+                "secret-expr-b2",
+            ),
+            // Key presence alone is no governance document.
+            (
+                "data/aws.json",
+                r#"{"ConfigRuleName": {}, "Description": "secret-desc-c3"}"#,
+                "secret-desc-c3",
+            ),
+            (
+                "data/azure.json",
+                r#"{"properties": {"mode": "secret-mode-d4", "policyRule": {"if": false, "then": false}}}"#,
+                "secret-mode-d4",
+            ),
+            // #670 codex-check: the detecting keys must hold a governance document's values,
+            // not objects.
+            (
+                "data/aws-typed.json",
+                r#"{"ConfigRuleName": {}, "Source": {"Owner": {}, "SourceIdentifier": {}},
+  "Description": "secret-desc-e5"}"#,
+                "secret-desc-e5",
+            ),
+            (
+                "data/azure-typed.json",
+                r#"{"properties": {"displayName": "secret-name-f6",
+  "policyRule": {"if": {"x": 1}, "then": {"effect": {}}}}}"#,
+                "secret-name-f6",
+            ),
+            // DES-670: every detecting key is typed, so detection is the extractor's acceptance
+            // test (json_rules.rs, `AwsConfigRuleExtractor` and `AzurePolicyExtractor`) or
+            // stricter. Each shape the extractor rejects keeps everything masked.
+            (
+                "data/aws-name-object.json",
+                r#"{"ConfigRuleName": {}, "Source": {"Owner": "AWS"}, "Description": "secret-i9"}"#,
+                "secret-i9",
+            ),
+            (
+                "data/aws-name-number.json",
+                r#"{"ConfigRuleName": 7, "Source": {"Owner": "AWS"}, "Description": "secret-j1"}"#,
+                "secret-j1",
+            ),
+            (
+                "data/aws-name-null.json",
+                r#"{"ConfigRuleName": null, "Source": {"Owner": "AWS"}, "Description": "secret-k2"}"#,
+                "secret-k2",
+            ),
+            (
+                "data/aws-name-empty.json",
+                r#"{"ConfigRuleName": "", "Source": {"Owner": "AWS"}, "Description": "secret-l3"}"#,
+                "secret-l3",
+            ),
+            (
+                "data/aws-identifier-object.json",
+                r#"{"ConfigRuleName": "r", "Source": {"Owner": "AWS", "SourceIdentifier": {"x": "secret-m4"}}}"#,
+                "secret-m4",
+            ),
+            (
+                "data/azure-effect-outside.json",
+                r#"{"properties": {"displayName": "secret-n5",
+  "policyRule": {"if": {"field": "type", "equals": "x"}, "then": {"effect": "customer-x"}}}}"#,
+                "secret-n5",
+            ),
+            (
+                "data/azure-if-array.json",
+                r#"{"properties": {"displayName": "secret-o6",
+  "policyRule": {"if": [{"field": "type"}], "then": {"effect": "deny"}}}}"#,
+                "secret-o6",
+            ),
+        ];
+        // Every leak is reported at once.
+        let leaks: Vec<String> = cases
+            .iter()
+            .filter_map(|(path, text, secret)| {
+                let masked = crate::redact::redact_source(path, text);
+                masked
+                    .contains(secret)
+                    .then(|| format!("{path}: {secret} kept: {masked}"))
+            })
+            .collect();
+        assert!(leaks.is_empty(), "{leaks:#?}");
+    }
+
+    /// #670 codex-check: an AWS Config custom policy rule has no `SourceIdentifier` (AWS ignores
+    /// it for `CUSTOM_POLICY`), and Azure effects are case-insensitive. Both keep their names;
+    /// the Guard policy text stays masked.
+    #[test]
+    fn custom_policy_rules_and_lowercase_effects_keep_their_names_670() {
+        let aws = r#"{"ConfigRuleName": "tagged-policy", "Description": "Buckets carry tags",
+  "Source": {"Owner": "CUSTOM_POLICY",
+    "CustomPolicyDetails": {"PolicyRuntime": "guard-2.x.x", "PolicyText": "secret-policy-g7"}}}"#;
+        let masked = crate::redact::redact_source("config/tagged.json", aws);
+        for kept in ["tagged-policy", "Buckets carry tags", "CUSTOM_POLICY"] {
+            assert!(masked.contains(kept), "{kept}: {masked}");
+        }
+        assert!(!masked.contains("secret-policy-g7"), "{masked}");
+        let azure = r#"{"properties": {"displayName": "Lowercase effect",
+  "policyRule": {"if": {"field": "type", "equals": "x"}, "then": {"effect": "deny"}}}}"#;
+        let masked = crate::redact::redact_source("policies/lower.json", azure);
+        assert!(masked.contains("Lowercase effect"), "{masked}");
+        assert!(masked.contains("\"deny\""), "{masked}");
+        // DES-670: addToNetworkGroup is a documented effect.
+        let network = r#"{"properties": {"displayName": "Join the group",
+  "policyRule": {"if": {"field": "type", "equals": "x"},
+    "then": {"effect": "addToNetworkGroup", "details": {"networkGroupId": "secret-p7"}}}}}"#;
+        let masked = crate::redact::redact_source("policies/network.json", network);
+        assert!(masked.contains("Join the group"), "{masked}");
+        assert!(!masked.contains("secret-p7"), "{masked}");
+    }
+
+    /// estate#667 S2: a JSON Schema that declares a `policyRule` property is not an Azure
+    /// Policy (a policy rule has an `if` and a `then` object), and a `.JSON` file is read as
+    /// the indexer admits it.
+    #[test]
+    fn a_json_schema_is_not_a_policy_and_dot_json_is_any_case_667() {
+        let schema = r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": { "policyRule": { "type": "object", "description": "A rule." } }
+}"#;
+        let ex = azure_extractor()
+            .extract(&SourceFile {
+                path: "schemas/policy.schema.json".into(),
+                language: Language::new("json"),
+                text: schema.into(),
+            })
+            .unwrap();
+        assert!(ex.nodes.is_empty(), "{:?}", ex.nodes);
+        let upper = |path: &str, text: &str, ex: &dyn Extractor| {
+            ex.extract(&SourceFile {
+                path: path.into(),
+                language: Language::new("json"),
+                text: text.into(),
+            })
+            .unwrap()
+            .nodes
+            .len()
+        };
+        assert!(upper("policies/HTTPS.JSON", AZURE_POLICY_JSON, &azure_extractor()) > 0);
+        assert!(upper("config/SSH.Json", AWS_CONFIG_JSON, &aws_extractor()) > 0);
     }
 }

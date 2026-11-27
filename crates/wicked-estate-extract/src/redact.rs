@@ -222,6 +222,10 @@ struct TrustRow {
     class: Class,
     #[serde(default)]
     key_sibling: Option<String>,
+    /// When set, a value is kept only if it equals one of these (ASCII case ignored), so a
+    /// closed vocabulary (an Azure Policy effect) cannot carry free text (estate#670).
+    #[serde(default)]
+    values: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -710,12 +714,33 @@ fn config_masks(
         for t in c.rules.trust.iter().filter(|t| t.grammar == grammar) {
             let by_file = t.files.is_empty() || name_matches(&t.files, name);
             let by_detect = t.detect.iter().all(|d| match d.split_once('=') {
-                Some((k, v)) => scalar_at(doc, &key_path(k)).is_some_and(|s| s == v),
+                // `path=*` is a non-empty string (not a number, boolean, null or container).
+                Some((k, "*")) => {
+                    let kp = key_path(k);
+                    w.leaves.iter().any(|l| {
+                        l.doc == doc
+                            && l.path.iter().map(String::as_str).eq(kp.iter().copied())
+                            && !l.numeric
+                            && !l.boolean
+                            && l.end > l.start
+                    })
+                }
+                // `path=value` is exact; `path=a|b` is one of the alternatives, ASCII case
+                // ignored as in a row's `values` (estate#670).
+                Some((k, v)) => scalar_at(doc, &key_path(k)).is_some_and(|s| {
+                    if v.contains('|') {
+                        v.split('|').any(|x| x.eq_ignore_ascii_case(&s))
+                    } else {
+                        s == v
+                    }
+                }),
+                // A key path that must exist; `*`/`**` match as in row paths, so
+                // `/a/if/*` requires `if` to be an object with a key (estate#670).
                 None => {
                     let kp = key_path(d);
-                    w.keys.iter().any(|(kd, k)| {
-                        *kd == doc && k.iter().map(String::as_str).eq(kp.iter().copied())
-                    })
+                    w.keys
+                        .iter()
+                        .any(|(kd, k)| *kd == doc && path_match(&kp, k))
                 }
             });
             if by_file && by_detect {
@@ -1232,6 +1257,9 @@ fn decide(
             Unkeyed::Command => argv_masks(value, leaf),
         };
     };
+    if !row.values.is_empty() && !row.values.iter().any(|x| x.eq_ignore_ascii_case(v)) {
+        return all;
+    }
     match row.class {
         Class::Plain => {
             if core_redact::value_looks_secret(value) {
