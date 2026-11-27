@@ -495,6 +495,18 @@ fn call_site_key(location: &Location) -> CallSiteKey {
     )
 }
 
+/// Whether `node` is a definition codegraph minted (estate#584: `origin: codegraph`).
+fn is_codegraph_minted(node: &Node) -> bool {
+    node.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+}
+
+/// Whether `new` is `old` minted again: one id, one kind and one signature. Anything else (a
+/// type alias minted again as a class keeps its id) is a gained and a lost candidate, as
+/// resolvers admit kinds differently (#668 codex-check v2).
+fn is_same_mint(old: &Node, new: &Node) -> bool {
+    old.symbol == new.symbol && old.kind == new.kind && old.signature == new.signature
+}
+
 /// Resolve `refs`: with codegraph on, the refs codegraph owns (switched files, owned kinds) are
 /// answered from its facts and the rest go to estate's resolvers; the two results are merged as
 /// `resolve_all_with_coverage` merges resolvers (per-site edges kept, one edge per
@@ -3262,16 +3274,68 @@ fn index_path_inner(
                     .insert(node.location.file);
             }
         }
+        // A definition codegraph will mint in a file extracted this pass is a gained name too:
+        // the mapping that mints it runs after this pass (estate#660). One minted last run and
+        // minted again unchanged (`is_same_mint`) is neither gained nor lost (#668 round 1 and
+        // codex-check).
+        let mut reminted: HashSet<SymbolId> = HashSet::new();
+        if let Some(cg) = codegraph_state.as_ref() {
+            // A file saved during the run keeps estate's pipeline (the late fallback below,
+            // estate#657): nothing is minted in it, so nothing is predicted (DES-668).
+            let late: HashSet<String> = changed_during_run
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .cloned()
+                .collect();
+            let files: HashSet<String> = changed
+                .iter()
+                .map(|fw| fw.rel.clone())
+                .filter(|rel| !late.contains(rel))
+                .collect();
+            let mut nodes = Vec::new();
+            for symbol in &extracted_symbols {
+                if let Some(node) = store.get_node(symbol)? {
+                    nodes.push(node);
+                }
+            }
+            let refs: Vec<&Node> = nodes.iter().collect();
+            let reader: &dyn GraphRead = &*store;
+            let text = |file: &str| reader.file_content(file).ok().flatten();
+            let old_minted: HashMap<&SymbolId, &Node> = old_candidates
+                .iter()
+                .filter(|n| is_codegraph_minted(n))
+                .map(|n| (&n.symbol, n))
+                .collect();
+            for node in cg.minted_names(&refs, &files, &text) {
+                if old_minted
+                    .get(&node.symbol)
+                    .is_some_and(|old| is_same_mint(old, &node))
+                {
+                    reminted.insert(node.symbol);
+                } else {
+                    changed_names
+                        .entry(node.name)
+                        .or_default()
+                        .insert(node.location.file);
+                }
+            }
+        }
         let mut lost_by_name: HashMap<String, Vec<SymbolId>> = HashMap::new();
         for node in &old_candidates {
             if node.name.is_empty() || store.get_node(&node.symbol)?.is_some() {
                 continue;
             }
-            // Removed homonyms can make a parked name unique, including typed probe forms.
+            // Removed homonyms can make a parked name unique, including typed probe forms. A
+            // predicted re-mint keeps its probe too: if the mint does not happen after all, the
+            // retry frees a parked call; if it does, the retry finds the name as it was (DES-668).
             for probe in node_backfill_probes(node) {
                 if seen_probes.insert(probe.clone()) {
                     backfill_probes.push(probe);
                 }
+            }
+            if is_codegraph_minted(node) && reminted.contains(&node.symbol) {
+                continue;
             }
             if !is_structural_symbol(node) {
                 continue;

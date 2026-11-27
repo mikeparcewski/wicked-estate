@@ -1361,6 +1361,23 @@ pub(crate) struct IdMap {
 }
 
 impl Prepared {
+    /// Every node [`Self::id_map`] will mint in `mint_in`, before the mapping runs: the mapping
+    /// itself on the files' own nodes, so the prediction and the minting cannot disagree (#668
+    /// round 1). The homonym pass reads it (estate#660). A definition's matches are within its
+    /// own file, so the files' nodes are enough; the dropped-edge count this dry run adds is put
+    /// back.
+    pub(crate) fn minted_names(
+        &self,
+        nodes: &[&Node],
+        mint_in: &HashSet<String>,
+        text: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<Node> {
+        let drops = *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner());
+        let ids = self.id_map(nodes, mint_in, text);
+        *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) = drops;
+        ids.minted
+    }
+
     /// Map codegraph definitions onto estate nodes. `nodes` is the post-write population (the
     /// resolution index); `mint_in` names the files extracted this run, the only ones whose
     /// unmatched definitions get new nodes (an unchanged file's were minted when it changed).
@@ -3226,6 +3243,317 @@ mod tests {
             .count();
         assert_eq!(bound, 1, "the parked call binds the minted assist");
         assert_eq!(from_lib(&store), 0, "and is no longer parked");
+    }
+
+    /// estate#660: an unchanged caller bound by name to the fallen-back file's `assist` loses
+    /// that bind when a later run mints a second `assist` in a codegraph file, as a full index
+    /// of the same tree finds two candidates and parks the call (the #654 test above). The
+    /// homonym pass re-extracts the caller only for names estate's extractions gained or lost;
+    /// a definition codegraph mints is a gained name too.
+    #[test]
+    fn a_minted_homonym_unbinds_an_unchanged_callers_name_bound_call_660() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let edit = |path: &str, from: &str, to: &str| {
+            let p = root.join(path);
+            let s = std::fs::read_to_string(&p).unwrap();
+            assert!(s.contains(from), "{path} holds {from:?}");
+            std::fs::write(&p, s.replacen(from, to, 1)).unwrap();
+        };
+        edit(
+            "src/svc.ts",
+            "return helper(id).trim(); }",
+            "return helper(id).trim() + assist(id); }",
+        );
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function assist(s: string): string { return s; }\n");
+        std::fs::write(&lib, text).unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
+        let lib_assist = "ts-typescript . . . src/lib/util/assist().";
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t == lib_assist),
+            "one assist: the call binds it by name: {:?}",
+            calls_from(&calls, GET)
+        );
+        // The next run changes only src/util.ts, where codegraph now has an `assist` estate's
+        // extractor does not: it is minted. svc.ts is unchanged.
+        let util = root.join("src/util.ts");
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched\n");
+        std::fs::write(&util, text).unwrap();
+        let sql = format!(
+            "{}\nINSERT INTO nodes VALUES('function:synthetic-assist','function','assist','assist',\
+             'src/util.ts','typescript',3,3,0,40,NULL,'(s: string): string',NULL,1,0,0,0,NULL,NULL,\
+             NULL,0);",
+            lib_util_fell_back_sql()
+        );
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        assert!(
+            store.all_nodes().unwrap().iter().any(|n| {
+                n.location.file == "src/util.ts"
+                    && n.name == "assist"
+                    && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+            }),
+            "util.ts's assist is minted"
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get = calls_from(&calls, GET);
+        assert!(
+            !from_get.iter().any(|(_, t, _)| t.ends_with("/assist().")),
+            "two definitions named assist: the call binds neither, as on a full index: {from_get:?}"
+        );
+        let parked = store
+            .unresolved_refs_for_name(&format!("{CODEGRAPH_REF_PREFIX}assist"))
+            .unwrap();
+        assert!(
+            parked.iter().any(|r| r.from.0 == GET),
+            "the call parks: {parked:?}"
+        );
+        // #668 round 1: the next edit to src/util.ts mints the same assist again. It is
+        // neither gained nor lost, so no caller is re-extracted for it.
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched again\n");
+        std::fs::write(&util, text).unwrap();
+        crate::TEST_REBIND_FILES.with(|count| count.set(0));
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        assert_eq!(
+            crate::TEST_REBIND_FILES.with(|count| count.get()),
+            0,
+            "an unchanged re-mint re-extracts no caller"
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            !calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t.ends_with("/assist().")),
+            "the call stays parked"
+        );
+    }
+
+    /// #668 codex-check: a definition minted again under the same name but as another kind is
+    /// a gained candidate for callers that filter by kind. A type alias `assist` is no call
+    /// target, so the call binds the fallen-back file's function; when the next run mints a
+    /// function `assist` there instead, the call has two callable candidates and parks.
+    #[test]
+    fn a_minted_homonym_that_changes_kind_unbinds_the_call_668() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = root.join("src/svc.ts");
+        let text = std::fs::read_to_string(&svc).unwrap();
+        let from = "return helper(id).trim(); }";
+        assert!(text.contains(from));
+        std::fs::write(
+            &svc,
+            text.replacen(from, "return helper(id).trim() + assist(id); }", 1),
+        )
+        .unwrap();
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function assist(s: string): string { return s; }\n");
+        std::fs::write(&lib, text).unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
+        let util = root.join("src/util.ts");
+        let synthetic = |kind: &str| {
+            format!(
+                "{}\nINSERT INTO nodes VALUES('{kind}:synthetic-assist','{kind}','assist','assist',\
+                 'src/util.ts','typescript',3,3,0,40,NULL,NULL,NULL,1,0,0,0,NULL,NULL,NULL,0);",
+                lib_util_fell_back_sql()
+            )
+        };
+        let lib_assist = "ts-typescript . . . src/lib/util/assist().";
+        // Run 2: util.ts mints a type alias named assist; the call still binds the function.
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched\n");
+        std::fs::write(&util, &text).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&synthetic("type_alias")),
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t == lib_assist),
+            "a type alias is no call target: {:?}",
+            calls_from(&calls, GET)
+        );
+        // Run 3: util.ts mints a function named assist in its place.
+        text.push_str("// touched again\n");
+        std::fs::write(&util, &text).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&synthetic("function")));
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get = calls_from(&calls, GET);
+        assert!(
+            !from_get.iter().any(|(_, t, _)| t.ends_with("/assist().")),
+            "two functions named assist: the call binds neither, as on a full index: {from_get:?}"
+        );
+    }
+
+    /// #668 codex-check v2: a type alias and a class get the same minted id (both take the
+    /// Type suffix), but resolvers admit them differently. A definition minted again under the
+    /// same id as another kind is a gained candidate, so its name's bound callers are
+    /// re-extracted.
+    #[test]
+    fn a_same_id_re_mint_of_another_kind_re_extracts_the_names_callers_668() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = root.join("src/svc.ts");
+        let text = std::fs::read_to_string(&svc).unwrap();
+        let from = "return helper(id).trim(); }";
+        assert!(text.contains(from));
+        std::fs::write(
+            &svc,
+            text.replacen(from, "return helper(id).trim() + assist(id); }", 1),
+        )
+        .unwrap();
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function assist(s: string): string { return s; }\n");
+        std::fs::write(&lib, text).unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
+        let util = root.join("src/util.ts");
+        let synthetic = |kind: &str| {
+            format!(
+                "{}\nINSERT INTO nodes VALUES('{kind}:synthetic-assist','{kind}','assist','assist',\
+                 'src/util.ts','typescript',3,3,0,40,NULL,NULL,NULL,1,0,0,0,NULL,NULL,NULL,0);",
+                lib_util_fell_back_sql()
+            )
+        };
+        let minted = |store: &SqliteStore| -> Vec<(String, NodeKind)> {
+            store
+                .all_nodes()
+                .unwrap()
+                .into_iter()
+                .filter(|n| {
+                    n.location.file == "src/util.ts"
+                        && n.name == "assist"
+                        && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+                })
+                .map(|n| (n.symbol.0, n.kind))
+                .collect()
+        };
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched\n");
+        std::fs::write(&util, &text).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&synthetic("type_alias")),
+        );
+        let alias = minted(&store);
+        assert_eq!(alias.len(), 1, "{alias:?}");
+        text.push_str("// touched again\n");
+        std::fs::write(&util, &text).unwrap();
+        crate::TEST_REBIND_FILES.with(|count| count.set(0));
+        index(&mut store, &root, Some(&cfg), Some(&synthetic("class")));
+        let class = minted(&store);
+        assert_eq!(class.len(), 1, "{class:?}");
+        assert_eq!(class[0].0, alias[0].0, "one minted id for both kinds");
+        assert_ne!(class[0].1, alias[0].1);
+        assert!(
+            crate::TEST_REBIND_FILES.with(|count| count.get()) > 0,
+            "the kind changed under one id: assist's bound callers are re-extracted"
+        );
+    }
+
+    /// #668 codex-check v3 (DES-668, option A): a file saved during the run keeps estate's
+    /// pipeline (estate#657), so the definition it minted last run is not minted again. Its
+    /// name lost a candidate: the call parked between two `assist`s binds the one left, as a
+    /// full index of that state does.
+    #[test]
+    fn a_re_mint_stopped_by_a_mid_run_save_frees_the_parked_call_668() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = root.join("src/svc.ts");
+        let text = std::fs::read_to_string(&svc).unwrap();
+        let from = "return helper(id).trim(); }";
+        assert!(text.contains(from));
+        std::fs::write(
+            &svc,
+            text.replacen(from, "return helper(id).trim() + assist(id); }", 1),
+        )
+        .unwrap();
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function assist(s: string): string { return s; }\n");
+        std::fs::write(&lib, text).unwrap();
+        let util = root.join("src/util.ts");
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched\n");
+        std::fs::write(&util, &text).unwrap();
+        let sql = format!(
+            "{}\nINSERT INTO nodes VALUES('function:synthetic-assist','function','assist','assist',\
+             'src/util.ts','typescript',3,3,0,40,NULL,'(s: string): string',NULL,1,0,0,0,NULL,NULL,\
+             NULL,0);",
+            lib_util_fell_back_sql()
+        );
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        let lib_assist = "ts-typescript . . . src/lib/util/assist().";
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            !calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t.ends_with("/assist().")),
+            "two assists: the call parks"
+        );
+        // Run 2 edits util.ts, and it is saved again after the mirror read it.
+        text.push_str("// edited\n");
+        std::fs::write(&util, &text).unwrap();
+        let (path, saved) = (util.clone(), format!("{text}// saved mid-run\n"));
+        TEST_MIRROR_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move |now: &str| {
+                if now == "after-mirror" {
+                    std::fs::write(&path, &saved).unwrap();
+                }
+            }))
+        });
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        TEST_MIRROR_HOOK.with(|h| *h.borrow_mut() = None);
+        assert!(
+            !store.all_nodes().unwrap().iter().any(|n| {
+                n.location.file == "src/util.ts"
+                    && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+            }),
+            "util.ts changed during the run: nothing is minted in it"
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t == lib_assist),
+            "one assist left: the parked call binds it: {:?}",
+            calls_from(&calls, GET)
+        );
     }
 
     #[test]
