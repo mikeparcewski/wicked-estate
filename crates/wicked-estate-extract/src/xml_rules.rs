@@ -116,23 +116,51 @@ impl SourceId {
     }
 }
 
-/// FNV-1a over the element's bytes as written: a stable digest (no new dependency, and the same
-/// on every platform and toolchain, unlike `DefaultHasher`). Whitespace counts, so two literals
-/// that differ only in spacing stay apart (#679). Line ends are normalized first, as XML 1.0
-/// §2.11 requires of a parser (`\r\n` and a lone `\r` read as `\n`), so a CRLF checkout of a
-/// file gets the same ids as an LF one.
-fn content_digest(text: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut bytes = text.bytes().peekable();
-    while let Some(mut b) = bytes.next() {
-        if b == b'\r' {
-            if bytes.peek() == Some(&b'\n') {
-                bytes.next();
-            }
-            b = b'\n';
+/// FNV-1a over the element's parsed content: a stable digest (no new dependency, and the same on
+/// every platform and toolchain, unlike `DefaultHasher`). It hashes the element's structure (tag
+/// names, attributes and text, each with a marker byte), so:
+/// - whitespace inside a value counts, and two literals that differ only in spacing stay apart
+///   (#679);
+/// - whitespace-only text between elements (indentation) is skipped, so re-indenting a file keeps
+///   every id (ADR-002: a reformat leaves identity unchanged);
+/// - line ends arrive normalized by the parser (XML 1.0 §2.11), so a CRLF checkout keeps every id.
+///
+/// The walk uses an explicit stack, so a deeply nested element cannot overflow the call stack.
+fn content_digest(el: roxmltree::Node<'_, '_>) -> u64 {
+    fn feed(h: &mut u64, bytes: &[u8]) {
+        for b in bytes {
+            *h ^= u64::from(*b);
+            *h = h.wrapping_mul(0x0100_0000_01b3);
         }
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    // (node, true) closes an element that was opened earlier.
+    let mut stack = vec![(el, false)];
+    while let Some((n, close)) = stack.pop() {
+        if close {
+            feed(&mut h, &[5]);
+        } else if n.is_element() {
+            feed(&mut h, &[1]);
+            feed(&mut h, n.tag_name().name().as_bytes());
+            for a in n.attributes() {
+                feed(&mut h, &[2]);
+                feed(&mut h, a.name().as_bytes());
+                feed(&mut h, &[3]);
+                feed(&mut h, a.value().as_bytes());
+            }
+            stack.push((n, true));
+            let mut child = n.last_child();
+            while let Some(c) = child {
+                stack.push((c, false));
+                child = c.prev_sibling();
+            }
+        } else if n.is_text() {
+            let text = n.text().unwrap_or("");
+            if !text.trim().is_empty() {
+                feed(&mut h, &[4]);
+                feed(&mut h, text.as_bytes());
+            }
+        }
     }
     h
 }
@@ -258,8 +286,7 @@ fn element_ids(
         } in keyed
         {
             let key = if anchored && !own && uses[&key] > 1 {
-                let text = &doc.input_text()[n.range()];
-                format!("{key}~{:016x}", content_digest(text))
+                format!("{key}~{:016x}", content_digest(n))
             } else {
                 key
             };

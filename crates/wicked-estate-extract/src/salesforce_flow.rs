@@ -205,8 +205,8 @@ mod tests {
         assert_ne!(ids[0], ids[1]);
     }
 
-    /// #679: the digest keeps whitespace but reads line ends as XML does, so a CRLF (or CR)
-    /// checkout of the same file keeps every id.
+    /// #679: the digest keeps whitespace inside a value but reads line ends as XML does, so a
+    /// CRLF (or CR) checkout of the same file keeps every id.
     #[test]
     fn a_crlf_checkout_keeps_the_ids_679() {
         let lf = flow_ids(&[("Amount", "A\nB"), ("Amount", "A B")]);
