@@ -455,8 +455,58 @@ fn schema_objects_present(conn: &Connection) -> Result<()> {
 /// awaits a writer's #420 rebuild, which a read-only check never runs.
 const FTS_NOT_KEYED: &str = "the FTS rows are not all keyed by their node's sid";
 
+/// Meta key (wicked-estate#601): the version of the last build that opened the graph for writing.
+/// A writer open creates every object its build's schema has, so while a read-only reader finds
+/// one missing, this names a build that lacks it (or none, for a graph only older builds wrote).
+const WRITER_VERSION_KEY: &str = "writer_version";
+
+/// This build's store version, as writer opens record it and refusals name it.
+const STORE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Record this build as the graph's last writer (#601). Writer opens only; no write when it
+/// already is.
+fn record_writer_version(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta(k, v) VALUES(?1, ?2) \
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v WHERE v <> excluded.v",
+        params![WRITER_VERSION_KEY, STORE_VERSION],
+    )
+    .map(|_| ())
+    .map_err(st)
+}
+
+/// Which build last opened the graph for writing and which is reading it, for a refusal (#601).
+/// The recorded value comes from the graph file, so only a version-shaped one is quoted.
+fn writer_and_reader(conn: &Connection) -> String {
+    let recorded: Option<String> = conn
+        .query_row(
+            "SELECT v FROM meta WHERE k = ?1",
+            params![WRITER_VERSION_KEY],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let writer = match recorded {
+        Some(v)
+            if !v.is_empty()
+                && v.len() <= 64
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+')) =>
+        {
+            format!("wicked-estate-store {v}")
+        }
+        Some(_) => "a build whose recorded version is not a version".to_string(),
+        None => "a build that records no version".to_string(),
+    };
+    format!(
+        "last opened for writing by {writer}; this reader is wicked-estate-store {STORE_VERSION}"
+    )
+}
+
 /// The read-only currency check behind [`SqliteStore::open_readonly_current`]. Its error names
-/// what is missing: a schema object, or the columns this build's schema has that the graph lacks.
+/// what is missing: a schema object, or the columns this build's schema has that the graph lacks,
+/// and which builds last wrote and are reading the graph.
 fn check_current(conn: &Connection) -> Result<()> {
     schema_objects_present(conn)
         .and_then(|()| migrate_schema(conn))
@@ -470,13 +520,15 @@ fn check_current(conn: &Connection) -> Result<()> {
         })
         .map_err(|e| {
             let missing = missing_columns(conn);
+            let builds = writer_and_reader(conn);
             if missing.is_empty() {
                 wicked_estate_core::Error::Invalid(format!(
-                    "the graph's schema predates this build and needs a writer's migration ({e})"
+                    "the graph's schema predates this build and needs a writer's migration ({e}; \
+                     {builds})"
                 ))
             } else {
                 wicked_estate_core::Error::Invalid(format!(
-                    "the graph has no column {}: its schema predates this build",
+                    "the graph has no column {}: its schema predates this build ({builds})",
                     missing.join(", ")
                 ))
             }
@@ -1534,6 +1586,7 @@ impl SqliteStore {
         stamp_fresh_redaction_epoch(&conn)?;
         migrate_fts_rowids(&conn)?;
         drop_legacy_fts_guard(&conn)?;
+        record_writer_version(&conn)?;
         // Read history_enabled flag from meta (absent → OFF, the new default).
         // Old databases that never set this key default to OFF (no history) rather than ON.
         // Callers that want history must pass `--history` (or call set_history_enabled(true)).
