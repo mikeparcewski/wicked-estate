@@ -714,6 +714,17 @@ fn config_masks(
         for t in c.rules.trust.iter().filter(|t| t.grammar == grammar) {
             let by_file = t.files.is_empty() || name_matches(&t.files, name);
             let by_detect = t.detect.iter().all(|d| match d.split_once('=') {
+                // `path=*` is a non-empty string (not a number, boolean, null or container).
+                Some((k, "*")) => {
+                    let kp = key_path(k);
+                    w.leaves.iter().any(|l| {
+                        l.doc == doc
+                            && l.path.iter().map(String::as_str).eq(kp.iter().copied())
+                            && !l.numeric
+                            && !l.boolean
+                            && l.end > l.start
+                    })
+                }
                 // `path=value` is exact; `path=a|b` is one of the alternatives, ASCII case
                 // ignored as in a row's `values` (estate#670).
                 Some((k, v)) => scalar_at(doc, &key_path(k)).is_some_and(|s| {
