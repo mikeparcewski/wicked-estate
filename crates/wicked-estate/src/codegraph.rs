@@ -3344,6 +3344,74 @@ mod tests {
         );
     }
 
+    /// #668 codex-check: a definition minted again under the same name but as another kind is
+    /// a gained candidate for callers that filter by kind. A type alias `assist` is no call
+    /// target, so the call binds the fallen-back file's function; when the next run mints a
+    /// function `assist` there instead, the call has two callable candidates and parks.
+    #[test]
+    fn a_minted_homonym_that_changes_kind_unbinds_the_call_668() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = root.join("src/svc.ts");
+        let text = std::fs::read_to_string(&svc).unwrap();
+        let from = "return helper(id).trim(); }";
+        assert!(text.contains(from));
+        std::fs::write(
+            &svc,
+            text.replacen(from, "return helper(id).trim() + assist(id); }", 1),
+        )
+        .unwrap();
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function assist(s: string): string { return s; }\n");
+        std::fs::write(&lib, text).unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
+        let util = root.join("src/util.ts");
+        let synthetic = |kind: &str| {
+            format!(
+                "{}\nINSERT INTO nodes VALUES('{kind}:synthetic-assist','{kind}','assist','assist',\
+                 'src/util.ts','typescript',3,3,0,40,NULL,NULL,NULL,1,0,0,0,NULL,NULL,NULL,0);",
+                lib_util_fell_back_sql()
+            )
+        };
+        let lib_assist = "ts-typescript . . . src/lib/util/assist().";
+        // Run 2: util.ts mints a type alias named assist; the call still binds the function.
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched\n");
+        std::fs::write(&util, &text).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&synthetic("type_alias")),
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t == lib_assist),
+            "a type alias is no call target: {:?}",
+            calls_from(&calls, GET)
+        );
+        // Run 3: util.ts mints a function named assist in its place.
+        text.push_str("// touched again\n");
+        std::fs::write(&util, &text).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&synthetic("function")));
+        let calls = edges(&store, EdgeKind::Calls);
+        let from_get = calls_from(&calls, GET);
+        assert!(
+            !from_get.iter().any(|(_, t, _)| t.ends_with("/assist().")),
+            "two functions named assist: the call binds neither, as on a full index: {from_get:?}"
+        );
+    }
+
     #[test]
     fn a_fall_through_call_named_like_a_codegraph_definition_stays_ambiguous_594() {
         // estate#594 (N1, W12): the same fall-back, with the call's only evidence the tsconfig
