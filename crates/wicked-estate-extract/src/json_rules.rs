@@ -805,10 +805,10 @@ mod tests {
             .join("\n")
     }
 
-    /// estate#667 S2: an Azure Policy definition keeps, after redaction, what the extractor
-    /// reads as governance logic: its name, description, the condition's field paths and the
-    /// effect. Every other value stays masked: condition values, policy parameters, and the
-    /// deployment parameters of a deployIfNotExists effect.
+    /// estate#667 S2: an Azure Policy definition keeps, after redaction, its name, its
+    /// description and its effect (one of the documented effects). Every other value stays
+    /// masked, including the condition's field selectors, which can be expressions or sit in
+    /// literal operands (#670 round 1): the condition keeps its structure only.
     #[test]
     fn azure_policy_keeps_its_names_after_redaction_and_masks_the_rest_667() {
         let text = r#"{
@@ -845,8 +845,19 @@ mod tests {
         assert!(names.contains(&"deployIfNotExists"), "{names:?}");
         let all = texts(&ex);
         assert!(all.contains("Sends vault logs to the workspace."), "{all}");
-        assert!(all.contains(r#""field":"type""#), "{all}");
-        assert!(all.contains(r#""field":"location""#), "{all}");
+        let condition = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Condition)
+            .and_then(|n| n.signature.as_deref())
+            .expect("a condition");
+        let condition: Value = serde_json::from_str(condition).expect("the signature is JSON");
+        let terms = condition["allOf"].as_array().expect("allOf survives");
+        assert_eq!(terms.len(), 2, "{condition}");
+        assert!(
+            terms.iter().all(|t| t.get("field").is_some()),
+            "{condition}"
+        );
         for secret in [
             "cond-value-k3v",
             "cond-list-m2p",
@@ -867,7 +878,8 @@ mod tests {
     }
 
     /// estate#667 S2: an AWS Config rule keeps its name, description, source and resource
-    /// types after redaction; its InputParameters stay masked.
+    /// types after redaction; its InputParameters stay masked, and a custom rule's source (a
+    /// Lambda ARN) does too (#670 round 1).
     #[test]
     fn aws_config_rule_keeps_its_names_after_redaction_and_masks_inputs_667() {
         let text = r#"{
@@ -889,6 +901,60 @@ mod tests {
         }
         let masked = crate::redact::redact_source("config/restricted_ssh.json", text);
         assert!(!masked.contains("input-param-r5t"));
+        let custom = r#"{
+  "ConfigRuleName": "tagged-buckets",
+  "Source": {
+    "Owner": "CUSTOM_LAMBDA",
+    "SourceIdentifier": "arn:aws:lambda:us-east-1:000000000000:function:lambda-name-h4j"
+  }
+}"#;
+        let masked = crate::redact::redact_source("config/tagged.json", custom);
+        assert!(masked.contains("tagged-buckets"), "{masked}");
+        assert!(masked.contains("CUSTOM_LAMBDA"), "{masked}");
+        assert!(!masked.contains("lambda-name-h4j"), "{masked}");
+    }
+
+    /// #670 round 1 (codex P1s): what the trust rules keep is pinned to governance documents
+    /// and to values that cannot carry customer data. Each value below stays masked.
+    #[test]
+    fn json_rules_trust_keeps_no_customer_value_670() {
+        let cases = [
+            // A `field` member inside a literal count operand is data, not a selector.
+            (
+                "policies/count.json",
+                r#"{"properties": {"displayName": "Count", "policyRule": {
+  "if": {"count": {"value": [{"field": "secret-count-a1"}], "name": "e",
+         "where": {"field": "name", "equals": "x"}}, "greater": 0},
+  "then": {"effect": "deny"}}}}"#,
+                "secret-count-a1",
+            ),
+            // An effect expression can embed a customer value.
+            (
+                "policies/expr.json",
+                r#"{"properties": {"displayName": "Expr", "policyRule": {
+  "if": {"field": "type", "equals": "x"},
+  "then": {"effect": "[if(equals(parameters('t'), 'secret-expr-b2'), 'deny', 'audit')]"}}}}"#,
+                "secret-expr-b2",
+            ),
+            // Key presence alone is no governance document.
+            (
+                "data/aws.json",
+                r#"{"ConfigRuleName": {}, "Description": "secret-desc-c3"}"#,
+                "secret-desc-c3",
+            ),
+            (
+                "data/azure.json",
+                r#"{"properties": {"mode": "secret-mode-d4", "policyRule": {"if": false, "then": false}}}"#,
+                "secret-mode-d4",
+            ),
+        ];
+        for (path, text, secret) in cases {
+            let masked = crate::redact::redact_source(path, text);
+            assert!(
+                !masked.contains(secret),
+                "{path}: {secret} stays masked: {masked}"
+            );
+        }
     }
 
     /// estate#667 S2: a JSON Schema that declares a `policyRule` property is not an Azure
