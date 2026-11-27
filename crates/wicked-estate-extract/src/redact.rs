@@ -584,9 +584,13 @@ fn kv_deny_masks(text: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
 /// (to its `?>`), a DOCTYPE (with its internal subset), another declaration, or a tag (2: `/` on
 /// a close tag, 3: the name, 4: the attributes, 5: `/` on an empty-element tag). Names are any
 /// run of non-delimiters, so a Unicode name is one too. Text is what lies between two tokens.
+///
+/// Linear by construction: an unterminated comment, CDATA, PI or DOCTYPE runs to the end of the
+/// text (one scan, never one per occurrence), and nothing else crosses a `<` (XML allows none in
+/// a tag or attribute value), so a broken tag cannot swallow the element after it.
 static XML_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?s)<!--.*?-->|<!\[CDATA\[(.*?)\]\]>|<\?.*?\?>|<!DOCTYPE[^\[>]*(?:\[.*?\])?[^>]*>|<![^>]*>|<(/?)([^\s/>"'=<!?][^\s/>"'=<]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(/?)>"#,
+        r#"(?s)<!--.*?(?:-->|\z)|<!\[CDATA\[(.*?)(?:\]\]>|\z)|<\?.*?(?:\?>|\z)|<!DOCTYPE[^\[<>]*(?:\[.*?(?:\]|\z))?[^<>]*>?|<![^<>]*>|<(/?)([^\s/>"'=<!?][^\s/>"'=<]*)((?:[^<>"']|"[^"<]*"|'[^'<]*')*?)(/?)>"#,
     )
     .expect("xml token compiles")
 });
