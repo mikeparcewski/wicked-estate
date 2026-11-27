@@ -215,6 +215,15 @@ mod tests {
         assert_eq!(flow_ids(&[("Amount", "A\rB"), ("Amount", "A B")]), lf);
     }
 
+    /// #684 R-B: an empty literal and a one-space literal are two values, so two conditions
+    /// that differ only there stay two nodes.
+    #[test]
+    fn an_empty_and_a_blank_literal_stay_two_nodes_684() {
+        let ids = flow_ids(&[("Amount", ""), ("Amount", " ")]);
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert_ne!(ids[0], ids[1]);
+    }
+
     /// #684 round 1 (codex P2): re-indenting the file keeps every id (ADR-002), while the
     /// literals still tell the two conditions apart.
     #[test]

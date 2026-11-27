@@ -349,6 +349,34 @@ mod tests {
         assert!(named(&got, "Rate")[0].ends_with("input#in1:"), "{got:?}");
     }
 
+    /// #684 R-B: attribute order carries no meaning in XML, so moving an attribute of two
+    /// id-less, same-label inputs keeps both ids.
+    #[test]
+    fn reordering_attributes_keeps_the_ids_684() {
+        let table = |one: &str, two: &str| {
+            ids(&model(&format!(
+                "  <decision name=\"A\" id=\"a\">\n    <decisionTable id=\"ta\">\n      \
+                 {one}<inputExpression typeRef=\"number\"/></input>\n      \
+                 {two}<inputExpression typeRef=\"string\"/></input>\n    \
+                 </decisionTable>\n  </decision>\n"
+            )))
+        };
+        let before = table(
+            "<input label=\"Age\" width=\"1\">",
+            "<input label=\"Age\" width=\"2\">",
+        );
+        let after = table(
+            "<input width=\"1\" label=\"Age\">",
+            "<input width=\"2\" label=\"Age\">",
+        );
+        let mut want = named(&before, "Age");
+        want.sort();
+        assert_eq!(want.len(), 2, "{before:?}");
+        let mut got = named(&after, "Age");
+        got.sort();
+        assert_eq!(got, want);
+    }
+
     /// DES-675 (d): a DMN input without an `id` is keyed under the nearest element that has
     /// one, so same-labelled inputs of two tables stay two nodes.
     #[test]
