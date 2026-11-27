@@ -125,6 +125,8 @@ impl SourceId {
 /// - whitespace-only text beside child elements is indentation and is skipped, so re-indenting a
 ///   file keeps every id (ADR-002: a reformat leaves identity unchanged);
 /// - attributes are hashed in sorted order, because XML gives their order no meaning;
+/// - element and attribute names are hashed with their namespace URI, so `camunda:x` and `other:x`
+///   differ;
 /// - line ends arrive normalized by the parser (XML 1.0 §2.11), so a CRLF checkout keeps every id.
 ///
 /// The walk uses an explicit stack, so a deeply nested element cannot overflow the call stack.
@@ -143,15 +145,21 @@ fn content_digest(el: roxmltree::Node<'_, '_>) -> u64 {
         if close {
             feed(&mut h, &[5]);
         } else if n.is_element() {
+            // A name is its namespace URI plus its local name: `camunda:x` and `other:x` differ,
+            // while rebinding a prefix to the same URI changes nothing.
             feed(&mut h, &[1]);
+            feed(&mut h, n.tag_name().namespace().unwrap_or("").as_bytes());
+            feed(&mut h, &[6]);
             feed(&mut h, n.tag_name().name().as_bytes());
             let mut attrs: Vec<_> = n
                 .attributes()
                 .map(|a| (a.namespace(), a.name(), a.value()))
                 .collect();
             attrs.sort_unstable();
-            for (_, name, value) in attrs {
+            for (namespace, name, value) in attrs {
                 feed(&mut h, &[2]);
+                feed(&mut h, namespace.unwrap_or("").as_bytes());
+                feed(&mut h, &[6]);
                 feed(&mut h, name.as_bytes());
                 feed(&mut h, &[3]);
                 feed(&mut h, value.as_bytes());
