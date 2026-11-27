@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.37.1] — 2026-11-27
+
+Release on the train-18 cut 62960bea, carrying 5 PRs since 0.37.0: #663, #668, #669, #670, #680. The entries were written from each PR's changelog entry.
+
+### Fixed
+
+- NOT-INDEXED names the feature (`xml-rules`) or the open issue (#667) a rules format needs, and the README lists what the release binary indexes (#620, #663).
+- NOT-INDEXED for the mainframe formats without an extractor points at the open #662 (#623, #663).
+- An incremental `index --codegraph` run that mints a definition sharing a name with one an unchanged caller is bound to re-binds that caller, as a full index does (#660, #668).
+- IBM ODM IRL rules inside comments are no longer indexed as live rules, and braces inside strings no longer cut a rule's conditions or actions (#665, #669).
+- A parenthesis, `;` or `=>` inside a CLIPS string no longer hides later rules or turns conditions into actions (#664, #669).
+- AWS Config rules (owner AWS, CUSTOM_LAMBDA or CUSTOM_POLICY) and Azure Policy definitions (a documented effect, or `[parameters('effect')]`) keep their names, descriptions and effects after redaction. Parameters, condition values and deployment details stay masked; other effect parameter names stay masked as before (#674) (#667, #670).
+- A JSON Schema that declares a `policyRule` property is no longer read as an Azure Policy, and `.JSON` rule files are read (#667, #670).
+- A config file with a duplicated key (for example a JSON AWS Config rule or Azure Policy definition with `ConfigRuleName` twice) is no longer trusted as a governance document. Its values get the default masking instead of that document type's trust (#676, #680).
+
 ## [0.37.0] — 2026-11-27
 
 Minor release on the train-17 cut 1235c5ef, carrying 2 PRs since 0.36.2: #584 and #659. The minor bump is for #584, a new opt-in index mode. The entries were written from each PR's changelog entry (the PR title and summary where it had none).

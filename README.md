@@ -191,6 +191,8 @@ wicked-estate watch ./my-project --db graph.db
   - Camunda DMN (`.dmn`), Progress Corticon (`.ers`/`.erf`/`.ecore`) and Salesforce Flow (`*.flow-meta.xml`), through the `xml-rules` feature, which is on by default;
   - AWS Config Rules and Azure Policy definitions (`.json`, recognised by their keys; any other JSON stays plain JSON).
 
+  DMN nodes and Salesforce Flow decisions, outcomes and actions take their ids from the format's own ids (DMN `id`, Flow API `<name>`), and elements without one (such as Flow conditions) are keyed under the nearest element that has one ([#675](https://github.com/mikeparcewski/wicked-estate/issues/675)). A store built with `--features xml-rules` by 0.37 or earlier therefore drops its requirement annotations on those nodes once, on the first re-index, and prints `SEMANTICS-DROPPED`; re-annotate them after upgrading.
+
   A file a rules extractor cannot parse keeps its file node, with no rules. Excel/XLSX decision tables need the opt-in `excel-rules` feature and a sheet config through the library (`ExcelRulesExtractor`); `index` reads an `.xlsx` as a document. NodeKind::{Rule,RuleSet,Condition,Action,Fact} + EdgeKind::{Governs,Evaluates,Produces,InvokedBy}. `RulesInventory` MCP tool lists engines + calling code. `RulesBridgeResolver` connects code call sites to real RuleSet nodes.
 - **Hybrid + semantic retrieval** — graph + FTS5 core, embeddings an optional sidecar fused via RRF.
   Three embedder tiers: lexical (default) → model2vec (static, light) → fastembed (ONNX/BGE).

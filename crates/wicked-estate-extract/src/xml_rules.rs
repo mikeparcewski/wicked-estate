@@ -29,15 +29,25 @@
 //! ```
 //!
 //! # Node identity
-//! `Symbol::synthetic("xml-rules", "<file>::<element_path>::<name>")` — stable as long as the
-//! element name attribute does not change (ADR-002).
+//! Extractors built `with_id_attr`/`with_id_child` key elements on the format's own identifier
+//! (a DMN `id`, a Salesforce Flow API `<name>`): `Symbol::synthetic("xml-rules",
+//! "<file>::<tag>#<id>")`. It survives renames, moves and inserted same-named siblings
+//! (ADR-002). An identifier used twice in one file identifies neither element.
+//!
+//! An element without one is keyed under its nearest keyed ancestor:
+//! `"<anchor key>/<unmapped tags>/<tag>:<name>"`. Two such elements with one key (two Flow
+//! conditions on one field under one rule) each get `~<digest of the element's text>`, never a
+//! position, so an inserted sibling moves no id; byte-identical elements are one node.
+//!
+//! With no keyed ancestor at all (a format without ids, such as GDST), the id is the 0.37 form,
+//! `"<file>::<ancestor tags>/<tag>::<name>"`, where same-named elements are one node (#675).
 
 #![cfg(feature = "xml-rules")]
 
 use serde::Deserialize;
 use wicked_estate_core::{
     Edge, EdgeKind, Error, Extraction, Extractor, Language, Location, Node, NodeKind,
-    ResolutionTier, Result, SourceFile, Span, Symbol,
+    ResolutionTier, Result, SourceFile, Span, Symbol, SymbolId,
 };
 
 // ── Config structs (TOML-deserializable) ─────────────────────────────────────
@@ -79,6 +89,186 @@ pub struct NodeMapping {
     /// content as the name.
     #[serde(default)]
     pub name_text: bool,
+}
+
+/// Where an element carries the format's own stable identifier (#675).
+#[derive(Debug, Clone)]
+enum SourceId {
+    /// An attribute (DMN `id`).
+    Attr(String),
+    /// A child element's text (Salesforce Flow `<name>`).
+    Child(String),
+}
+
+impl SourceId {
+    /// The identifier of `node`, trimmed, if it has a non-empty one.
+    fn read(&self, node: roxmltree::Node<'_, '_>) -> Option<String> {
+        let raw = match self {
+            SourceId::Attr(attr) => node.attribute(attr.as_str()),
+            SourceId::Child(child) => node
+                .children()
+                .find(|c| c.is_element() && c.tag_name().name() == child.as_str())
+                .and_then(|c| c.text()),
+        };
+        raw.map(str::trim)
+            .filter(|i| !i.is_empty())
+            .map(str::to_string)
+    }
+}
+
+/// FNV-1a over `text` with whitespace runs collapsed: a stable digest (no new dependency, and
+/// the same on every platform and toolchain, unlike `DefaultHasher`).
+fn content_digest(text: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for (i, word) in text.split_whitespace().enumerate() {
+        if i > 0 {
+            h ^= u64::from(b' ');
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        for b in word.bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
+}
+
+/// One mapped element's provisional key in `element_ids`.
+struct Keyed<'a, 'input> {
+    node: roxmltree::Node<'a, 'input>,
+    name: String,
+    key: String,
+    /// Has a source id, or sits under an element that has one.
+    anchored: bool,
+    /// The key is the element's own source id.
+    own: bool,
+}
+
+/// The display name and id of every mapped element with a name (see "Node identity" above).
+/// The node and edge passes both read it, so they agree. Keys depend only on ancestors, so
+/// they are computed one depth at a time, outermost first.
+fn element_ids(
+    doc: &roxmltree::Document<'_>,
+    file: &str,
+    node_map: &std::collections::HashMap<&str, &NodeMapping>,
+    source_ids: &std::collections::HashMap<String, SourceId>,
+) -> std::collections::HashMap<roxmltree::NodeId, (String, SymbolId)> {
+    use std::collections::{BTreeMap, HashMap};
+    let mapped: Vec<roxmltree::Node<'_, '_>> = doc
+        .descendants()
+        .filter(|n| n.is_element() && node_map.contains_key(n.tag_name().name()))
+        .collect();
+    let own_key = |n: roxmltree::Node<'_, '_>| {
+        let tag = n.tag_name().name();
+        source_ids
+            .get(tag)
+            .and_then(|s| s.read(n))
+            .map(|id| format!("{tag}#{id}"))
+    };
+    // A source id used twice in the file identifies neither element: both take the fallback, so
+    // inserting a duplicate never hands an existing element's id to the newcomer.
+    let mut uses_of_own: HashMap<String, usize> = HashMap::new();
+    for n in &mapped {
+        if let Some(k) = own_key(*n) {
+            *uses_of_own.entry(k).or_default() += 1;
+        }
+    }
+    let mut by_depth: BTreeMap<usize, Vec<roxmltree::Node<'_, '_>>> = BTreeMap::new();
+    for n in mapped {
+        by_depth.entry(n.ancestors().count()).or_default().push(n);
+    }
+    // Final keys of anchored elements (those with a source id, or under one).
+    let mut anchors: HashMap<roxmltree::NodeId, String> = HashMap::new();
+    let mut ids = HashMap::new();
+    for level in by_depth.into_values() {
+        let mut keyed: Vec<Keyed<'_, '_>> = Vec::new();
+        for n in level {
+            let tag = n.tag_name().name();
+            let name = resolve_name(node_map[tag], n, tag);
+            if let Some(own) = own_key(n).filter(|k| uses_of_own[k] == 1) {
+                keyed.push(Keyed {
+                    node: n,
+                    name,
+                    key: own,
+                    anchored: true,
+                    own: true,
+                });
+                continue;
+            }
+            // The nearest anchored ancestor, and the unmapped elements in between.
+            let mut between: Vec<&str> = Vec::new();
+            let mut anchor = None;
+            for a in n.ancestors().skip(1).filter(|a| a.is_element()) {
+                if let Some(k) = anchors.get(&a.id()) {
+                    anchor = Some(k.clone());
+                    break;
+                }
+                between.push(a.tag_name().name());
+            }
+            match anchor {
+                Some(anchor) => {
+                    between.reverse();
+                    let mut parts = vec![anchor];
+                    parts.extend(between.iter().map(|t| t.to_string()));
+                    parts.push(format!("{tag}:{name}"));
+                    keyed.push(Keyed {
+                        node: n,
+                        name,
+                        key: parts.join("/"),
+                        anchored: true,
+                        own: false,
+                    });
+                }
+                None => {
+                    // No ids anywhere above (GDST): the 0.37 form.
+                    let mut tags: Vec<&str> = n
+                        .ancestors()
+                        .filter(|a| a.is_element())
+                        .map(|a| a.tag_name().name())
+                        .collect();
+                    tags.reverse();
+                    tags.push(tag);
+                    let key = format!("{}::{name}", tags.join("/"));
+                    keyed.push(Keyed {
+                        node: n,
+                        name,
+                        key,
+                        anchored: false,
+                        own: false,
+                    });
+                }
+            }
+        }
+        // Two anchored elements with one key (two conditions on one field under one rule) are
+        // told apart by their content, never by position. Identical content is one node.
+        let mut uses: HashMap<String, usize> = HashMap::new();
+        for k in keyed.iter().filter(|k| k.anchored && !k.own) {
+            *uses.entry(k.key.clone()).or_default() += 1;
+        }
+        for Keyed {
+            node: n,
+            name,
+            key,
+            anchored,
+            own,
+        } in keyed
+        {
+            let key = if anchored && !own && uses[&key] > 1 {
+                let text = &doc.input_text()[n.range()];
+                format!("{key}~{:016x}", content_digest(text))
+            } else {
+                key
+            };
+            if anchored {
+                anchors.insert(n.id(), key.clone());
+            }
+            if !name.is_empty() {
+                let symbol = Symbol::synthetic("xml-rules", format!("{file}::{key}")).id();
+                ids.insert(n.id(), (name, symbol));
+            }
+        }
+    }
+    ids
 }
 
 /// An edge emitted whenever `child_element` appears as a direct child of `parent_element`.
@@ -142,6 +332,8 @@ pub struct XmlRulesExtractor {
     /// and surfaced by `extract` the moment that mapping would emit, instead of minting a tag no
     /// built-in query matches.
     edge_kinds: Vec<std::result::Result<EdgeKind, String>>,
+    /// Elements whose node id is the format's own identifier (`with_id_attr`/`with_id_child`).
+    source_ids: std::collections::HashMap<String, SourceId>,
 }
 
 impl XmlRulesExtractor {
@@ -158,7 +350,27 @@ impl XmlRulesExtractor {
                 })
             })
             .collect();
-        Self { config, edge_kinds }
+        Self {
+            config,
+            edge_kinds,
+            source_ids: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Key `element`'s node id on its `attr` attribute, the format's own stable identifier (DMN
+    /// `id`). See "Node identity" above.
+    pub fn with_id_attr(mut self, element: &str, attr: &str) -> Self {
+        self.source_ids
+            .insert(element.to_string(), SourceId::Attr(attr.to_string()));
+        self
+    }
+
+    /// Key `element`'s node id on the text of its `child` element, the format's own stable
+    /// identifier (Salesforce Flow `<name>`). See "Node identity" above.
+    pub fn with_id_child(mut self, element: &str, child: &str) -> Self {
+        self.source_ids
+            .insert(element.to_string(), SourceId::Child(child.to_string()));
+        self
     }
 
     /// Parse a TOML string into an `XmlRulesExtractor` directly.
@@ -194,121 +406,72 @@ impl Extractor for XmlRulesExtractor {
             .map(|m| (m.element.as_str(), m))
             .collect();
 
-        // Walk all elements in document order, emitting nodes for mapped elements.
+        let ids = element_ids(&doc, &file.path, &node_map, &self.source_ids);
+
+        // Walk all elements in document order, emitting nodes for mapped, named elements. Elements
+        // that share an id (identical content) are one node, emitted once.
+        let mut emitted = std::collections::HashSet::new();
         for node in doc.descendants() {
-            if !node.is_element() {
-                continue;
-            }
-            let elem_name = node.tag_name().name();
-            let Some(mapping) = node_map.get(elem_name) else {
+            let Some((name, symbol)) = ids.get(&node.id()) else {
                 continue;
             };
-
-            // Resolve the node's display name.
-            let name = resolve_name(mapping, node, elem_name);
-
-            if name.is_empty() {
+            if !emitted.insert(symbol.clone()) {
                 continue;
             }
-
-            // Build an element path (ancestor chain, names only) for a stable id.
-            let mut path_parts: Vec<String> = node
-                .ancestors()
-                .filter(|a| a.is_element())
-                .map(|a| a.tag_name().name().to_string())
-                .collect::<Vec<_>>();
-            path_parts.reverse();
-            path_parts.push(elem_name.to_string());
-            let element_path = path_parts.join("/");
-
-            let id_str = format!("{}::{}::{}", file.path, element_path, name);
-            let symbol = Symbol::synthetic("xml-rules", &id_str).id();
-
+            let Some(mapping) = node_map.get(node.tag_name().name()) else {
+                continue;
+            };
             let location = Location::new(&file.path, Span::ZERO);
             let kind = parse_node_kind(&mapping.emit_kind);
-
-            let graph_node = Node::new(symbol, kind, &name, lang.clone(), location);
-            nodes.push(graph_node);
+            nodes.push(Node::new(
+                symbol.clone(),
+                kind,
+                name,
+                lang.clone(),
+                location,
+            ));
         }
 
-        // Emit edges for parent→child element pairs defined in edge_mappings.
-        // We do a second pass over the document to find containment relationships.
-        for (edge_mapping, edge_kind) in self.config.edge_mappings.iter().zip(&self.edge_kinds) {
+        // Emit edges for parent→child element pairs defined in edge_mappings, each once.
+        let mut linked = std::collections::HashSet::new();
+        for (i, (edge_mapping, edge_kind)) in self
+            .config
+            .edge_mappings
+            .iter()
+            .zip(&self.edge_kinds)
+            .enumerate()
+        {
             for parent_node in doc.descendants() {
-                if !parent_node.is_element() {
+                if !parent_node.is_element()
+                    || parent_node.tag_name().name() != edge_mapping.parent_element
+                {
                     continue;
                 }
-                if parent_node.tag_name().name() != edge_mapping.parent_element {
+                let Some((_, parent_sym)) = ids.get(&parent_node.id()) else {
                     continue;
-                }
-
-                // Resolve the parent symbol id.
-                let parent_name =
-                    if let Some(nm) = node_map.get(edge_mapping.parent_element.as_str()) {
-                        let n = resolve_name(nm, parent_node, &edge_mapping.parent_element);
-                        if n.is_empty() {
-                            continue;
-                        }
-                        n
-                    } else {
-                        continue;
-                    };
-
-                // Build the parent's element path.
-                let mut pp: Vec<String> = parent_node
-                    .ancestors()
-                    .filter(|a| a.is_element())
-                    .map(|a| a.tag_name().name().to_string())
-                    .collect::<Vec<_>>();
-                pp.reverse();
-                pp.push(edge_mapping.parent_element.clone());
-                let parent_path = pp.join("/");
-                let parent_id_str = format!("{}::{}::{}", file.path, parent_path, parent_name);
-                let parent_sym = Symbol::synthetic("xml-rules", &parent_id_str).id();
-
-                // Walk direct children matching the child element.
+                };
                 for child in parent_node.children() {
-                    if !child.is_element() {
+                    if !child.is_element() || child.tag_name().name() != edge_mapping.child_element
+                    {
                         continue;
                     }
-                    if child.tag_name().name() != edge_mapping.child_element {
+                    let Some((_, child_sym)) = ids.get(&child.id()) else {
                         continue;
-                    }
-
-                    let child_nm = match node_map.get(edge_mapping.child_element.as_str()) {
-                        Some(nm) => nm,
-                        None => continue,
                     };
-
-                    let child_name = resolve_name(child_nm, child, &edge_mapping.child_element);
-                    if child_name.is_empty() {
+                    if !linked.insert((i, parent_sym.clone(), child_sym.clone())) {
                         continue;
                     }
-
-                    // Build the child's element path.
-                    let mut cp: Vec<String> = child
-                        .ancestors()
-                        .filter(|a| a.is_element())
-                        .map(|a| a.tag_name().name().to_string())
-                        .collect::<Vec<_>>();
-                    cp.reverse();
-                    cp.push(edge_mapping.child_element.clone());
-                    let child_path = cp.join("/");
-                    let child_id_str = format!("{}::{}::{}", file.path, child_path, child_name);
-                    let child_sym = Symbol::synthetic("xml-rules", &child_id_str).id();
-
                     // Edge: source = parent (dependent / governer), target = child (dependency).
                     // "A governs B" → source=A (the rule set), target=B (the rule).
                     // This matches the edge-direction invariant: source is the dependent.
-                    let edge = Edge::new(
+                    local_edges.push(Edge::new(
                         parent_sym.clone(),
-                        child_sym,
+                        child_sym.clone(),
                         // Parsed at construction (#361); a refused kind fails here, loudly.
                         edge_kind.clone().map_err(Error::Extraction)?,
                         ResolutionTier::Parsed,
                         "xml-rules",
-                    );
-                    local_edges.push(edge);
+                    ));
                 }
             }
         }
