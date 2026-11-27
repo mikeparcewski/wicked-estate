@@ -5362,6 +5362,198 @@ mod tests {
         }
     }
 
+    /// estate#620: the extract crate always builds the CLIPS, IBM ODM IRL, AWS Config and Azure
+    /// Policy extractors, but the CLI never dispatched to them: `.clp` and `.irl` were
+    /// NOT-INDEXED and the two JSON policy shapes became generic JSON. The extract crate's own
+    /// fixtures each index as rule nodes.
+    #[test]
+    fn the_cli_indexes_the_rules_formats_the_extract_crate_always_builds_620() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../wicked-estate-extract/tests/fixtures");
+        let files = [
+            "clips/sample.clp",
+            "ibm_odm/pricing_rules.irl",
+            "aws_config/restricted_ssh.json",
+            "azure_policy/require_https_storage.json",
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        for file in files {
+            let to = tmp.path().join(file);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(fixtures.join(file), &to).unwrap();
+        }
+        let mut store = MemStore::new();
+        NOT_INDEXED.with(|notes| notes.borrow_mut().clear());
+        index_path_as(&mut store, tmp.path(), None).unwrap();
+        let notes = NOT_INDEXED.with(|notes| notes.borrow().clone());
+        assert_eq!(
+            notes,
+            Vec::<(String, String)>::new(),
+            "every rules file is indexed"
+        );
+        let nodes = GraphRead::all_nodes(&store).unwrap();
+        for file in files {
+            let kinds: Vec<NodeKind> = nodes
+                .iter()
+                .filter(|n| n.location.file == file)
+                .map(|n| n.kind.clone())
+                .collect();
+            assert!(
+                kinds.contains(&NodeKind::Rule),
+                "{file} indexes as rule nodes: {kinds:?}"
+            );
+            assert!(
+                kinds.contains(&NodeKind::File),
+                "{file} has its file node: {kinds:?}"
+            );
+        }
+    }
+
+    /// #663 round 1 (codex): the JSON rules files go through the source redactor before their
+    /// extractor, which masked every JSON value it does not trust, so the AWS rule was named
+    /// `REDACTED…`. Their identity fields survive; a `.JSON` file is a rules file too; a JSON
+    /// Schema with a `policyRule` property is not an Azure Policy and keeps its generic symbols.
+    #[test]
+    fn json_rules_keep_their_names_and_a_json_schema_stays_generic_620() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../wicked-estate-extract/tests/fixtures");
+        let tmp = tempfile::tempdir().unwrap();
+        for (from, to) in [
+            ("aws_config/restricted_ssh.json", "aws/restricted_ssh.json"),
+            (
+                "aws_config/restricted_ssh.json",
+                "aws/upper/restricted_ssh.JSON",
+            ),
+            (
+                "azure_policy/require_https_storage.json",
+                "azure/require_https_storage.json",
+            ),
+        ] {
+            let to = tmp.path().join(to);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(fixtures.join(from), &to).unwrap();
+        }
+        std::fs::write(
+            tmp.path().join("schema.json"),
+            r#"{"type":"object","properties":{"policyRule":{"type":"object"}}}"#,
+        )
+        .unwrap();
+        let mut store = MemStore::new();
+        index_path_as(&mut store, tmp.path(), None).unwrap();
+        let nodes = GraphRead::all_nodes(&store).unwrap();
+        let rules_in = |file: &str| -> Vec<String> {
+            let mut names: Vec<String> = nodes
+                .iter()
+                .filter(|n| n.location.file == file && n.kind == NodeKind::Rule)
+                .map(|n| n.name.clone())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(rules_in("aws/restricted_ssh.json"), vec!["restricted-ssh"]);
+        assert_eq!(
+            rules_in("aws/upper/restricted_ssh.JSON"),
+            vec!["restricted-ssh"]
+        );
+        assert_eq!(
+            rules_in("azure/require_https_storage.json"),
+            vec!["Require HTTPS on Storage Accounts"]
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.location.file == "aws/restricted_ssh.json"
+                    && n.name == "AWS::EC2::SecurityGroup"),
+            "the rule's resource type survives"
+        );
+        let schema: Vec<&NodeKind> = nodes
+            .iter()
+            .filter(|n| n.location.file == "schema.json")
+            .map(|n| &n.kind)
+            .collect();
+        assert!(
+            !schema
+                .iter()
+                .any(|k| matches!(k, NodeKind::Rule | NodeKind::RuleSet)),
+            "a JSON Schema is not a policy: {schema:?}"
+        );
+    }
+
+    /// estate#620 (coord ruling: option a): the release binary is built with default features,
+    /// and `xml-rules` is one, so Camunda DMN and Salesforce Flow (`.flow-meta.xml`) files index
+    /// as rule nodes instead of NOT-INDEXED.
+    #[test]
+    fn the_default_build_indexes_dmn_and_salesforce_flow_620() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../wicked-estate-extract/tests/fixtures");
+        let files = [
+            "dmn/loan_decision.dmn",
+            "salesforce_flow/account_validation.flow-meta.xml",
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        for file in files {
+            let to = tmp.path().join(file);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(fixtures.join(file), &to).unwrap();
+        }
+        let mut store = MemStore::new();
+        NOT_INDEXED.with(|notes| notes.borrow_mut().clear());
+        index_path_as(&mut store, tmp.path(), None).unwrap();
+        let notes = NOT_INDEXED.with(|notes| notes.borrow().clone());
+        assert_eq!(
+            notes,
+            Vec::<(String, String)>::new(),
+            "every rules file is indexed"
+        );
+        let nodes = GraphRead::all_nodes(&store).unwrap();
+        for file in files {
+            let kinds: Vec<NodeKind> = nodes
+                .iter()
+                .filter(|n| n.location.file == file)
+                .map(|n| n.kind.clone())
+                .collect();
+            assert!(
+                kinds.contains(&NodeKind::Rule) || kinds.contains(&NodeKind::RuleSet),
+                "{file} indexes as rule nodes: {kinds:?}"
+            );
+            assert!(
+                kinds.contains(&NodeKind::File),
+                "{file} has its file node: {kinds:?}"
+            );
+        }
+    }
+
+    /// S3 PARTIAL FAILURE: one rules file the extractor rejects (malformed DMN XML) does not stop
+    /// the others, and it is reported rather than silently dropped.
+    #[test]
+    fn a_malformed_rules_file_is_reported_and_the_rest_index_667() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../wicked-estate-extract/tests/fixtures");
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            fixtures.join("clips/sample.clp"),
+            tmp.path().join("sample.clp"),
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("broken.dmn"), "<definitions><decision").unwrap();
+        let mut store = MemStore::new();
+        NOT_INDEXED.with(|notes| notes.borrow_mut().clear());
+        index_path_as(&mut store, tmp.path(), None).unwrap();
+        let nodes = GraphRead::all_nodes(&store).unwrap();
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.location.file == "sample.clp" && n.kind == NodeKind::Rule),
+            "the good rules file indexes"
+        );
+        let notes = NOT_INDEXED.with(|notes| notes.borrow().clone());
+        let broken_indexed = nodes.iter().any(|n| n.location.file == "broken.dmn");
+        assert!(
+            broken_indexed || notes.iter().any(|(f, _)| f.ends_with("broken.dmn")),
+            "the malformed file is indexed as a file or reported: {notes:?}"
+        );
+    }
+
     #[test]
     fn not_indexed_reasons_describe_export_formats() {
         // Red on main: no reason helper or NOT-INDEXED reporting exists.

@@ -1859,6 +1859,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// S3 STALE READS (estate#667): a new CLIPS, ODM IRL or Drools GDST file is a file `index`
+    /// reads, so the freshness probe counts it as not yet indexed.
+    #[test]
+    fn new_rules_files_count_as_unindexed_667() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = ["r.clp", "p.irl", "t.gdst"];
+        for f in files {
+            std::fs::write(dir.path().join(f), "x").unwrap();
+        }
+        let store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        let mut probe = FreshnessProbe::with_store(":memory:", Some(Box::new(store)));
+        let root = Root {
+            label: None,
+            path: dir.path().to_path_buf(),
+            recorded: dir.path().to_string_lossy().into_owned(),
+            indexed: None,
+            subpath: None,
+        };
+        let status = RootStatus {
+            head: None,
+            new_files: Some(files.iter().map(|f| f.to_string()).collect()),
+        };
+        assert_eq!(probe.count_unindexed(&[(root, status)]), Some(files.len()));
+    }
+
     /// #316: an APEXlang `application.apx` is digested with its `.apex/apexlang.json`, so an
     /// indexed application is fresh, and editing only the sidecar makes it stale.
     #[test]
