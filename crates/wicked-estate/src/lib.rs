@@ -1789,9 +1789,10 @@ pub fn index_path_with(
 fn restore_semantics(
     store: &mut dyn GraphStoreMutExt,
     saved: Vec<(String, SymbolId, NodeSemantics)>,
+    replaced: &Replacements,
 ) -> Result<std::collections::BTreeMap<String, usize>> {
     let mut dropped: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for (file, _, _) in restore_pending_semantics(store, saved)? {
+    for (file, _, _) in restore_pending_semantics(store, saved, replaced)? {
         *dropped.entry(file).or_default() += 1;
     }
     Ok(dropped)
@@ -1839,12 +1840,30 @@ fn pending_semantics_save(
     store.meta_put(PENDING_SEMANTICS_KEY, &json)
 }
 
+/// The nodes this run extracted that name an earlier id of theirs in `metadata.replaces`, keyed by
+/// (file, earlier id). The XML rules extractors record the id releases through 0.37 gave them
+/// (estate#667).
+type Replacements = HashMap<(String, SymbolId), Vec<SymbolId>>;
+
+fn note_replacements(replaced: &mut Replacements, file: &str, node: &Node) {
+    if let Some(earlier) = node.metadata.get("replaces").and_then(|v| v.as_str()) {
+        replaced
+            .entry((file.to_string(), SymbolId(earlier.to_string())))
+            .or_default()
+            .push(node.symbol.clone());
+    }
+}
+
 /// Restore available symbols inside a chunk's write batch, keeping missing ids pending until a
 /// later chunk or resolution re-creates them (#515). Callers enqueue a file's saved fields only
 /// once its old contributions have been removed, so a future chunk cannot erase an early restore.
+/// A gone symbol replaced by exactly one node of the same file this run (`metadata.replaces`)
+/// takes its entry there; one replaced by several (an earlier id that merged elements) stays
+/// pending, so it is counted dropped.
 fn restore_pending_semantics(
     store: &mut dyn GraphStoreMutExt,
     saved: Vec<(String, SymbolId, NodeSemantics)>,
+    replaced: &Replacements,
 ) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
     if !store.can_restore_node_semantics() {
         return Ok(saved);
@@ -1853,8 +1872,20 @@ fn restore_pending_semantics(
     for (file, symbol, semantics) in saved {
         if store.get_node(&symbol)?.is_some() {
             store.restore_node_semantics(&symbol, &semantics)?;
-        } else {
-            pending.push((file, symbol, semantics));
+            continue;
+        }
+        let only = match replaced
+            .get(&(file.clone(), symbol.clone()))
+            .map(Vec::as_slice)
+        {
+            Some([one]) => Some(one.clone()),
+            _ => None,
+        };
+        match only {
+            Some(one) if store.get_node(&one)?.is_some() => {
+                store.restore_node_semantics(&one, &semantics)?;
+            }
+            _ => pending.push((file, symbol, semantics)),
         }
     }
     Ok(pending)
@@ -1891,7 +1922,7 @@ fn index_path_inner(
             (Vec::new(), Vec::new())
         } else {
             store.begin_batch()?;
-            let leftover = restore_pending_semantics(store, leftover)?;
+            let leftover = restore_pending_semantics(store, leftover, &Replacements::new())?;
             let (mine, others): (PendingSemantics, PendingSemantics) =
                 leftover.into_iter().partition(|(file, _, _)| {
                     scope
@@ -2952,6 +2983,8 @@ fn index_path_inner(
     let mut total_symbols = 0usize;
     let mut files_extracted = 0usize;
     let mut extracted_symbols = HashSet::new();
+    // Earlier ids the extracted nodes replace, for semantics saved under them (estate#667).
+    let mut replaced = Replacements::new();
     let mut backfill_probes = Vec::new();
     let mut seen_probes = HashSet::new();
     let mut read_digests = Vec::new();
@@ -3219,6 +3252,7 @@ fn index_path_inner(
                 files_extracted += 1;
                 for n in &extraction.nodes {
                     extracted_symbols.insert(n.symbol.clone());
+                    note_replacements(&mut replaced, &rel_path, n);
                     if n.name.is_empty() {
                         continue;
                     }
@@ -3236,7 +3270,7 @@ fn index_path_inner(
             )?;
             // The snapshot is made durable in the batch that removed the rows, then shrinks in the
             // batch that restores entries (#515).
-            pending_semantics = restore_pending_semantics(store, pending_semantics)?;
+            pending_semantics = restore_pending_semantics(store, pending_semantics, &replaced)?;
             pending_semantics_save(store, &other_pending_semantics, &pending_semantics)?;
             store.commit_batch()?;
             // The chunk's extractions and source text are dropped before extracting the next one.
@@ -3581,7 +3615,7 @@ fn index_path_inner(
     store.upsert_edges(&call_flow_edges)?;
     store.upsert_edges(&estate)?;
     store.upsert_unresolved_refs(&resolution.unresolved)?;
-    let dropped = restore_semantics(store, pending_semantics)?;
+    let dropped = restore_semantics(store, pending_semantics, &replaced)?;
     pending_semantics_save(store, &other_pending_semantics, &Vec::new())?;
     store.commit_batch()?;
     #[cfg(test)]
@@ -9163,7 +9197,7 @@ node_scheme = "reviewmarker"
             ),
             ("b.rs".to_string(), SymbolId("b.rs::x".into()), sem),
         ];
-        let dropped = restore_semantics(&mut store, saved).unwrap();
+        let dropped = restore_semantics(&mut store, saved, &Replacements::new()).unwrap();
         assert_eq!(dropped.get("a.rs"), Some(&1), "{dropped:?}");
         assert_eq!(dropped.get("b.rs"), Some(&1), "{dropped:?}");
     }
@@ -9190,7 +9224,7 @@ node_scheme = "reviewmarker"
             store.node_semantics(&node.symbol).unwrap().is_none(),
             "node_semantics must read None after remove_file and before restore"
         );
-        let dropped = restore_semantics(store, snapshot).unwrap();
+        let dropped = restore_semantics(store, snapshot, &Replacements::new()).unwrap();
         assert_eq!(dropped.get("a.rs"), Some(&1), "{dropped:?}");
         assert!(
             store.node_semantics(&node.symbol).unwrap().is_none(),
@@ -9278,6 +9312,98 @@ node_scheme = "reviewmarker"
             store.node_semantics(&age).unwrap(),
             Some(kept),
             "Eligibility's Age keeps its id and its annotation"
+        );
+    }
+
+    /// Rewrite `rel`'s XML rules nodes the way 0.37 stored them: each under the id it names in
+    /// `metadata.replaces`, built as 0.37's writer built it (`Node::new(symbol, kind, name, lang,
+    /// location)`, v0.37.0 crates/wicked-estate-extract/src/xml_rules.rs:225-230), so elements
+    /// that shared that id are one node. Returns the earlier id of the node named `name`.
+    #[cfg(feature = "xml-rules")]
+    fn as_stored_by_0_37(store: &mut dyn GraphStoreMutExt, rel: &str, name: &str) -> SymbolId {
+        let nodes: Vec<Node> = store
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.location.file == rel)
+            .collect();
+        store.remove_file(rel).unwrap();
+        let earlier: Vec<Node> = nodes
+            .iter()
+            .map(
+                |n| match n.metadata.get("replaces").and_then(|v| v.as_str()) {
+                    Some(id) => Node::new(
+                        SymbolId(id.to_string()),
+                        n.kind.clone(),
+                        &n.name,
+                        n.language.clone(),
+                        n.location.clone(),
+                    ),
+                    None => n.clone(),
+                },
+            )
+            .collect();
+        store.upsert_nodes(&earlier).unwrap();
+        let named: HashSet<SymbolId> = earlier
+            .iter()
+            .filter(|n| n.name == name)
+            .map(|n| n.symbol.clone())
+            .collect();
+        assert_eq!(named.len(), 1, "one stored `{name}`");
+        named.into_iter().next().unwrap()
+    }
+
+    /// DES-669: an annotation 0.37 saved under its id for an XML rules element moves, on the first
+    /// re-index, onto the one node that replaces that id.
+    #[cfg(feature = "xml-rules")]
+    #[test]
+    fn xml_rules_ids_an_annotation_under_the_0_37_id_moves_to_its_node_669() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("loans.dmn");
+        std::fs::write(&file, dmn(&[("Eligibility", "t1")])).unwrap();
+        let mut store = SqliteStore::in_memory().unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        let earlier = as_stored_by_0_37(&mut store, "loans.dmn", "Age");
+        let kept = annotate_with_claim(&mut store, &earlier);
+
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
+        std::fs::write(&file, dmn(&[("Eligibility", "t1")]) + "\n").unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        SEMANTICS_DROPS.with(|notes| {
+            assert!(notes.borrow().is_empty(), "{:?}", notes.borrow());
+        });
+        let age = sym_of(&store, "Age");
+        assert_ne!(age, earlier);
+        assert!(store.get_node(&earlier).unwrap().is_none());
+        assert_eq!(store.node_semantics(&age).unwrap(), Some(kept));
+    }
+
+    /// DES-669: 0.37 merged same-named elements into one node. An annotation on it cannot be
+    /// placed on one of them, so it is dropped loudly, never moved to a guess.
+    #[cfg(feature = "xml-rules")]
+    #[test]
+    fn xml_rules_ids_an_annotation_on_a_0_37_merged_node_drops_loudly_669() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("loans.dmn");
+        let two = dmn(&[("Eligibility", "t1"), ("Pricing", "t2")]);
+        std::fs::write(&file, &two).unwrap();
+        let mut store = SqliteStore::in_memory().unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        let earlier = as_stored_by_0_37(&mut store, "loans.dmn", "Age");
+        annotate_with_claim(&mut store, &earlier);
+
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
+        std::fs::write(&file, two + "\n").unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        SEMANTICS_DROPS.with(|notes| {
+            assert_eq!(
+                &*notes.borrow(),
+                &["SEMANTICS-DROPPED: 1 symbol(s) in loans.dmn"]
+            );
+        });
+        assert!(
+            store.find_by_requirement("REQ-1").unwrap().is_empty(),
+            "neither Age takes the merged node's annotation"
         );
     }
 }

@@ -192,12 +192,12 @@ mod tests {
         out
     }
 
-    /// #669 codex-check: requirement annotations are restored by exact id after a re-index,
-    /// so a node whose id was already unique keeps the id earlier releases gave it (its
-    /// ancestors' tags and its name). Only the same-named conditions that shared one id get
-    /// new, name-qualified ids.
+    /// #669 codex-check (DES-669): requirement annotations are restored by id after a re-index.
+    /// Every node names the id releases through 0.37 gave it (its ancestors' tags and its name)
+    /// in `metadata.replaces`, so the indexer can move an annotation saved under it. The two
+    /// same-named conditions that shared one released id name it both, and keep their own ids.
     #[test]
-    fn unique_ids_keep_their_released_shape_669() {
+    fn every_node_names_the_id_releases_gave_it_669() {
         let ex = flow(FIXTURE);
         let keyed = keyed_ids(&ex);
         let released = |path: &str, name: &str| {
@@ -207,24 +207,44 @@ mod tests {
             )
             .id()
         };
+        let replaces = |key: &str| {
+            let node = ex.nodes.iter().find(|n| n.symbol == keyed[key]).unwrap();
+            SymbolId(
+                node.metadata["replaces"]
+                    .as_str()
+                    .expect("every node names its released id")
+                    .to_string(),
+            )
+        };
         assert_eq!(
-            keyed["Is Active Premium"],
+            replaces("Is Active Premium"),
             released("Flow/decisions/rules/rules", "Is Active Premium")
         );
         assert_eq!(
-            keyed["Check Account Status"],
+            replaces("Check Account Status"),
             released("Flow/decisions/decisions", "Check Account Status")
         );
         assert_eq!(
-            keyed["Is Active Premium/Account.Type"],
+            replaces("Is Active Premium/Account.Type"),
             released("Flow/decisions/rules/conditions/conditions", "Account.Type")
         );
         let shared = released(
             "Flow/decisions/rules/conditions/conditions",
             "Account.Status__c",
         );
-        assert_ne!(keyed["Is Active Premium/Account.Status__c"], shared);
-        assert_ne!(keyed["Is Inactive/Account.Status__c"], shared);
+        assert_eq!(replaces("Is Active Premium/Account.Status__c"), shared);
+        assert_eq!(replaces("Is Inactive/Account.Status__c"), shared);
+        assert_ne!(
+            keyed["Is Active Premium/Account.Status__c"],
+            keyed["Is Inactive/Account.Status__c"]
+        );
+        for n in &ex.nodes {
+            assert_ne!(
+                n.metadata["replaces"].as_str(),
+                Some(n.symbol.as_str()),
+                "the id is the name-qualified form"
+            );
+        }
     }
 
     /// estate#667 round 1 (ADR-002): a node's id does not depend on unrelated siblings. Adding

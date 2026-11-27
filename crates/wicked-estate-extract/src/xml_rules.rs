@@ -29,14 +29,15 @@
 //! ```
 //!
 //! # Node identity
-//! `Symbol::synthetic("xml-rules", "<file>::<tags>::<name>")`, where `<tags>` is the element's
-//! ancestors' tags from the root down, then its own tag twice (the shape every release has used,
-//! so requirement annotations, restored by exact id, survive a re-index). When two elements of a
-//! file share that id (the same condition under two rules), each instead gets
-//! `"<file>::<key>"`, where `<key>` is each element from the root down as `tag:name` (a mapped
-//! element with a name) or `tag` (any other element), plus `[n]` for the n-th element with that
-//! same key. Neither form depends on unrelated siblings, so ids are stable while names do not
-//! change (ADR-002).
+//! `Symbol::synthetic("xml-rules", "<file>::<key>")`, where `<key>` is each element from the
+//! root down as `tag:name` (a mapped element with a name) or `tag` (any other element), plus
+//! `[n]` for the n-th element with that same key. The id does not depend on unrelated or
+//! same-named elements elsewhere in the file, so it is stable while names do not change (ADR-002).
+//!
+//! Releases through 0.37 used `"<file>::<tags>::<name>"` (the ancestors' tags, then the element's
+//! own tag twice), which merged same-named elements into one node. Each node records that id as
+//! `metadata.replaces`, so the indexer moves a requirement annotation saved under it onto the one
+//! node that replaces it (estate#667).
 
 #![cfg(feature = "xml-rules")]
 
@@ -179,16 +180,15 @@ impl XmlRulesExtractor {
     }
 }
 
-/// The display name and id of every mapped element with a name, in two passes in document order
-/// (see "Node identity" above). The node and edge passes both read it, so they agree.
+/// The display name, id and released id (see "Node identity" above) of every mapped element with
+/// a name, in document order. The node and edge passes both read it, so they agree.
 fn element_ids(
     doc: &roxmltree::Document<'_>,
     file: &str,
     node_map: &std::collections::HashMap<&str, &NodeMapping>,
-) -> std::collections::HashMap<roxmltree::NodeId, (String, SymbolId)> {
+) -> std::collections::HashMap<roxmltree::NodeId, (String, SymbolId, SymbolId)> {
     use std::collections::HashMap;
-    // (element, name, released id string, name-qualified key)
-    let mut named: Vec<(roxmltree::NodeId, String, String, String)> = Vec::new();
+    let mut ids: HashMap<roxmltree::NodeId, (String, SymbolId, SymbolId)> = HashMap::new();
     let mut keys: HashMap<roxmltree::NodeId, String> = HashMap::new();
     let mut taken: HashMap<String, usize> = HashMap::new();
     for node in doc.descendants().filter(|n| n.is_element()) {
@@ -222,25 +222,12 @@ fn element_ids(
             tags.reverse();
             tags.push(tag);
             let released = format!("{file}::{}::{name}", tags.join("/"));
-            named.push((node.id(), name, released, key));
+            let symbol = Symbol::synthetic("xml-rules", format!("{file}::{key}")).id();
+            let released = Symbol::synthetic("xml-rules", released).id();
+            ids.insert(node.id(), (name, symbol, released));
         }
     }
-    let mut uses: HashMap<&str, usize> = HashMap::new();
-    for (_, _, released, _) in &named {
-        *uses.entry(released.as_str()).or_default() += 1;
-    }
-    named
-        .iter()
-        .map(|(id, name, released, key)| {
-            let id_str = if uses[released.as_str()] == 1 {
-                released.clone()
-            } else {
-                format!("{file}::{key}")
-            };
-            let symbol = Symbol::synthetic("xml-rules", id_str).id();
-            (*id, (name.clone(), symbol))
-        })
-        .collect()
+    ids
 }
 
 impl Extractor for XmlRulesExtractor {
@@ -268,7 +255,7 @@ impl Extractor for XmlRulesExtractor {
 
         // Walk all elements in document order, emitting nodes for mapped, named elements.
         for node in doc.descendants() {
-            let Some((name, symbol)) = ids.get(&node.id()) else {
+            let Some((name, symbol, released)) = ids.get(&node.id()) else {
                 continue;
             };
             let Some(mapping) = node_map.get(node.tag_name().name()) else {
@@ -279,7 +266,11 @@ impl Extractor for XmlRulesExtractor {
             let location = Location::new(&file.path, Span::ZERO);
             let kind = parse_node_kind(&mapping.emit_kind);
 
-            let graph_node = Node::new(symbol, kind, &name, lang.clone(), location);
+            let mut graph_node = Node::new(symbol, kind, &name, lang.clone(), location);
+            graph_node.metadata.insert(
+                "replaces".to_string(),
+                serde_json::Value::String(released.0.clone()),
+            );
             nodes.push(graph_node);
         }
 
@@ -294,7 +285,7 @@ impl Extractor for XmlRulesExtractor {
                     continue;
                 }
 
-                let Some((_, parent_sym)) = ids.get(&parent_node.id()) else {
+                let Some((_, parent_sym, _)) = ids.get(&parent_node.id()) else {
                     continue;
                 };
 
@@ -307,7 +298,7 @@ impl Extractor for XmlRulesExtractor {
                         continue;
                     }
 
-                    let Some((_, child_sym)) = ids.get(&child.id()) else {
+                    let Some((_, child_sym, _)) = ids.get(&child.id()) else {
                         continue;
                     };
 
