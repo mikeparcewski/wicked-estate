@@ -70,6 +70,11 @@ jobs:
           node-version: 22
       - name: install TypeScript 7 (live LSP tier)
         run: npm install -g --no-audit --no-fund typescript@7.0.2
+      # estate#667: the XML rules extractors (DMN, GDST, Salesforce Flow, Corticon) are behind the
+      # opt-in xml-rules feature, so the workspace run below never builds their tests: the unit
+      # tests and the feature-gated fixture tests in language_integration.
+      - name: test (rules extractors, --features xml-rules)
+        run: cargo test -p wicked-estate-extract --features xml-rules --no-fail-fast --lib --test language_integration
       - name: test (workspace + conformance + bench)
         env:
           APEXLANG_CORPUS_DIR: ${{ runner.temp }}/apexlang-corpus

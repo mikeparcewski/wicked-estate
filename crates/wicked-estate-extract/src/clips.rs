@@ -139,10 +139,10 @@ impl Extractor for ClipsExtractor {
         let mut expect = Expect::Nothing;
         let mut pending_line: usize = 0; // line where the keyword was seen
 
-        for (line_idx, raw_line) in file.text.lines().enumerate() {
-            // Strip line comments: `;` outside a string starts a comment.
-            let line = strip_comment(raw_line);
-
+        // Structure is read from a copy where `;` comments are blanked and the parentheses and
+        // `;` inside strings are masked, so a `")"` is text (estate#664).
+        let masked = mask_clips(&file.text);
+        for (line_idx, line) in masked.lines().enumerate() {
             let mut chars = line.chars().peekable();
             while let Some(ch) = chars.next() {
                 match ch {
@@ -441,18 +441,50 @@ fn flush_rule(
 
 // ── Lexer helpers ──────────────────────────────────────────────────────────────
 
-/// Strip a line comment (everything from `;` onward, outside strings).
-fn strip_comment(line: &str) -> &str {
-    // Simple heuristic: find the first `;` not inside a double-quoted string.
+/// `text` with each `;` comment outside a string, and every character inside a `"…"` string
+/// (with `\` escapes, across lines), replaced by a space; the quotes and every newline are kept,
+/// so line numbers are unchanged. Nothing in a string reads as structure: no parenthesis, `;`
+/// or `=>` (estate#664, #669 round 1). Construct, template and function names are unquoted
+/// symbols, so no name is lost.
+fn mask_clips(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
     let mut in_string = false;
-    for (i, ch) in line.char_indices() {
-        match ch {
-            '"' => in_string = !in_string,
-            ';' if !in_string => return &line[..i],
-            _ => {}
+    let mut in_comment = false;
+    while let Some(c) = chars.next() {
+        if in_comment {
+            in_comment = c != '\n';
+            out.push(if in_comment { ' ' } else { c });
+        } else if in_string {
+            let blank = |c: char| if c == '\n' { '\n' } else { ' ' };
+            match c {
+                '\\' => {
+                    out.push(' ');
+                    if let Some(next) = chars.next() {
+                        out.push(blank(next));
+                    }
+                }
+                '"' => {
+                    in_string = false;
+                    out.push(c);
+                }
+                _ => out.push(blank(c)),
+            }
+        } else {
+            match c {
+                '"' => {
+                    in_string = true;
+                    out.push(c);
+                }
+                ';' => {
+                    in_comment = true;
+                    out.push(' ');
+                }
+                _ => out.push(c),
+            }
         }
     }
-    line
+    out
 }
 
 /// Consume whitespace from `chars` then collect a token until the next whitespace or paren.

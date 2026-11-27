@@ -28,7 +28,7 @@ static RE_PACKAGE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Matches `rule "RuleName" {` in IRL
 static RE_IRL_RULE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)^\s*rule\s+"([^"]+)"\s*\{"#).expect("RE_IRL_RULE must compile")
+    Regex::new(r#"(?m)^[ \t]*rule\s+"([^"]+)"\s*\{"#).expect("RE_IRL_RULE must compile")
 });
 
 /// Matches `when {` block opener in IRL
@@ -79,8 +79,11 @@ impl Extractor for OdmExtractor {
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
         // Detect format by extension or content heuristic.
         // IRL files typically have `rule "Name" {` patterns; BAL files use `conditions` / `actions`.
-        if file.path.ends_with(".irl") || RE_IRL_RULE.is_match(&file.text) {
-            extract_irl(file)
+        // IRL is read with its comments blanked, so a rule kept in a comment is not live
+        // (estate#665).
+        let content = crate::rules_text::blank_c_comments(&file.text);
+        if file.path.ends_with(".irl") || RE_IRL_RULE.is_match(&content) {
+            extract_irl(&file.path, &content)
         } else {
             extract_bal(file)
         }
@@ -89,21 +92,26 @@ impl Extractor for OdmExtractor {
 
 // ── IRL extractor ─────────────────────────────────────────────────────────────
 
-fn extract_irl(file: &SourceFile) -> Result<Extraction> {
+/// `content` is the file's text with its comments blanked (same offsets). Names and signatures
+/// are read from it; braces and the `when`/`then` openers are found on a copy with string
+/// contents masked too, so a `}` in a string is text (estate#667).
+fn extract_irl(path: &str, content: &str) -> Result<Extraction> {
     let mut nodes = Vec::new();
     let mut local_edges = Vec::new();
-    let text = &file.text;
+    let text = content;
+    let scan = crate::rules_text::mask_strings(content);
 
     // 1. Package → RuleSet node
-    let ruleset_sym = if let Some(caps) = RE_PACKAGE.captures(text) {
+    // A package name is unquoted, so it is read on `scan`: one in a string is not live.
+    let ruleset_sym = if let Some(caps) = RE_PACKAGE.captures(&scan) {
         let pkg = caps[1].to_string();
-        let sym = Symbol::synthetic("odm", format!("{}::package::{}", file.path, pkg)).id();
+        let sym = Symbol::synthetic("odm", format!("{}::package::{}", path, pkg)).id();
         let mut node = Node::new(
             sym.clone(),
             NodeKind::RuleSet,
             pkg.clone(),
             Language::new("ibm-odm-irl"),
-            Location::new(&file.path, Span::ZERO),
+            Location::new(path, Span::ZERO),
         );
         node.signature = Some(format!("package {pkg}"));
         nodes.push(node);
@@ -113,17 +121,13 @@ fn extract_irl(file: &SourceFile) -> Result<Extraction> {
     };
 
     // 2. Parse each `rule "Name" { when {...} then {...} }` block.
-    // We walk the text character by character to find matching braces for each rule body.
-    let mut search_start = 0usize;
-    while let Some(rule_caps) = RE_IRL_RULE.captures(&text[search_start..]) {
-        let full_match = rule_caps.get(0).unwrap();
-        let abs_rule_start = search_start + full_match.start();
-        let abs_rule_end = search_start + full_match.end();
+    let headers = irl_headers(text, &scan);
+    for (k, (abs_rule_start, abs_rule_end, rule_name)) in headers.iter().enumerate() {
+        let (abs_rule_start, abs_rule_end) = (*abs_rule_start, *abs_rule_end);
+        let rule_name = rule_name.clone();
+        let rule_sym = Symbol::synthetic("odm", format!("{}::rule::{}", path, rule_name)).id();
 
-        let rule_name = rule_caps[1].to_string();
-        let rule_sym = Symbol::synthetic("odm", format!("{}::rule::{}", file.path, rule_name)).id();
-
-        let rule_loc = Location::new(&file.path, byte_span(abs_rule_start, abs_rule_end));
+        let rule_loc = Location::new(path, byte_span(abs_rule_start, abs_rule_end));
         let mut rule_node = Node::new(
             rule_sym.clone(),
             NodeKind::Rule,
@@ -145,21 +149,24 @@ fn extract_irl(file: &SourceFile) -> Result<Extraction> {
             ));
         }
 
-        // Find the outer `{` that opens the rule body (just after the `{` at end of rule header).
-        // abs_rule_end points past the `{`; the rule body starts there.
-        let body_text = &text[abs_rule_end..];
+        // The rule body runs from just past the header's `{` to its matching `}`, and never past
+        // the next rule header, so a rule without `then` cannot take the next rule's.
+        let next_rule = headers.get(k + 1).map_or(text.len(), |h| h.0);
+        let body_end = crate::rules_text::match_brace_end(&scan, abs_rule_end - 1).min(next_rule);
+        let body_text = &text[abs_rule_end..body_end];
+        let body_scan = &scan[abs_rule_end..body_end];
 
         // Extract `when { ... }` block content
-        if let Some(when_content) = extract_block(body_text, &RE_IRL_WHEN) {
+        if let Some(when_content) = extract_block(body_scan, body_text, &RE_IRL_WHEN) {
             let cond_name = format!("{rule_name}::when");
             let cond_sym =
-                Symbol::synthetic("odm", format!("{}::condition::{}", file.path, cond_name)).id();
+                Symbol::synthetic("odm", format!("{}::condition::{}", path, cond_name)).id();
             let mut cond_node = Node::new(
                 cond_sym.clone(),
                 NodeKind::Condition,
                 cond_name,
                 Language::new("ibm-odm-irl"),
-                Location::new(&file.path, Span::ZERO),
+                Location::new(path, Span::ZERO),
             );
             cond_node.signature = Some(when_content.trim().to_string());
             nodes.push(cond_node);
@@ -174,16 +181,16 @@ fn extract_irl(file: &SourceFile) -> Result<Extraction> {
         }
 
         // Extract `then { ... }` block content
-        if let Some(then_content) = extract_block(body_text, &RE_IRL_THEN) {
+        if let Some(then_content) = extract_block(body_scan, body_text, &RE_IRL_THEN) {
             let action_name = format!("{rule_name}::then");
             let action_sym =
-                Symbol::synthetic("odm", format!("{}::action::{}", file.path, action_name)).id();
+                Symbol::synthetic("odm", format!("{}::action::{}", path, action_name)).id();
             let mut action_node = Node::new(
                 action_sym.clone(),
                 NodeKind::Action,
                 action_name,
                 Language::new("ibm-odm-irl"),
-                Location::new(&file.path, Span::ZERO),
+                Location::new(path, Span::ZERO),
             );
             action_node.signature = Some(then_content.trim().to_string());
             nodes.push(action_node);
@@ -196,9 +203,6 @@ fn extract_irl(file: &SourceFile) -> Result<Extraction> {
                 "odm-irl",
             ));
         }
-
-        // Advance past this rule header so we find the next one
-        search_start = abs_rule_end;
     }
 
     Ok(Extraction {
@@ -208,30 +212,29 @@ fn extract_irl(file: &SourceFile) -> Result<Extraction> {
     })
 }
 
-/// Extract the content of a `keyword { ... }` block. Returns the text inside the braces.
-fn extract_block(text: &str, opener_re: &Regex) -> Option<String> {
-    let m = opener_re.find(text)?;
-    // Find the `{` at the end of the opener match
-    let after_open = &text[m.end()..];
-    let mut depth = 1i32;
-    let mut end = 0usize;
-    for (i, c) in after_open.char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = i;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    if depth != 0 {
-        return None;
-    }
-    Some(after_open[..end].to_string())
+/// The live `rule "Name" {` headers in `text`, as (keyword start, end past the `{`, name). A header
+/// counts only when its `rule` keyword and its `{` survive string masking in `scan`, so text in a
+/// string that reads like a header is not one, and the span starts at the keyword, not on a
+/// blanked comment line before it (#669 round 1).
+fn irl_headers(text: &str, scan: &str) -> Vec<(usize, usize, String)> {
+    let b = scan.as_bytes();
+    RE_IRL_RULE
+        .captures_iter(text)
+        .filter_map(|c| {
+            let m = c.get(0)?;
+            let start = m.start() + (m.as_str().len() - m.as_str().trim_start().len());
+            (b.get(start) == Some(&b'r') && b.get(m.end() - 1) == Some(&b'{'))
+                .then(|| (start, m.end(), c[1].to_string()))
+        })
+        .collect()
+}
+
+/// The content of a `keyword { ... }` block in `text`: the opener and its matching brace are found
+/// on `scan` (the same text with string contents masked), the content is sliced from `text`.
+fn extract_block(scan: &str, text: &str, opener_re: &Regex) -> Option<String> {
+    let m = opener_re.find(scan)?;
+    let end = crate::rules_text::match_brace_end(scan, m.end() - 1);
+    (end < scan.len()).then(|| text[m.end()..end].to_string())
 }
 
 // ── BAL extractor ─────────────────────────────────────────────────────────────
@@ -442,6 +445,114 @@ mod tests {
             language: Language::new("ibm-odm-bal"),
             text: text.to_string(),
         }
+    }
+
+    /// estate#665: a rule kept in a comment is not a live rule. Only the live rule, with its
+    /// own condition and action, is extracted; a `/*` inside a string is not a comment.
+    #[test]
+    fn irl_rules_inside_comments_are_not_extracted_665() {
+        let ex = OdmExtractor::new()
+            .extract(&irl_file(
+                r#"package com.example.lending;
+/*
+rule "Disabled" {
+  when { Customer c(score < 300); }
+  then { c.reject(); }
+}
+*/
+// rule "AlsoDisabled" {
+rule "CheckScore" {
+  when { Customer c(note == "/* not a comment"); }
+  then { c.approve(); }
+}
+"#,
+            ))
+            .unwrap();
+        let rules: Vec<&str> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Rule)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert_eq!(rules, vec!["CheckScore"]);
+        let actions = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Action)
+            .count();
+        assert_eq!(actions, 1, "only the live rule's action: {:?}", ex.nodes);
+    }
+
+    /// estate#667: a brace inside a string does not open or close a block, and a rule's
+    /// `when`/`then` are its own: a rule without `then` does not take the next rule's.
+    #[test]
+    fn irl_blocks_end_at_their_own_brace_and_stay_in_their_rule_667() {
+        let ex = OdmExtractor::new()
+            .extract(&irl_file(
+                r#"package com.example.lending;
+rule "NoAction" {
+  when { Customer c(score > 1); }
+}
+rule "Quoted" {
+  when { Customer c(note == "}"); }
+  then { c.flag("{"); }
+}
+"#,
+            ))
+            .unwrap();
+        let sig = |name: &str| {
+            ex.nodes
+                .iter()
+                .find(|n| n.name == name)
+                .and_then(|n| n.signature.clone())
+        };
+        assert_eq!(
+            sig("Quoted::when").as_deref(),
+            Some(r#"Customer c(note == "}");"#)
+        );
+        assert_eq!(sig("Quoted::then").as_deref(), Some(r#"c.flag("{");"#));
+        assert_eq!(
+            sig("NoAction::when").as_deref(),
+            Some("Customer c(score > 1);")
+        );
+        assert_eq!(
+            sig("NoAction::then"),
+            None,
+            "no then of its own: {:?}",
+            ex.nodes
+        );
+    }
+
+    /// estate#669 round 1: a rule's span starts at its own `rule` keyword, not in a comment
+    /// before it; text in strings that reads like a header or a package is not one; an
+    /// unbalanced quote does not panic.
+    #[test]
+    fn irl_headers_and_packages_are_read_outside_strings_and_comments_669() {
+        let text = "/* disabled */\nrule \"Live\" {\n  when { Audit a(msg == \"package x;\"); }\n  \
+                    then { log(\"rule \" + name + \" {\"); }\n}\n";
+        let ex = OdmExtractor::new().extract(&irl_file(text)).unwrap();
+        let rules: Vec<&Node> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Rule)
+            .collect();
+        assert_eq!(rules.len(), 1, "{:?}", ex.nodes);
+        assert_eq!(
+            rules[0].location.span.start_byte as usize,
+            text.find("rule").unwrap()
+        );
+        assert!(
+            !ex.nodes.iter().any(|n| n.kind == NodeKind::RuleSet),
+            "no live package: {:?}",
+            ex.nodes
+        );
+        let then = ex.nodes.iter().find(|n| n.name == "Live::then");
+        assert_eq!(
+            then.and_then(|n| n.signature.as_deref()),
+            Some(r#"log("rule " + name + " {");"#)
+        );
+        // An unbalanced quote before a header leaves its brace masked: no panic.
+        let _ = OdmExtractor::new().extract(&irl_file("\"\nrule \"R\" {\n\"\n}\n"));
     }
 
     #[test]
