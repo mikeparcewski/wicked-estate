@@ -29,15 +29,22 @@
 //! ```
 //!
 //! # Node identity
-//! `Symbol::synthetic("xml-rules", "<file>::<element_path>::<name>")` — stable as long as the
-//! element name attribute does not change (ADR-002).
+//! The id is the format's own identifier when the mapping names one (`id_attr`/`id_child`: a
+//! DMN `id`, a Salesforce Flow API `<name>`): `Symbol::synthetic("xml-rules",
+//! "<file>::<tag>#<id>")`. It survives renames, moves and inserted same-named siblings
+//! (ADR-002). An element without one is keyed under the nearest ancestor that has one,
+//! `"<file>::<ancestor tag>#<id>/<tag>:<name>"`; with no such ancestor (a format without ids,
+//! such as GDST), as releases through 0.37 did: `"<file>::<ancestor tags>/<tag>::<name>"`.
+//! Elements with the same key are one node, as before; a source id repeated in one file (a
+//! malformed document) keeps its first element, and later ones take the fallback key (#675).
+//! Through 0.37 every id was the last form, which merged same-named elements.
 
 #![cfg(feature = "xml-rules")]
 
 use serde::Deserialize;
 use wicked_estate_core::{
     Edge, EdgeKind, Error, Extraction, Extractor, Language, Location, Node, NodeKind,
-    ResolutionTier, Result, SourceFile, Span, Symbol,
+    ResolutionTier, Result, SourceFile, Span, Symbol, SymbolId,
 };
 
 // ── Config structs (TOML-deserializable) ─────────────────────────────────────
@@ -79,6 +86,79 @@ pub struct NodeMapping {
     /// content as the name.
     #[serde(default)]
     pub name_text: bool,
+    /// Attribute holding the format's own stable identifier (DMN `id`), used for the node id.
+    #[serde(default)]
+    pub id_attr: Option<String>,
+    /// Child element whose text is the format's own stable identifier (Salesforce Flow
+    /// `<name>`), used for the node id when `id_attr` is unset.
+    #[serde(default)]
+    pub id_child: Option<String>,
+}
+
+/// The format's own identifier of `node` per `mapping`, if it has a non-empty one.
+fn source_id(mapping: &NodeMapping, node: roxmltree::Node<'_, '_>) -> Option<String> {
+    let id = if let Some(attr) = &mapping.id_attr {
+        node.attribute(attr.as_str()).map(str::to_string)
+    } else if let Some(child) = &mapping.id_child {
+        node.children()
+            .find(|c| c.is_element() && c.tag_name().name() == child.as_str())
+            .and_then(|c| c.text())
+            .map(|t| t.trim().to_string())
+    } else {
+        None
+    };
+    id.filter(|i| !i.is_empty())
+}
+
+/// The display name and id of every mapped element with a name (see "Node identity" above),
+/// in one pass in document order. The node and edge passes both read it, so they agree.
+fn element_ids(
+    doc: &roxmltree::Document<'_>,
+    file: &str,
+    node_map: &std::collections::HashMap<&str, &NodeMapping>,
+) -> std::collections::HashMap<roxmltree::NodeId, (String, SymbolId)> {
+    use std::collections::{HashMap, HashSet};
+    let mut ids = HashMap::new();
+    // Elements keyed by their own source id: `<tag>#<id>`.
+    let mut anchors: HashMap<roxmltree::NodeId, String> = HashMap::new();
+    let mut taken: HashSet<String> = HashSet::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        let tag = node.tag_name().name();
+        let Some(mapping) = node_map.get(tag) else {
+            continue;
+        };
+        let own = source_id(mapping, node)
+            .map(|id| format!("{tag}#{id}"))
+            .filter(|key| taken.insert(key.clone()));
+        let name = resolve_name(mapping, node, tag);
+        let key = match &own {
+            Some(key) => key.clone(),
+            None => {
+                let anchor = node.ancestors().skip(1).find_map(|a| anchors.get(&a.id()));
+                match anchor {
+                    Some(anchor) => format!("{anchor}/{tag}:{name}"),
+                    None => {
+                        let mut tags: Vec<&str> = node
+                            .ancestors()
+                            .filter(|a| a.is_element())
+                            .map(|a| a.tag_name().name())
+                            .collect();
+                        tags.reverse();
+                        tags.push(tag);
+                        format!("{}::{name}", tags.join("/"))
+                    }
+                }
+            }
+        };
+        if let Some(own) = own {
+            anchors.insert(node.id(), own);
+        }
+        if !name.is_empty() {
+            let symbol = Symbol::synthetic("xml-rules", format!("{file}::{key}")).id();
+            ids.insert(node.id(), (name, symbol));
+        }
+    }
+    ids
 }
 
 /// An edge emitted whenever `child_element` appears as a direct child of `parent_element`.
@@ -194,121 +274,57 @@ impl Extractor for XmlRulesExtractor {
             .map(|m| (m.element.as_str(), m))
             .collect();
 
-        // Walk all elements in document order, emitting nodes for mapped elements.
+        let ids = element_ids(&doc, &file.path, &node_map);
+
+        // Walk all elements in document order, emitting nodes for mapped, named elements.
         for node in doc.descendants() {
-            if !node.is_element() {
-                continue;
-            }
-            let elem_name = node.tag_name().name();
-            let Some(mapping) = node_map.get(elem_name) else {
+            let Some((name, symbol)) = ids.get(&node.id()) else {
                 continue;
             };
-
-            // Resolve the node's display name.
-            let name = resolve_name(mapping, node, elem_name);
-
-            if name.is_empty() {
+            let Some(mapping) = node_map.get(node.tag_name().name()) else {
                 continue;
-            }
-
-            // Build an element path (ancestor chain, names only) for a stable id.
-            let mut path_parts: Vec<String> = node
-                .ancestors()
-                .filter(|a| a.is_element())
-                .map(|a| a.tag_name().name().to_string())
-                .collect::<Vec<_>>();
-            path_parts.reverse();
-            path_parts.push(elem_name.to_string());
-            let element_path = path_parts.join("/");
-
-            let id_str = format!("{}::{}::{}", file.path, element_path, name);
-            let symbol = Symbol::synthetic("xml-rules", &id_str).id();
-
+            };
             let location = Location::new(&file.path, Span::ZERO);
             let kind = parse_node_kind(&mapping.emit_kind);
-
-            let graph_node = Node::new(symbol, kind, &name, lang.clone(), location);
-            nodes.push(graph_node);
+            nodes.push(Node::new(
+                symbol.clone(),
+                kind,
+                name,
+                lang.clone(),
+                location,
+            ));
         }
 
         // Emit edges for parent→child element pairs defined in edge_mappings.
-        // We do a second pass over the document to find containment relationships.
         for (edge_mapping, edge_kind) in self.config.edge_mappings.iter().zip(&self.edge_kinds) {
             for parent_node in doc.descendants() {
-                if !parent_node.is_element() {
+                if !parent_node.is_element()
+                    || parent_node.tag_name().name() != edge_mapping.parent_element
+                {
                     continue;
                 }
-                if parent_node.tag_name().name() != edge_mapping.parent_element {
+                let Some((_, parent_sym)) = ids.get(&parent_node.id()) else {
                     continue;
-                }
-
-                // Resolve the parent symbol id.
-                let parent_name =
-                    if let Some(nm) = node_map.get(edge_mapping.parent_element.as_str()) {
-                        let n = resolve_name(nm, parent_node, &edge_mapping.parent_element);
-                        if n.is_empty() {
-                            continue;
-                        }
-                        n
-                    } else {
-                        continue;
-                    };
-
-                // Build the parent's element path.
-                let mut pp: Vec<String> = parent_node
-                    .ancestors()
-                    .filter(|a| a.is_element())
-                    .map(|a| a.tag_name().name().to_string())
-                    .collect::<Vec<_>>();
-                pp.reverse();
-                pp.push(edge_mapping.parent_element.clone());
-                let parent_path = pp.join("/");
-                let parent_id_str = format!("{}::{}::{}", file.path, parent_path, parent_name);
-                let parent_sym = Symbol::synthetic("xml-rules", &parent_id_str).id();
-
-                // Walk direct children matching the child element.
+                };
                 for child in parent_node.children() {
-                    if !child.is_element() {
+                    if !child.is_element() || child.tag_name().name() != edge_mapping.child_element
+                    {
                         continue;
                     }
-                    if child.tag_name().name() != edge_mapping.child_element {
+                    let Some((_, child_sym)) = ids.get(&child.id()) else {
                         continue;
-                    }
-
-                    let child_nm = match node_map.get(edge_mapping.child_element.as_str()) {
-                        Some(nm) => nm,
-                        None => continue,
                     };
-
-                    let child_name = resolve_name(child_nm, child, &edge_mapping.child_element);
-                    if child_name.is_empty() {
-                        continue;
-                    }
-
-                    // Build the child's element path.
-                    let mut cp: Vec<String> = child
-                        .ancestors()
-                        .filter(|a| a.is_element())
-                        .map(|a| a.tag_name().name().to_string())
-                        .collect::<Vec<_>>();
-                    cp.reverse();
-                    cp.push(edge_mapping.child_element.clone());
-                    let child_path = cp.join("/");
-                    let child_id_str = format!("{}::{}::{}", file.path, child_path, child_name);
-                    let child_sym = Symbol::synthetic("xml-rules", &child_id_str).id();
-
                     // Edge: source = parent (dependent / governer), target = child (dependency).
                     // "A governs B" → source=A (the rule set), target=B (the rule).
                     // This matches the edge-direction invariant: source is the dependent.
-                    let edge = Edge::new(
+                    local_edges.push(Edge::new(
                         parent_sym.clone(),
-                        child_sym,
+                        child_sym.clone(),
                         // Parsed at construction (#361); a refused kind fails here, loudly.
                         edge_kind.clone().map_err(Error::Extraction)?,
                         ResolutionTier::Parsed,
                         "xml-rules",
-                    );
-                    local_edges.push(edge);
+                    ));
                 }
             }
         }

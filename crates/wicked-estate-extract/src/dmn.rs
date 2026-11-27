@@ -40,31 +40,37 @@ file_globs = ["**/*.dmn"]
 element   = "definitions"
 emit_kind = "rule_set"
 name_attr = "name"
+id_attr   = "id"
 
 [[node_mappings]]
 element   = "decision"
 emit_kind = "rule"
 name_attr = "name"
+id_attr   = "id"
 
 [[node_mappings]]
 element              = "decisionTable"
 emit_kind            = "rule_set"
 name_attr            = "id"
+id_attr              = "id"
 
 [[node_mappings]]
 element   = "rule"
 emit_kind = "rule"
 name_attr = "id"
+id_attr   = "id"
 
 [[node_mappings]]
 element   = "input"
 emit_kind = "condition"
 name_attr = "label"
+id_attr   = "id"
 
 [[node_mappings]]
 element   = "output"
 emit_kind = "action"
 name_attr = "label"
+id_attr   = "id"
 
 # ── Edge mappings ─────────────────────────────────────────────────────────────
 

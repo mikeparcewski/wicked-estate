@@ -44,11 +44,13 @@ name_child = "label"
 element    = "decisions"
 emit_kind  = "rule_set"
 name_child = "label"
+id_child   = "name"
 
 [[node_mappings]]
 element    = "rules"
 emit_kind  = "rule"
 name_child = "label"
+id_child   = "name"
 
 [[node_mappings]]
 element    = "conditions"
@@ -59,6 +61,7 @@ name_child = "leftValueReference"
 element    = "actionCalls"
 emit_kind  = "action"
 name_child = "label"
+id_child   = "name"
 
 [[edge_mappings]]
 parent_element = "decisions"
