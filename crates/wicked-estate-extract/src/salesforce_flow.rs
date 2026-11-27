@@ -110,7 +110,7 @@ impl Extractor for SalesforceFlowExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wicked_estate_core::{NodeKind, SymbolId};
+    use wicked_estate_core::{NodeKind, Symbol, SymbolId};
 
     #[test]
     fn config_parses_without_panic() {
@@ -190,6 +190,41 @@ mod tests {
             out.insert(format!("{parent}{}", n.name), n.symbol.clone());
         }
         out
+    }
+
+    /// #669 codex-check: requirement annotations are restored by exact id after a re-index,
+    /// so a node whose id was already unique keeps the id earlier releases gave it (its
+    /// ancestors' tags and its name). Only the same-named conditions that shared one id get
+    /// new, name-qualified ids.
+    #[test]
+    fn unique_ids_keep_their_released_shape_669() {
+        let ex = flow(FIXTURE);
+        let keyed = keyed_ids(&ex);
+        let released = |path: &str, name: &str| {
+            Symbol::synthetic(
+                "xml-rules",
+                format!("account_validation.flow-meta.xml::{path}::{name}"),
+            )
+            .id()
+        };
+        assert_eq!(
+            keyed["Is Active Premium"],
+            released("Flow/decisions/rules/rules", "Is Active Premium")
+        );
+        assert_eq!(
+            keyed["Check Account Status"],
+            released("Flow/decisions/decisions", "Check Account Status")
+        );
+        assert_eq!(
+            keyed["Is Active Premium/Account.Type"],
+            released("Flow/decisions/rules/conditions/conditions", "Account.Type")
+        );
+        let shared = released(
+            "Flow/decisions/rules/conditions/conditions",
+            "Account.Status__c",
+        );
+        assert_ne!(keyed["Is Active Premium/Account.Status__c"], shared);
+        assert_ne!(keyed["Is Inactive/Account.Status__c"], shared);
     }
 
     /// estate#667 round 1 (ADR-002): a node's id does not depend on unrelated siblings. Adding
