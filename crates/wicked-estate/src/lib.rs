@@ -106,9 +106,10 @@ use wicked_estate_core::{
     TraversalSpec, edge_tags, is_flow_edge, is_structural_symbol, merge_flow_edges,
 };
 use wicked_estate_extract::{
-    BlazeBrlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor, IaCExtractor,
-    ImsExtractor, JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor, SYMBOL_ID_SCHEME,
-    TfstateCollector, doc_convert,
+    AwsConfigRuleExtractor, AzurePolicyExtractor, BlazeBrlExtractor, ClipsExtractor, DrlExtractor,
+    ExtraEdgeExtractor, HlasmExtractor, IaCExtractor, ImsExtractor, JclExtractor, MqExtractor,
+    OdmExtractor, RacfExtractor, RegoRulesExtractor, SYMBOL_ID_SCHEME, TfstateCollector,
+    doc_convert,
     treesitter::{ExtractorCache, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
@@ -140,6 +141,8 @@ pub(crate) fn is_grammarless_ext(ext: &str) -> bool {
             | "mqsc"
             | "drl"
             | "brl"
+            | "clp"
+            | "irl"
     ) || is_xml_rules_ext(ext)
 }
 
@@ -158,14 +161,14 @@ fn is_vb6_source(bytes: &[u8]) -> bool {
 const NOT_INDEXED_SECRET: &str = "matches the secret-file rule; never indexed";
 const NOT_INDEXED_READ: &str = "could not be read inside the repository root";
 const NOT_INDEXED_CTL: &str =
-    "mainframe control card (not VB6): no extractor yet (wicked-estate#447)";
+    "mainframe control card (not VB6): no extractor yet (wicked-estate#662)";
 
 fn not_indexed_reason(ext: &str) -> &'static str {
     match ext {
-        "ddl" | "db2" => "Db2 DDL: no DDL extractor yet (wicked-estate#447)",
-        "csd" => "CICS CSD resource definitions: no extractor yet (wicked-estate#447)",
-        "mac" => "HLASM macro library member: no macro extractor yet (wicked-estate#447)",
-        "ca7" | "controlm" => "scheduler definition: no extractor yet (wicked-estate#447)",
+        "ddl" | "db2" => "Db2 DDL: no DDL extractor yet (wicked-estate#662)",
+        "csd" => "CICS CSD resource definitions: no extractor yet (wicked-estate#662)",
+        "mac" => "HLASM macro library member: no macro extractor yet (wicked-estate#662)",
+        "ca7" | "controlm" => "scheduler definition: no extractor yet (wicked-estate#662)",
         "ctl" => NOT_INDEXED_CTL,
         _ => "no extractor for this file type",
     }
@@ -184,28 +187,109 @@ fn grammarless_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
         "mqsc" => Some(Box::new(MqExtractor::new())),
         "drl" => Some(Box::new(DrlExtractor::new())),
         "brl" => Some(Box::new(BlazeBrlExtractor::new())),
+        "clp" => Some(Box::new(ClipsExtractor::new())),
+        "irl" => Some(Box::new(OdmExtractor::new())),
         _ => xml_rules_extractor(ext),
     }
+}
+
+/// The rules extractor for a `.json` file whose keys name an Azure Policy definition
+/// (`policyRule`) or an AWS Config rule (`ConfigRuleName`); each checks the shape itself and
+/// returns no nodes for any other JSON (estate#620).
+fn rules_json_extractor(ext: &str, text: &str) -> Option<Box<dyn Extractor>> {
+    if ext != "json" {
+        return None;
+    }
+    if text.contains("\"policyRule\"") {
+        Some(Box::new(AzurePolicyExtractor::new()))
+    } else if text.contains("\"ConfigRuleName\"") {
+        Some(Box::new(AwsConfigRuleExtractor::new()))
+    } else {
+        None
+    }
+}
+
+/// Run a grammar-less extractor on one file and give it the same File node + Contains edges the
+/// tree-sitter path emits, so the indexed-file count is honest and file-level blast-radius
+/// ("what's defined in queues.mqsc?") works uniformly across all languages.
+fn grammarless_extraction(
+    extractor: &dyn Extractor,
+    rel_path: &str,
+    text: &str,
+) -> Option<Extraction> {
+    let language = extractor.languages().into_iter().next()?;
+    let sf = SourceFile {
+        path: rel_path.to_string(),
+        language: language.clone(),
+        text: text.to_string(),
+    };
+    let mut extraction = extractor.extract(&sf).ok()?;
+    let file_symbol = Symbol::file(rel_path).id();
+    let floc = Location::new(rel_path, Span::ZERO);
+    let child_syms: Vec<SymbolId> = extraction.nodes.iter().map(|n| n.symbol.clone()).collect();
+    for sym in child_syms {
+        extraction.local_edges.push(
+            Edge::new(
+                file_symbol.clone(),
+                sym,
+                EdgeKind::Contains,
+                ResolutionTier::Parsed,
+                "grammarless",
+            )
+            .with_location(floc.clone()),
+        );
+    }
+    extraction.nodes.push(Node::new(
+        file_symbol,
+        NodeKind::File,
+        rel_path.to_string(),
+        language,
+        floc,
+    ));
+    Some(extraction)
 }
 
 /// XML rules-engine extensions, dispatched only when the `xml-rules` feature is enabled.
 #[cfg(feature = "xml-rules")]
 fn is_xml_rules_ext(ext: &str) -> bool {
-    matches!(ext, "ers" | "erf" | "ecore" | "dmn")
+    matches!(ext, "ers" | "erf" | "ecore" | "dmn" | "gdst")
 }
 #[cfg(not(feature = "xml-rules"))]
 fn is_xml_rules_ext(_ext: &str) -> bool {
     false
 }
 
+/// Rules files named by their full path rather than one extension: Salesforce Flow source
+/// (`*.flow-meta.xml`; `.xml` alone names far more than flows). Needs `xml-rules` (estate#620).
+#[cfg(feature = "xml-rules")]
+pub(crate) fn is_rules_path(rel_path: &str) -> bool {
+    rel_path.to_ascii_lowercase().ends_with(".flow-meta.xml")
+}
+#[cfg(not(feature = "xml-rules"))]
+pub(crate) fn is_rules_path(_rel_path: &str) -> bool {
+    false
+}
+
+#[cfg(feature = "xml-rules")]
+fn rules_path_extractor(rel_path: &str) -> Option<Box<dyn Extractor>> {
+    is_rules_path(rel_path).then(|| {
+        Box::new(wicked_estate_extract::SalesforceFlowExtractor::new()) as Box<dyn Extractor>
+    })
+}
+#[cfg(not(feature = "xml-rules"))]
+fn rules_path_extractor(_rel_path: &str) -> Option<Box<dyn Extractor>> {
+    None
+}
+
 /// Dispatch the XML rules-engine extractors (Progress Corticon, Camunda DMN). Compiled in only with
 /// the `xml-rules` feature; a no-op (always `None`) otherwise so the base binary stays dep-light.
 #[cfg(feature = "xml-rules")]
 fn xml_rules_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
-    use wicked_estate_extract::{CamundaDmnExtractor, CorticonExtractor};
+    use wicked_estate_extract::{CamundaDmnExtractor, CorticonExtractor, DroolsGdstExtractor};
     match ext {
         "ers" | "erf" | "ecore" => Some(Box::new(CorticonExtractor::new())),
         "dmn" => Some(Box::new(CamundaDmnExtractor::new())),
+        "gdst" => Some(Box::new(DroolsGdstExtractor::new())),
         _ => None,
     }
 }
@@ -227,39 +311,15 @@ fn base_extraction(
     // Grammar-less mainframe estate languages (JCL batch, HLASM assembler, RACF security,
     // IMS DBD/PSB data, MQ MQSC messaging): line/macro extractors dispatched by extension.
     // They map the estate into the same graph as the tree-sitter languages.
-    if let Some(extractor) = grammarless_extractor(ext) {
-        let language = extractor.languages().into_iter().next()?;
-        let sf = SourceFile {
-            path: rel_path.to_string(),
-            language: language.clone(),
-            text: text.to_string(),
-        };
-        let mut extraction = extractor.extract(&sf).ok()?;
-        // Give every grammar-less file the same File node + Contains edges the tree-sitter
-        // path emits, so the indexed-file count is honest and file-level blast-radius
-        // ("what's defined in queues.mqsc?") works uniformly across all languages.
-        let file_symbol = Symbol::file(rel_path).id();
-        let floc = Location::new(rel_path, Span::ZERO);
-        let child_syms: Vec<SymbolId> = extraction.nodes.iter().map(|n| n.symbol.clone()).collect();
-        for sym in child_syms {
-            extraction.local_edges.push(
-                Edge::new(
-                    file_symbol.clone(),
-                    sym,
-                    EdgeKind::Contains,
-                    ResolutionTier::Parsed,
-                    "grammarless",
-                )
-                .with_location(floc.clone()),
-            );
-        }
-        extraction.nodes.push(Node::new(
-            file_symbol,
-            NodeKind::File,
-            rel_path.to_string(),
-            language,
-            floc,
-        ));
+    if let Some(extractor) = grammarless_extractor(ext).or_else(|| rules_path_extractor(rel_path)) {
+        return grammarless_extraction(&*extractor, rel_path, text);
+    }
+    // AWS Config rules and Azure Policy definitions are JSON: a file whose rules extractor finds
+    // its shape is a rules file; any other JSON stays on the paths below (estate#620).
+    if let Some(extraction) = rules_json_extractor(ext, text)
+        .and_then(|extractor| grammarless_extraction(&*extractor, rel_path, text))
+        .filter(|extraction| extraction.nodes.len() > 1)
+    {
         return Some(extraction);
     }
 
@@ -2214,7 +2274,12 @@ fn index_path_inner(
                     return None;
                 }
             }
-            if ext_map.claims(&ext) || is_grammarless_ext(&ext) || is_doc || extra_match {
+            if ext_map.claims(&ext)
+                || is_grammarless_ext(&ext)
+                || is_rules_path(&rel_path)
+                || is_doc
+                || extra_match
+            {
                 Some((p, rel_path))
             } else {
                 let reason = not_indexed_reason(&ext);
