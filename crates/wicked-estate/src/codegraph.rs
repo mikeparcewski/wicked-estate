@@ -1366,52 +1366,24 @@ impl Prepared {
     /// unmatched definitions get new nodes (an unchanged file's were minted when it changed).
     /// `text` returns a file's stored source (estate path), from which a minted node's byte span
     /// is computed, so `symbol_source` returns its body (estate#590).
-    /// The names [`Self::id_map`] will mint in `files`, before it runs: a definition group
-    /// (file, name, kind class) with more codegraph definitions than estate nodes in `nodes`.
-    /// The homonym pass treats them as gained names, so an unchanged caller bound to a
-    /// same-named definition elsewhere is re-extracted on this run (estate#660). It reads the
-    /// same verdicts and classes as the mapping; a name it lists that the mapping then binds
-    /// to an estate node only re-extracts a caller that did not need it.
-    pub(crate) fn mint_candidates(
+    /// The (file, name) of every definition [`Self::id_map`] will mint in `mint_in`, before the
+    /// mapping runs: the mapping itself on the files' own nodes, so the prediction and the
+    /// minting cannot disagree (#668 round 1). The homonym pass reads it (estate#660). A
+    /// definition's matches are within its own file, so the files' nodes are enough; the
+    /// dropped-edge count this dry run adds is put back.
+    pub(crate) fn minted_names(
         &self,
-        files: &HashSet<String>,
         nodes: &[&Node],
+        mint_in: &HashSet<String>,
+        text: &dyn Fn(&str) -> Option<String>,
     ) -> Vec<(String, String)> {
-        let mut estate: HashMap<(&str, &str, KindClass), usize> = HashMap::new();
-        for n in nodes {
-            if let Some(class) = estate_class(&n.kind) {
-                *estate
-                    .entry((n.location.file.as_str(), n.name.as_str(), class))
-                    .or_default() += 1;
-            }
-        }
-        let mut cg: HashMap<(String, &str, KindClass), usize> = HashMap::new();
-        for n in self.snap.nodes.values() {
-            let path = format!("{}{}", self.prefix, n.file);
-            if n.name.is_empty()
-                || !files.contains(&path)
-                || !matches!(self.verdicts.get(&path), Some(Verdict::Ok))
-            {
-                continue;
-            }
-            if let Some(class) = cg_class(&n.kind) {
-                *cg.entry((path, n.name.as_str(), class)).or_default() += 1;
-            }
-        }
-        let mut out: Vec<(String, String)> = cg
+        let drops = *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner());
+        let ids = self.id_map(nodes, mint_in, text);
+        *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) = drops;
+        ids.minted
             .into_iter()
-            .filter(|((path, name, class), count)| {
-                *count
-                    > estate
-                        .get(&(path.as_str(), *name, *class))
-                        .copied()
-                        .unwrap_or(0)
-            })
-            .map(|((path, name, _), _)| (path, name.to_string()))
-            .collect();
-        out.sort();
-        out.dedup();
-        out
+            .map(|n| (n.location.file, n.name))
+            .collect()
     }
 
     pub(crate) fn id_map(
@@ -3350,6 +3322,25 @@ mod tests {
         assert!(
             parked.iter().any(|r| r.from.0 == GET),
             "the call parks: {parked:?}"
+        );
+        // #668 round 1: the next edit to src/util.ts mints the same assist again. It is
+        // neither gained nor lost, so no caller is re-extracted for it.
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched again\n");
+        std::fs::write(&util, text).unwrap();
+        crate::TEST_REBIND_FILES.with(|count| count.set(0));
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        assert_eq!(
+            crate::TEST_REBIND_FILES.with(|count| count.get()),
+            0,
+            "an unchanged re-mint re-extracts no caller"
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            !calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t.ends_with("/assist().")),
+            "the call stays parked"
         );
     }
 

@@ -499,6 +499,11 @@ fn call_site_key(location: &Location) -> CallSiteKey {
 /// answered from its facts and the rest go to estate's resolvers; the two results are merged as
 /// `resolve_all_with_coverage` merges resolvers (per-site edges kept, one edge per
 /// `(source, target, kind)` at the highest confidence).
+/// Whether `node` is a definition codegraph minted (estate#584: `origin: codegraph`).
+fn is_codegraph_minted(node: &Node) -> bool {
+    node.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+}
+
 fn resolve_with_codegraph(
     resolvers: &[&dyn Resolver],
     refs: &[wicked_estate_core::UnresolvedRef],
@@ -3263,7 +3268,9 @@ fn index_path_inner(
             }
         }
         // A definition codegraph will mint in a file extracted this pass is a gained name too:
-        // the mapping that mints it runs after this pass (estate#660).
+        // the mapping that mints it runs after this pass (estate#660). One minted last run and
+        // minted again is neither gained nor lost (#668 round 1).
+        let mut reminted: HashSet<(String, String)> = HashSet::new();
         if let Some(cg) = codegraph_state.as_ref() {
             let files: HashSet<String> = changed.iter().map(|fw| fw.rel.clone()).collect();
             let mut nodes = Vec::new();
@@ -3273,13 +3280,29 @@ fn index_path_inner(
                 }
             }
             let refs: Vec<&Node> = nodes.iter().collect();
-            for (file, name) in cg.mint_candidates(&files, &refs) {
-                changed_names.entry(name).or_default().insert(file);
+            let reader: &dyn GraphRead = &*store;
+            let text = |file: &str| reader.file_content(file).ok().flatten();
+            let old_minted: HashSet<(&str, &str)> = old_candidates
+                .iter()
+                .filter(|n| is_codegraph_minted(n))
+                .map(|n| (n.location.file.as_str(), n.name.as_str()))
+                .collect();
+            for (file, name) in cg.minted_names(&refs, &files, &text) {
+                if old_minted.contains(&(file.as_str(), name.as_str())) {
+                    reminted.insert((file, name));
+                } else {
+                    changed_names.entry(name).or_default().insert(file);
+                }
             }
         }
         let mut lost_by_name: HashMap<String, Vec<SymbolId>> = HashMap::new();
         for node in &old_candidates {
             if node.name.is_empty() || store.get_node(&node.symbol)?.is_some() {
+                continue;
+            }
+            if is_codegraph_minted(node)
+                && reminted.contains(&(node.location.file.clone(), node.name.clone()))
+            {
                 continue;
             }
             // Removed homonyms can make a parked name unique, including typed probe forms.
