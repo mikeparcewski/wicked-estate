@@ -79,12 +79,89 @@ impl Extractor for OdmExtractor {
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
         // Detect format by extension or content heuristic.
         // IRL files typically have `rule "Name" {` patterns; BAL files use `conditions` / `actions`.
-        if file.path.ends_with(".irl") || RE_IRL_RULE.is_match(&file.text) {
-            extract_irl(file)
+        // IRL is matched on the text with its comments blanked: a rule kept in a comment is not
+        // live (estate#665).
+        let blanked = blank_comments(&file.text);
+        if file.path.ends_with(".irl") || RE_IRL_RULE.is_match(&blanked) {
+            extract_irl(&SourceFile {
+                path: file.path.clone(),
+                language: file.language.clone(),
+                text: blanked,
+            })
         } else {
             extract_bal(file)
         }
     }
+}
+
+/// `text` with every `/* … */` and `// …` comment outside a double-quoted string replaced by
+/// spaces. Newlines and byte offsets are kept, so lines and spans are unchanged (estate#665).
+fn blank_comments(text: &str) -> String {
+    enum State {
+        Code,
+        Str,
+        Line,
+        Block,
+    }
+    fn blank(out: &mut String, c: char) {
+        if c == '\n' {
+            out.push('\n');
+        } else {
+            out.extend(std::iter::repeat_n(' ', c.len_utf8()));
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut state = State::Code;
+    while let Some(c) = chars.next() {
+        match state {
+            State::Code => match (c, chars.peek().copied()) {
+                ('"', _) => {
+                    out.push(c);
+                    state = State::Str;
+                }
+                ('/', Some('*')) => {
+                    chars.next();
+                    out.push_str("  ");
+                    state = State::Block;
+                }
+                ('/', Some('/')) => {
+                    chars.next();
+                    out.push_str("  ");
+                    state = State::Line;
+                }
+                _ => out.push(c),
+            },
+            State::Str => {
+                out.push(c);
+                match c {
+                    '\\' => {
+                        if let Some(next) = chars.next() {
+                            out.push(next);
+                        }
+                    }
+                    '"' | '\n' => state = State::Code,
+                    _ => {}
+                }
+            }
+            State::Line => {
+                blank(&mut out, c);
+                if c == '\n' {
+                    state = State::Code;
+                }
+            }
+            State::Block => {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    out.push_str("  ");
+                    state = State::Code;
+                } else {
+                    blank(&mut out, c);
+                }
+            }
+        }
+    }
+    out
 }
 
 // ── IRL extractor ─────────────────────────────────────────────────────────────
