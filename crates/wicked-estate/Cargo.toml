@@ -58,13 +58,9 @@ serve = ["dep:tokio", "wicked-estate-store/pool"]  # enables open_async_store
 # into the CLI so a resolved postgres:// spec opens instead of erroring. Off by default —
 # the local-first binary stays dependency-light (sqlx). See docs/team-runtime.md.
 postgres = ["wicked-estate-store/postgres"]
-# The release binary is built with the default features (estate#620): it indexes the XML rules
-# formats the README lists. Their deps (roxmltree, quick-xml) are small and pure Rust.
-default = ["xml-rules"]
-# W15 rules engine — XML/Excel rules extractors wired into `index` dispatch.
-xml-rules = ["wicked-estate-extract/xml-rules"]     # Camunda DMN, Progress Corticon, Drools GDST, Salesforce Flow (.dmn/.ers/.erf/.ecore/.gdst/.flow-meta.xml)
-# Opt-in: calamine and zip. The CLI reads .xlsx as a document; decision tables need
-# `ExcelRulesExtractor` and a sheet config through the library.
+# W15 rules engine — opt-in XML/Excel rules extractors wired into `index` dispatch.
+# Off by default to keep the base binary dependency-light (roxmltree/quick-xml/calamine).
+xml-rules = ["wicked-estate-extract/xml-rules"]     # Camunda DMN, Progress Corticon (.dmn/.ers/.erf/.ecore)
 excel-rules = ["wicked-estate-extract/excel-rules"] # Excel/XLSX decision tables
 # TEST BUILDS ONLY (estate#595): `index --codegraph` reads codegraph's facts from the recorded SQL
 # that WICKED_ESTATE_CODEGRAPH_RECORDED names instead of running codegraph, so consumers' CI can

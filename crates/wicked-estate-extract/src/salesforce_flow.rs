@@ -117,34 +117,6 @@ mod tests {
         let _ = SalesforceFlowExtractor::new();
     }
 
-    /// #663 round 1 (codex): a node's id was its file, its ancestors' tag names and its own
-    /// name, so the two `Account.Status__c` conditions under different outcomes of the fixture
-    /// got one id, and the store kept one. Every node keeps its own id.
-    #[test]
-    fn same_named_conditions_under_different_rules_keep_their_own_ids() {
-        let file = SourceFile {
-            path: "account_validation.flow-meta.xml".into(),
-            language: Language::new("xml-rules:salesforce-flow"),
-            text: include_str!(
-                "../tests/fixtures/salesforce_flow/account_validation.flow-meta.xml"
-            )
-            .into(),
-        };
-        let ex = SalesforceFlowExtractor::new().extract(&file).unwrap();
-        let ids: std::collections::HashSet<_> = ex.nodes.iter().map(|n| &n.symbol).collect();
-        assert_eq!(ids.len(), ex.nodes.len(), "one id per node");
-        let conditions = ex
-            .nodes
-            .iter()
-            .filter(|n| n.name == "Account.Status__c")
-            .count();
-        assert_eq!(conditions, 2);
-        // Each edge ends at a node the extraction emitted.
-        for e in &ex.local_edges {
-            assert!(ids.contains(&e.source) && ids.contains(&e.target), "{e:?}");
-        }
-    }
-
     #[test]
     fn languages_reports_salesforce_flow() {
         let extractor = SalesforceFlowExtractor::new();

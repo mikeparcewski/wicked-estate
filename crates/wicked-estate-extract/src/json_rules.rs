@@ -85,8 +85,8 @@ impl wicked_estate_core::Extractor for AzurePolicyExtractor {
     }
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
-        // Detect by extension (any case: the indexer admits `.JSON` too).
-        if !file.path.to_ascii_lowercase().ends_with(".json") {
+        // Detect by extension.
+        if !file.path.ends_with(".json") {
             return Ok(Extraction::default());
         }
 
@@ -98,15 +98,8 @@ impl wicked_estate_core::Extractor for AzurePolicyExtractor {
             Some(p) if p.is_object() => p,
             _ => return Ok(Extraction::default()),
         };
-        // A policy rule has an `if` condition and a `then` effect; a JSON Schema that merely
-        // declares a `policyRule` property has neither (#663 round 1).
         let policy_rule = match props.get("policyRule") {
-            Some(pr)
-                if pr.get("if").is_some_and(Value::is_object)
-                    && pr.get("then").is_some_and(Value::is_object) =>
-            {
-                pr
-            }
+            Some(pr) if pr.is_object() => pr,
             _ => return Ok(Extraction::default()),
         };
 
@@ -252,8 +245,8 @@ impl wicked_estate_core::Extractor for AwsConfigRuleExtractor {
     }
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
-        // Detect by extension (any case: the indexer admits `.JSON` too).
-        if !file.path.to_ascii_lowercase().ends_with(".json") {
+        // Detect by extension.
+        if !file.path.ends_with(".json") {
             return Ok(Extraction::default());
         }
 

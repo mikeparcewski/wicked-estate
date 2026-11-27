@@ -965,8 +965,7 @@ impl FreshnessProbe {
                     exts.contains(&e)
                         || crate::is_grammarless_ext(&e)
                         || wicked_estate_extract::doc_convert::is_doc_ext(&e)
-                }) && !crate::is_rules_path(rel)
-                {
+                }) {
                     continue;
                 }
                 if !root.path.join(rel).is_file() {
