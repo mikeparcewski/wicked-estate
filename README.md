@@ -186,7 +186,12 @@ wicked-estate watch ./my-project --db graph.db
 - **Estate mapping** — IaC (Terraform/CloudFormation/K8s) + mainframe (RACF security, IMS data, MQ
   messaging) as just-more-languages, joined cross-domain (e.g. the RACF profile that *protects* the
   dataset a JCL step *uses* — in one query). Drift = graph diff `iac` vs `live`.
-- **Rules engine layer** — rules extracted into the same graph as code. The release binary's `index` reads Drools DRL (`.drl`), FICO Blaze (`.brl`) and Rego (`.rego`). Camunda DMN (`.dmn`) and Progress Corticon (`.ers`/`.erf`/`.ecore`) need a build with the `xml-rules` feature. Excel/XLSX decision tables need the `excel-rules` feature and a sheet config through the library (`ExcelRulesExtractor`); `index` reads an `.xlsx` as a document. The library also has extractors for CLIPS/Jess, IBM ODM IRL, Drools GDST, Salesforce Flow, AWS Config Rules and Azure Policy, which `index` does not call yet ([#667](https://github.com/mikeparcewski/wicked-estate/issues/667)): it reports `.clp`, `.irl` and `.gdst` as NOT-INDEXED, and reads the JSON policies as plain JSON. NodeKind::{Rule,RuleSet,Condition,Action,Fact} + EdgeKind::{Governs,Evaluates,Produces,InvokedBy}. `RulesInventory` MCP tool lists engines + calling code. `RulesBridgeResolver` connects code call sites to real RuleSet nodes.
+- **Rules engine layer** — rules extracted into the same graph as code. The release binary's `index` reads:
+  - Drools DRL (`.drl`) and GDST (`.gdst`), FICO Blaze (`.brl`), Rego (`.rego`), CLIPS/Jess (`.clp`) and IBM ODM IRL (`.irl`);
+  - Camunda DMN (`.dmn`), Progress Corticon (`.ers`/`.erf`/`.ecore`) and Salesforce Flow (`*.flow-meta.xml`), through the `xml-rules` feature, which is on by default;
+  - AWS Config Rules and Azure Policy definitions (`.json`, recognised by their keys; any other JSON stays plain JSON).
+
+  A file a rules extractor cannot parse keeps its file node, with no rules. Excel/XLSX decision tables need the opt-in `excel-rules` feature and a sheet config through the library (`ExcelRulesExtractor`); `index` reads an `.xlsx` as a document. NodeKind::{Rule,RuleSet,Condition,Action,Fact} + EdgeKind::{Governs,Evaluates,Produces,InvokedBy}. `RulesInventory` MCP tool lists engines + calling code. `RulesBridgeResolver` connects code call sites to real RuleSet nodes.
 - **Hybrid + semantic retrieval** — graph + FTS5 core, embeddings an optional sidecar fused via RRF.
   Three embedder tiers: lexical (default) → model2vec (static, light) → fastembed (ONNX/BGE).
 - **MCP server** — exposes **36 tools across 3 domains** (estate, memory, knowledge) to agents over
