@@ -431,6 +431,11 @@ fn source_masks(path: &str, text: &str) -> Vec<(usize, usize, MaskKind)> {
         // grammars, files only a drop-in rule targets): token shapes (above) plus the value of
         // every `name=value` / `name: value` whose name C4 denies (`PASSWORD=...` in JCL).
         kv_deny_masks(text, &mut masks);
+        // XML has no grammar here (.xml, *.flow-meta.xml, .dmn, .gdst, Corticon, .config), so
+        // the element values under secret names are found by their markup (#686).
+        if looks_like_xml(text) {
+            xml_masks(text, &mut masks);
+        }
     }
     if let Some(host) =
         grammar.and_then(|g| COMPILED.rules.embedded_host.iter().find(|h| h.grammar == g))
@@ -546,18 +551,23 @@ static KV: LazyLock<Regex> = LazyLock::new(|| {
         .expect("kv compiles")
 });
 
+/// C4 denies `name` and it is not one of the `not_secret_keys` (`DSN`).
+fn denied_name(name: &str) -> bool {
+    let not_secret = COMPILED
+        .rules
+        .unruled
+        .not_secret_keys
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(name));
+    !not_secret && core_redact::deny_key(name)
+}
+
 fn kv_deny_masks(text: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
     for c in KV.captures_iter(text) {
         let (Some(k), Some(v)) = (c.get(1), c.get(2)) else {
             continue;
         };
-        let not_secret = COMPILED
-            .rules
-            .unruled
-            .not_secret_keys
-            .iter()
-            .any(|n| n.eq_ignore_ascii_case(k.as_str()));
-        if !not_secret && core_redact::deny_key(k.as_str()) {
+        if denied_name(k.as_str()) {
             let raw = v.as_str();
             let inner = unquote(raw);
             let off = (raw.len() - inner.len()) / 2;
@@ -567,6 +577,164 @@ fn kv_deny_masks(text: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
                 MaskKind::Text,
             ));
         }
+    }
+}
+
+/// Markup tokens of an XML document: a comment, a CDATA section (group 1 is its content), a PI or
+/// declaration, or a tag (2: `/` on a close tag, 3: the name, 4: the attributes, 5: `/` on an
+/// empty-element tag). Text is what lies between two tokens.
+static XML_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?s)<!--.*?-->|<!\[CDATA\[(.*?)\]\]>|<[?!][^>]*>|<(/?)([A-Za-z_][\w.:\-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(/?)>"#,
+    )
+    .expect("xml token compiles")
+});
+
+static XML_ATTR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"([A-Za-z_][\w.:\-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).expect("xml attr compiles")
+});
+
+/// The first character after a byte-order mark and blanks opens markup.
+fn looks_like_xml(text: &str) -> bool {
+    text.trim_start_matches('\u{feff}')
+        .trim_start()
+        .starts_with('<')
+}
+
+/// One element of the tolerant XML walk: its local name, the byte ranges of its own text and
+/// CDATA (blanks trimmed), and its child elements.
+struct XmlEl {
+    qname: String,
+    local: String,
+    texts: Vec<(usize, usize)>,
+    children: Vec<usize>,
+}
+
+fn local_name(qname: &str) -> &str {
+    qname.rsplit_once(':').map_or(qname, |(_, l)| l)
+}
+
+/// `[s, e)` without its leading and trailing blanks, or `None` when it is all blanks.
+fn trimmed(text: &str, s: usize, e: usize) -> Option<(usize, usize)> {
+    let t = &text[s..e];
+    let inner = t.trim();
+    if inner.is_empty() {
+        return None;
+    }
+    let lead = t.len() - t.trim_start().len();
+    Some((s + lead, s + lead + inner.len()))
+}
+
+/// estate#686: XML values under secret names. One tolerant pass over the markup (no parser, so
+/// malformed input still gets every range it can bound), then:
+/// - (a) the text of an element whose own local name C4 denies (`<password>v</password>`);
+/// - (b1) a `<name>` or `<key>` child whose text C4 denies masks its `<value>` siblings' text
+///   (a Hadoop or Maven `<property>`);
+/// - (b2) a `<leftValueReference>` or `<assignToReference>` child whose text C4 denies masks the
+///   `<stringValue>` in its `<rightValue>` or `<value>` siblings (a Salesforce Flow condition or
+///   assignment);
+/// - (c) a `key=` or `name=` attribute whose value C4 denies masks the `value=` attribute of the
+///   same tag (.NET `<add key=... value=...>`, Camunda `<camunda:property>`).
+///
+/// An attribute named like a secret (`password="v"`) is already masked by [`kv_deny_masks`].
+fn xml_masks(text: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
+    let mut els: Vec<XmlEl> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut last = 0;
+    for m in XML_TOKEN.captures_iter(text) {
+        let whole = m.get(0).expect("group 0");
+        if let Some(&top) = stack.last() {
+            els[top].texts.extend(trimmed(text, last, whole.start()));
+        }
+        last = whole.end();
+        if let Some(cdata) = m.get(1) {
+            if let Some(&top) = stack.last() {
+                els[top]
+                    .texts
+                    .extend(trimmed(text, cdata.start(), cdata.end()));
+            }
+            continue;
+        }
+        let Some(name) = m.get(3) else {
+            continue; // a comment, PI or declaration
+        };
+        if m.get(2).is_some_and(|g| g.as_str() == "/") {
+            // A close tag closes its open element; one with no open match is ignored.
+            if let Some(at) = stack.iter().rposition(|&i| els[i].qname == name.as_str()) {
+                stack.truncate(at);
+            }
+            continue;
+        }
+        if let Some(attrs) = m.get(4) {
+            attr_pair_masks(attrs.as_str(), attrs.start(), masks);
+        }
+        let id = els.len();
+        els.push(XmlEl {
+            qname: name.as_str().to_string(),
+            local: local_name(name.as_str()).to_string(),
+            texts: Vec::new(),
+            children: Vec::new(),
+        });
+        if let Some(&parent) = stack.last() {
+            els[parent].children.push(id);
+        }
+        let empty_element = m.get(5).is_some_and(|g| g.as_str() == "/");
+        if !empty_element {
+            stack.push(id);
+        }
+    }
+    let text_of = |i: usize| -> String { els[i].texts.iter().map(|&(s, e)| &text[s..e]).collect() };
+    let mask_texts = |i: usize, masks: &mut Vec<(usize, usize, MaskKind)>| {
+        for &(s, e) in &els[i].texts {
+            masks.push((s, e, MaskKind::Text));
+        }
+    };
+    let named = |i: usize, names: &[&str]| names.contains(&els[i].local.as_str());
+    for i in 0..els.len() {
+        if denied_name(&els[i].local) {
+            mask_texts(i, masks);
+        }
+        let kids = &els[i].children;
+        if kids
+            .iter()
+            .any(|&c| named(c, &["name", "key"]) && denied_name(&text_of(c)))
+        {
+            for &v in kids.iter().filter(|&&v| named(v, &["value"])) {
+                mask_texts(v, masks);
+            }
+        }
+        if kids.iter().any(|&c| {
+            named(c, &["leftValueReference", "assignToReference"]) && denied_name(&text_of(c))
+        }) {
+            for &w in kids.iter().filter(|&&w| named(w, &["rightValue", "value"])) {
+                for &sv in els[w]
+                    .children
+                    .iter()
+                    .filter(|&&sv| named(sv, &["stringValue"]))
+                {
+                    mask_texts(sv, masks);
+                }
+            }
+        }
+    }
+}
+
+/// (c) of [`xml_masks`]: within one tag's attributes (`attrs`, starting at byte `base`).
+fn attr_pair_masks(attrs: &str, base: usize, masks: &mut Vec<(usize, usize, MaskKind)>) {
+    let mut denied_pair = false;
+    let mut value = None;
+    for c in XML_ATTR.captures_iter(attrs) {
+        let Some(v) = c.get(2).or_else(|| c.get(3)) else {
+            continue;
+        };
+        match local_name(&c[1]) {
+            "key" | "name" => denied_pair |= denied_name(v.as_str()),
+            "value" => value = Some((base + v.start(), base + v.end())),
+            _ => {}
+        }
+    }
+    if let Some((s, e)) = value.filter(|&(s, e)| denied_pair && s < e) {
+        masks.push((s, e, MaskKind::Text));
     }
 }
 
