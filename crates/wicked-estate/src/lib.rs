@@ -511,7 +511,6 @@ fn is_same_mint(old: &Node, new: &Node) -> bool {
 /// answered from its facts and the rest go to estate's resolvers; the two results are merged as
 /// `resolve_all_with_coverage` merges resolvers (per-site edges kept, one edge per
 /// `(source, target, kind)` at the highest confidence).
-
 fn resolve_with_codegraph(
     resolvers: &[&dyn Resolver],
     refs: &[wicked_estate_core::UnresolvedRef],
