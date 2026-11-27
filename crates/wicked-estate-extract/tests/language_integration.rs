@@ -1221,3 +1221,45 @@ fn clips_snippet_minimal() {
         "must yield Action node"
     );
 }
+
+/// estate#664: a parenthesis or `;` inside a string literal is text, not structure. The first
+/// rule's `")"` used to close its form early, so the second rule was never recognised.
+#[test]
+fn clips_parens_inside_strings_do_not_hide_later_rules_664() {
+    use wicked_estate_extract::ClipsExtractor;
+
+    let snippet = r#"
+(defrule first
+  =>
+  (printout t ")" crlf))
+(defrule second
+  =>
+  (printout t "say \"(;\" twice" crlf)
+  (assert (done)))
+(defrule third
+  =>
+  (halt))
+"#;
+    let file = SourceFile {
+        path: "test.clp".to_string(),
+        language: Language::new("clips"),
+        text: snippet.to_string(),
+    };
+    let extraction = ClipsExtractor::new()
+        .extract(&file)
+        .expect("clips snippet must succeed");
+    let rules: Vec<&str> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Rule)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(rules, vec!["first", "second", "third"]);
+    let actions: Vec<&str> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Action)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(actions, vec!["printout", "printout", "assert", "halt"]);
+}

@@ -77,6 +77,10 @@ jobs:
           WICKED_LSP_LIVE_REQUIRED: "1"
           WICKED_LSP_LIVE_EXPECT: native
         run: cargo test --workspace
+      # estate#667: the XML rules extractors (DMN, GDST, Salesforce Flow, Corticon) are behind the
+      # opt-in xml-rules feature, so the workspace run above never builds their tests.
+      - name: test (rules extractors, --features xml-rules)
+        run: cargo test -p wicked-estate-extract --features xml-rules --lib
       # estate#484: the TypeScript 5-6 path live: typescript-language-server, told where tsserver.js is.
       # Replaces the global TypeScript with 5.x, then reruns only lsp_live (already built).
       - name: live LSP tier on TypeScript 5 (typescript-language-server + tsserver.path)
