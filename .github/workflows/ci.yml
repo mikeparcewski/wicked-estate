@@ -75,6 +75,9 @@ jobs:
       # tests and the feature-gated fixture tests in language_integration.
       - name: test (rules extractors, --features xml-rules)
         run: cargo test -p wicked-estate-extract --features xml-rules --no-fail-fast --lib --test language_integration
+      # The same feature through the real index route: ids and the semantics they carry (#669).
+      - name: test (index route, --features xml-rules)
+        run: cargo test -p wicked-estate --features xml-rules --lib xml_rules_ids_
       - name: test (workspace + conformance + bench)
         env:
           APEXLANG_CORPUS_DIR: ${{ runner.temp }}/apexlang-corpus
