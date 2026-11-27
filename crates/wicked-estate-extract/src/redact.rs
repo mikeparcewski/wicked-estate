@@ -580,19 +580,40 @@ fn kv_deny_masks(text: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
     }
 }
 
-/// Markup tokens of an XML document: a comment, a CDATA section (group 1 is its content), a PI or
-/// declaration, or a tag (2: `/` on a close tag, 3: the name, 4: the attributes, 5: `/` on an
-/// empty-element tag). Text is what lies between two tokens.
+/// Markup tokens of an XML document: a comment, a CDATA section (group 1 is its content), a PI
+/// (to its `?>`), a DOCTYPE (with its internal subset), another declaration, or a tag (2: `/` on
+/// a close tag, 3: the name, 4: the attributes, 5: `/` on an empty-element tag). Names are any
+/// run of non-delimiters, so a Unicode name is one too. Text is what lies between two tokens.
 static XML_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?s)<!--.*?-->|<!\[CDATA\[(.*?)\]\]>|<[?!][^>]*>|<(/?)([A-Za-z_][\w.:\-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(/?)>"#,
+        r#"(?s)<!--.*?-->|<!\[CDATA\[(.*?)\]\]>|<\?.*?\?>|<!DOCTYPE[^\[>]*(?:\[.*?\])?[^>]*>|<![^>]*>|<(/?)([^\s/>"'=<!?][^\s/>"'=<]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(/?)>"#,
     )
     .expect("xml token compiles")
 });
 
 static XML_ATTR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"([A-Za-z_][\w.:\-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).expect("xml attr compiles")
+    Regex::new(r#"([^\s/>"'=]+)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).expect("xml attr compiles")
 });
+
+static XML_REF: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"&(?:#[xX]([0-9A-Fa-f]{1,6})|#([0-9]{1,7})|(lt|gt|amp|quot|apos));")
+        .expect("xml reference compiles")
+});
+
+/// How many open elements a close tag with no match at the top may look past (tolerant
+/// recovery for malformed input, bounded so unmatched close tags stay linear).
+const XML_RECOVERY_DEPTH: usize = 8;
+
+/// A child whose text names the field (`<name>`, `<key>`, Flow's `<field>` and references)...
+const XML_NAME_HOLDERS: &[&str] = &[
+    "name",
+    "key",
+    "field",
+    "leftValueReference",
+    "assignToReference",
+];
+/// ...and the sibling that holds its value.
+const XML_VALUE_HOLDERS: &[&str] = &["value", "rightValue"];
 
 /// The first character after a byte-order mark and blanks opens markup.
 fn looks_like_xml(text: &str) -> bool {
@@ -601,8 +622,32 @@ fn looks_like_xml(text: &str) -> bool {
         .starts_with('<')
 }
 
-/// One element of the tolerant XML walk: its local name, the byte ranges of its own text and
-/// CDATA (blanks trimmed), and its child elements.
+/// Character and predefined entity references decoded, so `pa&#x73;sword` is checked as the
+/// name an XML reader sees.
+fn xml_unescape(s: &str) -> String {
+    XML_REF
+        .replace_all(s, |c: &regex::Captures| {
+            let code = c
+                .get(1)
+                .and_then(|h| u32::from_str_radix(h.as_str(), 16).ok())
+                .or_else(|| c.get(2).and_then(|d| d.as_str().parse().ok()));
+            match code {
+                Some(n) => char::from_u32(n).map(String::from).unwrap_or_default(),
+                None => match &c[3] {
+                    "lt" => "<",
+                    "gt" => ">",
+                    "amp" => "&",
+                    "quot" => "\"",
+                    _ => "'",
+                }
+                .to_string(),
+            }
+        })
+        .into_owned()
+}
+
+/// One element of the tolerant XML walk: its name, the byte ranges of its own text and CDATA
+/// (blanks trimmed), and its child elements.
 struct XmlEl {
     qname: String,
     local: String,
@@ -626,17 +671,17 @@ fn trimmed(text: &str, s: usize, e: usize) -> Option<(usize, usize)> {
 }
 
 /// estate#686: XML values under secret names. One tolerant pass over the markup (no parser, so
-/// malformed input still gets every range it can bound), then:
-/// - (a) the text of an element whose own local name C4 denies (`<password>v</password>`);
-/// - (b1) a `<name>` or `<key>` child whose text C4 denies masks its `<value>` siblings' text
-///   (a Hadoop or Maven `<property>`);
-/// - (b2) a `<leftValueReference>` or `<assignToReference>` child whose text C4 denies masks the
-///   `<stringValue>` in its `<rightValue>` or `<value>` siblings (a Salesforce Flow condition or
-///   assignment);
-/// - (c) a `key=` or `name=` attribute whose value C4 denies masks the `value=` attribute of the
-///   same tag (.NET `<add key=... value=...>`, Camunda `<camunda:property>`).
+/// malformed or truncated input still gets every range it can bound), then:
+/// - (a) all text inside an element whose own local name C4 denies (`<password>v</password>`);
+/// - (b) all text inside a `<value>` or `<rightValue>` child, when a sibling `<name>`, `<key>`,
+///   `<field>`, `<leftValueReference>` or `<assignToReference>` names what C4 denies (a Hadoop
+///   or Maven `<property>`; a Salesforce Flow variable, condition, assignment or record field);
+/// - (c) every `value=` attribute of a tag whose `key=` or `name=` attribute C4 denies (.NET
+///   `<add key=... value=...>`, Camunda `<camunda:property>`).
 ///
-/// An attribute named like a secret (`password="v"`) is already masked by [`kv_deny_masks`].
+/// Names are checked after entity decoding. An attribute named like a secret (`password="v"`)
+/// is already masked by [`kv_deny_masks`]. Each element's text is masked at most once, so the
+/// pass stays linear.
 fn xml_masks(text: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
     let mut els: Vec<XmlEl> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
@@ -659,9 +704,14 @@ fn xml_masks(text: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
             continue; // a comment, PI or declaration
         };
         if m.get(2).is_some_and(|g| g.as_str() == "/") {
-            // A close tag closes its open element; one with no open match is ignored.
-            if let Some(at) = stack.iter().rposition(|&i| els[i].qname == name.as_str()) {
-                stack.truncate(at);
+            // A close tag closes its open element; one with no match near the top is ignored.
+            if let Some(back) = stack
+                .iter()
+                .rev()
+                .take(XML_RECOVERY_DEPTH)
+                .position(|&i| els[i].qname == name.as_str())
+            {
+                stack.truncate(stack.len() - 1 - back);
             }
             continue;
         }
@@ -683,37 +733,34 @@ fn xml_masks(text: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
             stack.push(id);
         }
     }
+    // A truncated file: the text after the last token belongs to the element still open.
+    if let Some(&top) = stack.last() {
+        els[top].texts.extend(trimmed(text, last, text.len()));
+    }
     let text_of = |i: usize| -> String { els[i].texts.iter().map(|&(s, e)| &text[s..e]).collect() };
-    let mask_texts = |i: usize, masks: &mut Vec<(usize, usize, MaskKind)>| {
-        for &(s, e) in &els[i].texts {
-            masks.push((s, e, MaskKind::Text));
+    let named = |i: usize, names: &[&str]| names.contains(&els[i].local.as_str());
+    let mut done = vec![false; els.len()];
+    let mut mask_subtree = |root: usize, masks: &mut Vec<(usize, usize, MaskKind)>| {
+        let mut todo = vec![root];
+        while let Some(j) = todo.pop() {
+            if std::mem::replace(&mut done[j], true) {
+                continue; // its whole subtree is already masked
+            }
+            masks.extend(els[j].texts.iter().map(|&(s, e)| (s, e, MaskKind::Text)));
+            todo.extend(els[j].children.iter().copied());
         }
     };
-    let named = |i: usize, names: &[&str]| names.contains(&els[i].local.as_str());
     for i in 0..els.len() {
         if denied_name(&els[i].local) {
-            mask_texts(i, masks);
+            mask_subtree(i, masks);
         }
         let kids = &els[i].children;
         if kids
             .iter()
-            .any(|&c| named(c, &["name", "key"]) && denied_name(&text_of(c)))
+            .any(|&c| named(c, XML_NAME_HOLDERS) && denied_name(&xml_unescape(&text_of(c))))
         {
-            for &v in kids.iter().filter(|&&v| named(v, &["value"])) {
-                mask_texts(v, masks);
-            }
-        }
-        if kids.iter().any(|&c| {
-            named(c, &["leftValueReference", "assignToReference"]) && denied_name(&text_of(c))
-        }) {
-            for &w in kids.iter().filter(|&&w| named(w, &["rightValue", "value"])) {
-                for &sv in els[w]
-                    .children
-                    .iter()
-                    .filter(|&&sv| named(sv, &["stringValue"]))
-                {
-                    mask_texts(sv, masks);
-                }
+            for &v in kids.iter().filter(|&&v| named(v, XML_VALUE_HOLDERS)) {
+                mask_subtree(v, masks);
             }
         }
     }
@@ -722,19 +769,19 @@ fn xml_masks(text: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
 /// (c) of [`xml_masks`]: within one tag's attributes (`attrs`, starting at byte `base`).
 fn attr_pair_masks(attrs: &str, base: usize, masks: &mut Vec<(usize, usize, MaskKind)>) {
     let mut denied_pair = false;
-    let mut value = None;
+    let mut values = Vec::new();
     for c in XML_ATTR.captures_iter(attrs) {
         let Some(v) = c.get(2).or_else(|| c.get(3)) else {
             continue;
         };
         match local_name(&c[1]) {
-            "key" | "name" => denied_pair |= denied_name(v.as_str()),
-            "value" => value = Some((base + v.start(), base + v.end())),
+            "key" | "name" => denied_pair |= denied_name(&xml_unescape(v.as_str())),
+            "value" if v.start() < v.end() => values.push((base + v.start(), base + v.end())),
             _ => {}
         }
     }
-    if let Some((s, e)) = value.filter(|&(s, e)| denied_pair && s < e) {
-        masks.push((s, e, MaskKind::Text));
+    if denied_pair {
+        masks.extend(values.into_iter().map(|(s, e)| (s, e, MaskKind::Text)));
     }
 }
 
@@ -3254,6 +3301,50 @@ mod tests {
             let out = same_len(path, &fill(src));
             assert!(!out.contains("rosebud7"), "{path}: value kept:\n{out}");
         }
+    }
+
+    /// estate#686 round-1 review: shapes the first pass missed.
+    #[test]
+    fn xml_review_shapes_are_masked_686() {
+        let cases: &[&str] = &[
+            // Entity-encoded names, hexadecimal and decimal, in text and attributes.
+            "<property><name>pa&#x73;sword</name><value>rosebud7</value></property>\n",
+            "<add key=\"pa&#115;sword\" value=\"rosebud7\"/>\n",
+            // A Unicode namespace prefix and a Unicode element name.
+            "<root xmlns:\u{e9}=\"urn:x\"><\u{e9}:@PW_KEY@>rosebud7</\u{e9}:@PW_KEY@></root>\n",
+            "<root><\u{914d}\u{7f6e}_@PW_KEY@>rosebud7</\u{914d}\u{7f6e}_@PW_KEY@></root>\n",
+            // A PI whose body holds a close tag does not end the condition early.
+            "<conditions>\n  <leftValueReference>User.@PW_KEY@__c</leftValueReference>\n  <?p > </conditions> ?>\n  <rightValue><stringValue>rosebud7</stringValue></rightValue>\n</conditions>\n",
+            // A truncated file: the text after the last tag.
+            "<config><@PW_KEY@>rosebud7",
+            // Two value attributes in different namespaces: both are masked.
+            "<add xmlns:m=\"urn:m\" key=\"@PW_KEY@\" value=\"rosebud7\" m:value=\"public\"/>\n",
+            // A value nested inside the selected element.
+            "<@PW_KEY@><string>rosebud7</string></@PW_KEY@>\n",
+            "<property><name>@PW_KEY@</name><value><string>rosebud7</string></value></property>\n",
+            // Salesforce Flow: a variable bound by <name>, a record field bound by <field>.
+            "<Flow>\n    <variables>\n        <name>Api_@PW_KEY@</name>\n        <dataType>String</dataType>\n        <value>\n            <stringValue>rosebud7</stringValue>\n        </value>\n    </variables>\n    <recordCreates>\n        <inputAssignments>\n            <field>@PW_KEY@__c</field>\n            <value>\n                <stringValue>rosebud7</stringValue>\n            </value>\n        </inputAssignments>\n    </recordCreates>\n</Flow>\n",
+        ];
+        for src in cases {
+            let out = same_len("x.xml", &fill(src));
+            assert!(!out.contains("rosebud7"), "value kept:\n{out}");
+        }
+        // The second value attribute is masked too, not only the last one.
+        let out = same_len(
+            "x.xml",
+            &fill(
+                "<add xmlns:m=\"urn:m\" key=\"@PW_KEY@\" value=\"rosebud7\" m:value=\"public\"/>\n",
+            ),
+        );
+        assert!(!out.contains("public"), "{out}");
+        // Unmatched close tags recover within a bounded depth, so this stays linear.
+        let deep = format!(
+            "{}<@PW_KEY@>rosebud7</@PW_KEY@>{}",
+            "<a>\n".repeat(20_000),
+            "</b>\n".repeat(20_000)
+        );
+        let out = same_len("deep.xml", &fill(&deep));
+        assert!(!out.contains("rosebud7"));
     }
 
     /// estate#686: what the XML masks must leave alone.

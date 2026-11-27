@@ -464,6 +464,29 @@ fn fresh_index_stores_and_serves_no_planted_value() {
         content.contains("image: acme/api:1.2"),
         "trusted compose field kept"
     );
+    // #686: the XML rules files were indexed and stored masked, so their absence checks above
+    // are not vacuous.
+    {
+        let store = SqliteStore::open(&db).unwrap();
+        let nodes = store.all_nodes().unwrap();
+        for (rel, kept) in [
+            ("flows/Reset.flow-meta.xml", "<leftValueReference>User."),
+            ("rules/loan.dmn", "<camunda:property name=\"db_"),
+        ] {
+            let text = store
+                .file_content(rel)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{rel} was not stored"));
+            assert!(
+                text.contains(kept) && text.contains("REDACTED"),
+                "{rel}: {text}"
+            );
+            assert!(
+                nodes.iter().any(|n| n.location.file == rel),
+                "{rel} has no node"
+            );
+        }
+    }
     assert_no_value("CLI answers", &cli_answers(dbs), &needles());
     let mcp = mcp_answers(&db);
     assert!(
