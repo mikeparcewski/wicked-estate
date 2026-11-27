@@ -455,9 +455,87 @@ fn schema_objects_present(conn: &Connection) -> Result<()> {
 /// awaits a writer's #420 rebuild, which a read-only check never runs.
 const FTS_NOT_KEYED: &str = "the FTS rows are not all keyed by their node's sid";
 
+/// Meta key (wicked-estate#601): the version of the last build that opened the graph for writing.
+/// A writer open creates every object its build's schema has, so while a read-only reader finds
+/// one missing, this names a build that lacks it (or none, for a graph only older builds wrote).
+const WRITER_VERSION_KEY: &str = "writer_version";
+
+/// This build's store version, as writer opens record it and refusals name it.
+const STORE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Record this build as the graph's last writer (#601). Writer opens only; no write when it
+/// already is.
+fn record_writer_version(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta(k, v) VALUES(?1, ?2) \
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v WHERE v <> excluded.v",
+        params![WRITER_VERSION_KEY, STORE_VERSION],
+    )
+    .map(|_| ())
+    .map_err(st)
+}
+
+/// Which build last opened the graph for writing and which is reading it, for a refusal (#601).
+/// The recorded value comes from the graph file, so only a version-shaped one is quoted, and only
+/// a text value of 1 to 64 bytes is read at all: `typeof` and `octet_length` of a column read its
+/// header, not its content, so a huge value is never loaded (`''` stands for any other, #601
+/// codex-check).
+fn writer_and_reader(conn: &Connection) -> String {
+    let recorded: Option<String> = conn
+        .query_row(
+            "SELECT CASE WHEN typeof(v) = 'text' AND octet_length(v) BETWEEN 1 AND 64 \
+             THEN v ELSE '' END FROM meta WHERE k = ?1",
+            params![WRITER_VERSION_KEY],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let writer = match recorded {
+        Some(v)
+            if !v.is_empty()
+                && v.len() <= 64
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+')) =>
+        {
+            format!("wicked-estate-store {v}")
+        }
+        Some(_) => "a build whose recorded version is not a version".to_string(),
+        None => "a build that records no version".to_string(),
+    };
+    format!(
+        "last opened for writing by {writer}; this reader is wicked-estate-store {STORE_VERSION}"
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Called when the read-only check has refused, before the refusal's diagnostics read the
+    /// graph: a test writes the graph here, as a concurrent writer can (#601 round 1).
+    static TEST_AFTER_REFUSED_CHECK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The read-only currency check behind [`SqliteStore::open_readonly_current`]. Its error names
-/// what is missing: a schema object, or the columns this build's schema has that the graph lacks.
+/// what is missing: a schema object, or the columns this build's schema has that the graph lacks,
+/// and which builds last wrote and are reading the graph.
 fn check_current(conn: &Connection) -> Result<()> {
+    // One read transaction for the check and the refusal's diagnostics (#601 round 1): a writer
+    // that repairs the graph in between is never named as the build that lacked the object.
+    let own = conn.is_autocommit();
+    if own {
+        conn.execute_batch("BEGIN").map_err(st)?;
+    }
+    let res = check_current_in(conn);
+    if own {
+        // A read transaction: ending it changes nothing.
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    res
+}
+
+/// [`check_current`] inside the caller's read transaction.
+fn check_current_in(conn: &Connection) -> Result<()> {
     schema_objects_present(conn)
         .and_then(|()| migrate_schema(conn))
         .and_then(|()| {
@@ -469,14 +547,22 @@ fn check_current(conn: &Connection) -> Result<()> {
             }
         })
         .map_err(|e| {
+            #[cfg(test)]
+            TEST_AFTER_REFUSED_CHECK.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().as_mut() {
+                    hook();
+                }
+            });
             let missing = missing_columns(conn);
+            let builds = writer_and_reader(conn);
             if missing.is_empty() {
                 wicked_estate_core::Error::Invalid(format!(
-                    "the graph's schema predates this build and needs a writer's migration ({e})"
+                    "the graph's schema predates this build and needs a writer's migration ({e}; \
+                     {builds})"
                 ))
             } else {
                 wicked_estate_core::Error::Invalid(format!(
-                    "the graph has no column {}: its schema predates this build",
+                    "the graph has no column {}: its schema predates this build ({builds})",
                     missing.join(", ")
                 ))
             }
@@ -1534,6 +1620,7 @@ impl SqliteStore {
         stamp_fresh_redaction_epoch(&conn)?;
         migrate_fts_rowids(&conn)?;
         drop_legacy_fts_guard(&conn)?;
+        record_writer_version(&conn)?;
         // Read history_enabled flag from meta (absent → OFF, the new default).
         // Old databases that never set this key default to OFF (no history) rather than ON.
         // Callers that want history must pass `--history` (or call set_history_enabled(true)).
@@ -8652,6 +8739,77 @@ mod tests {
 
     /// wicked-estate#601: each writer-only name is an object a fresh graph has, so a rename in
     /// the schema cannot leave the exemption naming nothing while the renamed object refuses.
+    #[test]
+    fn a_refusal_names_the_writer_its_own_snapshot_saw_601() {
+        // #601 round 1 (codex): a writer that repairs the graph between the failed check and the
+        // refusal's diagnostics must not be named as the build that lacks what was missing.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("g.db");
+        drop(SqliteStore::open(&path).unwrap());
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "UPDATE meta SET v = '0.0.1' WHERE k = 'writer_version'; \
+                 DROP TABLE search_misses;",
+            )
+            .unwrap();
+        let ro = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let repair = path.clone();
+        TEST_AFTER_REFUSED_CHECK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                drop(SqliteStore::open(&repair).unwrap());
+            }))
+        });
+        let err = check_current(&ro).err().map(|e| e.to_string());
+        TEST_AFTER_REFUSED_CHECK.with(|hook| *hook.borrow_mut() = None);
+        let err = err.expect("the graph lacked search_misses when checked");
+        assert!(err.contains("search_misses"), "{err}");
+        assert!(
+            err.contains("last opened for writing by wicked-estate-store 0.0.1;"),
+            "the writer its snapshot recorded, not the one that repaired it since: {err}"
+        );
+        assert!(ro.is_autocommit(), "the check's read transaction is over");
+        drop(ro);
+        let fixed = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert!(check_current(&fixed).is_ok(), "the repaired graph passes");
+    }
+
+    #[test]
+    fn a_refusal_quotes_a_recorded_version_of_at_most_64_bytes_601() {
+        // #601 round 1 (codex): the recorded value is bounded in SQL, before it is read into the
+        // reader; 64 version-shaped bytes are quoted, 65 or a large value are not.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("g.db");
+        drop(SqliteStore::open(&path).unwrap());
+        let refusal = |value: &str| -> String {
+            let c = Connection::open(&path).unwrap();
+            c.execute(
+                "UPDATE meta SET v = ?1 WHERE k = 'writer_version'",
+                params![value],
+            )
+            .unwrap();
+            c.execute_batch("DROP TABLE IF EXISTS search_misses;")
+                .unwrap();
+            drop(c);
+            let ro = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            check_current(&ro).unwrap_err().to_string()
+        };
+        let at_limit = format!("1.{}", "0".repeat(62));
+        assert_eq!(at_limit.len(), 64);
+        let err = refusal(&at_limit);
+        assert!(
+            err.contains(&format!("wicked-estate-store {at_limit};")),
+            "{err}"
+        );
+        let not_a_version = "a build whose recorded version is not a version";
+        let over = format!("1.{}", "0".repeat(63));
+        let err = refusal(&over);
+        assert!(err.contains(not_a_version) && !err.contains(&over), "{err}");
+        let large = "1".repeat(1 << 20);
+        let err = refusal(&large);
+        assert!(err.contains(not_a_version) && err.len() < 1024, "{err}");
+    }
+
     #[test]
     fn writer_only_objects_are_schema_objects_601() {
         let fresh = SqliteStore::in_memory().unwrap();
