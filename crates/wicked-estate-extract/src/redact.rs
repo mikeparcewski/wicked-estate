@@ -3347,6 +3347,42 @@ mod tests {
         assert!(!out.contains("rosebud7"));
     }
 
+    /// estate#690 R-B: unterminated constructs cost one scan each, and a tag stops at the next
+    /// `<`, so the pass is linear and a broken tag cannot swallow the element after it.
+    #[test]
+    fn xml_tokenizer_is_linear_and_tags_stop_at_the_next_lt_690() {
+        let units = [
+            "<![CDATA[>",
+            "<!--x",
+            "<?p x",
+            "<!DOCTYPE x [",
+            "<!x",
+            "<a b=\"",
+            "<a ",
+        ];
+        for unit in units {
+            let text = format!(
+                "<root><@PW_KEY@>rosebud7</@PW_KEY@>{}</root>\n",
+                unit.repeat(40_000)
+            );
+            let started = std::time::Instant::now();
+            let out = same_len("x.xml", &fill(&text));
+            let took = started.elapsed();
+            assert!(!out.contains("rosebud7"), "{unit}: value kept");
+            // Linear is well under a second here, even unoptimized; a rescan per repeat is
+            // minutes.
+            assert!(
+                took < std::time::Duration::from_secs(10),
+                "{unit}: {took:?} for 40k repeats"
+            );
+        }
+        let out = same_len(
+            "x.xml",
+            &fill("<config><broken\n<@PW_KEY@>rosebud7</@PW_KEY@></config>\n"),
+        );
+        assert!(!out.contains("rosebud7"), "{out}");
+    }
+
     /// estate#686: what the XML masks must leave alone.
     #[test]
     fn xml_names_and_innocent_values_survive_686() {
