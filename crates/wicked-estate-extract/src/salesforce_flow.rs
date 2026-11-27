@@ -124,4 +124,42 @@ mod tests {
         assert_eq!(langs.len(), 1);
         assert_eq!(langs[0].as_str(), "xml-rules:salesforce-flow");
     }
+
+    /// #675 (from #663 round 1, codex): the two `Account.Status__c` conditions under different
+    /// outcomes of the fixture got one id, and the store kept one. Each is keyed under its rule's
+    /// API name, so every node keeps its own id.
+    #[test]
+    fn same_named_conditions_under_different_rules_keep_their_own_ids_675() {
+        let file = SourceFile {
+            path: "account_validation.flow-meta.xml".into(),
+            language: Language::new("xml-rules:salesforce-flow"),
+            text: include_str!(
+                "../tests/fixtures/salesforce_flow/account_validation.flow-meta.xml"
+            )
+            .into(),
+        };
+        let ex = SalesforceFlowExtractor::new().extract(&file).unwrap();
+        let ids: std::collections::HashSet<_> = ex.nodes.iter().map(|n| &n.symbol).collect();
+        assert_eq!(ids.len(), ex.nodes.len(), "one id per node");
+        let status: Vec<&str> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.name == "Account.Status__c")
+            .map(|n| n.symbol.as_str())
+            .collect();
+        assert_eq!(status.len(), 2);
+        assert!(
+            status
+                .iter()
+                .any(|id| id.contains("rules#Is_Active_Premium/")),
+            "{status:?}"
+        );
+        assert!(
+            status.iter().any(|id| id.contains("rules#Is_Inactive/")),
+            "{status:?}"
+        );
+        for e in &ex.local_edges {
+            assert!(ids.contains(&e.source) && ids.contains(&e.target), "{e:?}");
+        }
+    }
 }

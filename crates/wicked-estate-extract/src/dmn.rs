@@ -175,4 +175,92 @@ mod tests {
             "expected at least one Rule node"
         );
     }
+
+    fn ids(text: &str) -> Vec<(String, String)> {
+        CamundaDmnExtractor::new()
+            .extract(&SourceFile {
+                path: "loans.dmn".to_string(),
+                language: Language::new("xml-rules:camunda-dmn"),
+                text: text.to_string(),
+            })
+            .expect("extraction must succeed")
+            .nodes
+            .into_iter()
+            .map(|n| (n.name, n.symbol.0))
+            .collect()
+    }
+
+    fn named<'a>(ids: &'a [(String, String)], name: &str) -> Vec<&'a str> {
+        ids.iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, id)| id.as_str())
+            .collect()
+    }
+
+    fn model(body: &str) -> String {
+        format!(
+            "<definitions xmlns=\"https://www.omg.org/spec/DMN/20191111/MODEL/\" \
+             name=\"Loans\" id=\"loans\">\n{body}</definitions>\n"
+        )
+    }
+
+    /// #673 (DES-675): two inputs with one label in one table are two nodes, each keyed by its
+    /// DMN `id`, and inserting a third before them changes neither id.
+    #[test]
+    fn same_label_inputs_keep_their_own_ids_when_one_is_inserted_673() {
+        let table = |inputs: &str| {
+            model(&format!(
+                "  <decision name=\"Eligibility\" id=\"elig\">\n    \
+                 <decisionTable id=\"t1\">\n{inputs}    </decisionTable>\n  </decision>\n"
+            ))
+        };
+        let two =
+            "      <input id=\"in1\" label=\"Age\"/>\n      <input id=\"in2\" label=\"Age\"/>\n";
+        let before = ids(&table(two));
+        let before = named(&before, "Age");
+        assert_eq!(before.len(), 2, "{before:?}");
+        assert_ne!(before[0], before[1]);
+        let three = format!("      <input id=\"in0\" label=\"Age\"/>\n{two}");
+        let after = ids(&table(&three));
+        let after = named(&after, "Age");
+        assert_eq!(after.len(), 3, "{after:?}");
+        assert!(
+            before.iter().all(|id| after.contains(id)),
+            "{before:?} -> {after:?}"
+        );
+    }
+
+    /// DES-675 (c): a DMN `id` repeated in one file (a malformed model) never gives two
+    /// elements one id: the first keeps it, the later one is keyed under its own table.
+    #[test]
+    fn a_repeated_dmn_id_never_merges_two_elements_675() {
+        let got = ids(&model(
+            "  <decision name=\"A\" id=\"a\">\n    <decisionTable id=\"ta\">\n      \
+             <input id=\"dup\" label=\"Age\"/>\n    </decisionTable>\n  </decision>\n  \
+             <decision name=\"B\" id=\"b\">\n    <decisionTable id=\"tb\">\n      \
+             <input id=\"dup\" label=\"Age\"/>\n    </decisionTable>\n  </decision>\n",
+        ));
+        let age = named(&got, "Age");
+        assert_eq!(age.len(), 2, "{got:?}");
+        assert_ne!(age[0], age[1]);
+    }
+
+    /// DES-675 (d): a DMN input without an `id` is keyed under the nearest element that has
+    /// one, so same-labelled inputs of two tables stay two nodes.
+    #[test]
+    fn an_input_without_an_id_is_keyed_under_its_table_675() {
+        let got = ids(&model(
+            "  <decision name=\"A\" id=\"a\">\n    <decisionTable id=\"ta\">\n      \
+             <input label=\"Age\"/>\n    </decisionTable>\n  </decision>\n  \
+             <decision name=\"B\" id=\"b\">\n    <decisionTable id=\"tb\">\n      \
+             <input label=\"Age\"/>\n    </decisionTable>\n  </decision>\n",
+        ));
+        let age = named(&got, "Age");
+        assert_eq!(age.len(), 2, "{got:?}");
+        assert!(
+            age.iter()
+                .any(|id| id.contains("decisionTable#ta/input:Age")),
+            "{age:?}"
+        );
+    }
 }

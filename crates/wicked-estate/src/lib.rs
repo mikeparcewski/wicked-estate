@@ -9300,4 +9300,56 @@ node_scheme = "reviewmarker"
         assert_eq!(got.requirement_validated_by.as_deref(), Some("bob"));
         assert!(!got.requirement_validated);
     }
+    /// A DMN decision with one input table, written the way a DMN modeller saves it.
+    #[cfg(feature = "xml-rules")]
+    fn dmn(decisions: &[(&str, &str)]) -> String {
+        let mut xml = String::from(
+            "<definitions xmlns=\"https://www.omg.org/spec/DMN/20191111/MODEL/\" name=\"Loans\" \
+             id=\"loans\">\n",
+        );
+        for (decision, table) in decisions {
+            xml.push_str(&format!(
+                "  <decision name=\"{decision}\" id=\"{decision}-id\">\n    \
+                 <decisionTable id=\"{table}\">\n      <input id=\"{table}-age\" label=\"Age\"/>\n      \
+                 <output id=\"{table}-result\" label=\"Result\"/>\n    \
+                 </decisionTable>\n  </decision>\n"
+            ));
+        }
+        xml.push_str("</definitions>\n");
+        xml
+    }
+
+    /// #675 (DES-675 (a)): another decision table gains an input with the same label. The two
+    /// inputs are two nodes, each keyed by its DMN `id`, and the annotated one keeps its id and
+    /// its annotation through the real index route.
+    #[cfg(feature = "xml-rules")]
+    #[test]
+    fn xml_rules_ids_an_annotation_survives_a_new_same_named_element_675() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("loans.dmn");
+        std::fs::write(&file, dmn(&[("Eligibility", "t1")])).unwrap();
+        let mut store = SqliteStore::in_memory().unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        let age = sym_of(&store, "Age");
+        let kept = annotate_with_claim(&mut store, &age);
+
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
+        std::fs::write(&file, dmn(&[("Eligibility", "t1"), ("Pricing", "t2")])).unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        SEMANTICS_DROPS.with(|notes| {
+            assert!(notes.borrow().is_empty(), "{:?}", notes.borrow());
+        });
+        let ages = store
+            .find_symbols(&wicked_estate_core::SymbolQuery {
+                exact_name: Some("Age".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(ages.len(), 2, "two inputs, two nodes: {ages:?}");
+        assert_eq!(
+            store.node_semantics(&age).unwrap(),
+            Some(kept),
+            "Eligibility's Age keeps its id and its annotation"
+        );
+    }
 }
