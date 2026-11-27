@@ -3280,7 +3280,19 @@ fn index_path_inner(
         // codex-check).
         let mut reminted: HashSet<SymbolId> = HashSet::new();
         if let Some(cg) = codegraph_state.as_ref() {
-            let files: HashSet<String> = changed.iter().map(|fw| fw.rel.clone()).collect();
+            // A file saved during the run keeps estate's pipeline (the late fallback below,
+            // estate#657): nothing is minted in it, so nothing is predicted (DES-668).
+            let late: HashSet<String> = changed_during_run
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .cloned()
+                .collect();
+            let files: HashSet<String> = changed
+                .iter()
+                .map(|fw| fw.rel.clone())
+                .filter(|rel| !late.contains(rel))
+                .collect();
             let mut nodes = Vec::new();
             for symbol in &extracted_symbols {
                 if let Some(node) = store.get_node(symbol)? {
@@ -3314,14 +3326,16 @@ fn index_path_inner(
             if node.name.is_empty() || store.get_node(&node.symbol)?.is_some() {
                 continue;
             }
-            if is_codegraph_minted(node) && reminted.contains(&node.symbol) {
-                continue;
-            }
-            // Removed homonyms can make a parked name unique, including typed probe forms.
+            // Removed homonyms can make a parked name unique, including typed probe forms. A
+            // predicted re-mint keeps its probe too: if the mint does not happen after all, the
+            // retry frees a parked call; if it does, the retry finds the name as it was (DES-668).
             for probe in node_backfill_probes(node) {
                 if seen_probes.insert(probe.clone()) {
                     backfill_probes.push(probe);
                 }
+            }
+            if is_codegraph_minted(node) && reminted.contains(&node.symbol) {
+                continue;
             }
             if !is_structural_symbol(node) {
                 continue;
