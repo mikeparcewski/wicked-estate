@@ -965,8 +965,7 @@ impl FreshnessProbe {
                     exts.contains(&e)
                         || crate::is_grammarless_ext(&e)
                         || wicked_estate_extract::doc_convert::is_doc_ext(&e)
-                }) && !crate::is_rules_path(rel)
-                {
+                }) {
                     continue;
                 }
                 if !root.path.join(rel).is_file() {
@@ -1865,7 +1864,10 @@ mod tests {
     #[test]
     fn new_rules_files_count_as_unindexed_667() {
         let dir = tempfile::tempdir().unwrap();
+        #[cfg(feature = "xml-rules")]
         let files = ["r.clp", "p.irl", "t.gdst"];
+        #[cfg(not(feature = "xml-rules"))]
+        let files = ["r.clp", "p.irl"];
         for f in files {
             std::fs::write(dir.path().join(f), "x").unwrap();
         }

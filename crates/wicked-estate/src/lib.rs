@@ -198,18 +198,61 @@ fn grammarless_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
     }
 }
 
-/// The rules extractors a `.json` file's text names: an Azure Policy definition (`policyRule`)
-/// and an AWS Config rule (`ConfigRuleName`). Each checks the shape itself and returns no nodes
-/// for any other JSON, so a file mentioning both keys tries both (estate#620).
+/// Azure Policy effects, ASCII case ignored: the same vocabulary as the Azure trust table in
+/// `wicked-estate-extract/secret-rules.toml`.
+const AZURE_EFFECTS: &[&str] = &[
+    "addToNetworkGroup",
+    "Append",
+    "Audit",
+    "AuditIfNotExists",
+    "Deny",
+    "DenyAction",
+    "DeployIfNotExists",
+    "Disabled",
+    "Manual",
+    "Modify",
+    "Mutate",
+    "[parameters('effect')]",
+];
+
+/// The rules extractors for a `.json` file that IS an AWS Config rule or an Azure Policy
+/// definition, by the same shape the redaction trust tables detect (`secret-rules.toml`):
+/// - a non-empty string `ConfigRuleName` and a `Source.Owner` of AWS, CUSTOM_LAMBDA or
+///   CUSTOM_POLICY;
+/// - or a non-empty `properties.policyRule.if` object and a documented `then.effect`.
+///
+/// `text` is the redacted text, so a document the redactor did not trust has its owner or effect
+/// masked and stays generic JSON, as does a request payload or a JSON Schema that only names the
+/// keys (#667 S3).
 fn rules_json_extractors(ext: &str, text: &str) -> Vec<Box<dyn Extractor>> {
     let mut found: Vec<Box<dyn Extractor>> = Vec::new();
-    if ext != "json" {
+    if ext != "json"
+        || !(text.contains("\"policyRule\"") || text.contains("\"ConfigRuleName\""))
+        || is_minified_or_huge(text)
+    {
         return found;
     }
-    if text.contains("\"policyRule\"") {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(text) else {
+        return found;
+    };
+    let one_of = |v: Option<&serde_json::Value>, set: &[&str]| {
+        v.and_then(serde_json::Value::as_str)
+            .is_some_and(|s| set.iter().any(|x| x.eq_ignore_ascii_case(s)))
+    };
+    let rule = &root["properties"]["policyRule"];
+    if rule["if"].as_object().is_some_and(|o| !o.is_empty())
+        && one_of(rule["then"].get("effect"), AZURE_EFFECTS)
+    {
         found.push(Box::new(AzurePolicyExtractor::new()));
     }
-    if text.contains("\"ConfigRuleName\"") {
+    if root["ConfigRuleName"]
+        .as_str()
+        .is_some_and(|n| !n.is_empty())
+        && one_of(
+            root["Source"].get("Owner"),
+            &["AWS", "CUSTOM_LAMBDA", "CUSTOM_POLICY"],
+        )
+    {
         found.push(Box::new(AwsConfigRuleExtractor::new()));
     }
     found
@@ -230,8 +273,16 @@ fn grammarless_extraction(
         text: text.to_string(),
     };
     // A file the extractor rejects (malformed XML, say) still gets its File node, so it is in the
-    // graph and the indexed-file count, and the other files index as usual (#667 S3).
-    let mut extraction = extractor.extract(&sf).unwrap_or_default();
+    // graph, and the other files index as usual. It is said out loud, with the path and the
+    // language only, never the error text, which can quote the file (#667 S3).
+    let mut extraction = extractor.extract(&sf).unwrap_or_else(|_| {
+        eprintln!(
+            "RULES-PARSE: {rel_path}: the {} extractor could not read it; indexed as a file with \
+             no rules",
+            language.as_str()
+        );
+        Extraction::default()
+    });
     let file_symbol = Symbol::file(rel_path).id();
     let floc = Location::new(rel_path, Span::ZERO);
     let child_syms: Vec<SymbolId> = extraction.nodes.iter().map(|n| n.symbol.clone()).collect();
@@ -2343,7 +2394,11 @@ fn index_path_inner(
             {
                 Some((p, rel_path))
             } else {
-                let reason = not_indexed_reason(&ext);
+                let reason = if rel_path.to_ascii_lowercase().ends_with(".flow-meta.xml") {
+                    "Salesforce Flow: requires the 'xml-rules' feature"
+                } else {
+                    not_indexed_reason(&ext)
+                };
                 not_indexed.push((repo_scope::namespaced(repo, &rel_path), ext, reason));
                 None
             }
@@ -5499,11 +5554,24 @@ mod tests {
             std::fs::create_dir_all(to.parent().unwrap()).unwrap();
             std::fs::copy(fixtures.join(from), &to).unwrap();
         }
-        std::fs::write(
-            tmp.path().join("schema.json"),
-            r#"{"type":"object","properties":{"policyRule":{"type":"object"}}}"#,
-        )
-        .unwrap();
+        for (file, text) in [
+            (
+                "schema.json",
+                r#"{"type":"object","properties":{"policyRule":{"type":"object"}}}"#,
+            ),
+            // Round 1 (codex P2): a conditional JSON Schema has object-valued `if`/`then`.
+            (
+                "conditional-schema.json",
+                r#"{"type":"object","properties":{"policyRule":{"if":{"required":["a"]},"then":{"required":["b"]}}}}"#,
+            ),
+            // Round 1 (codex P2): an API request payload names a rule but is no rule definition.
+            (
+                "request.json",
+                r#"{"ConfigRuleName":"existing-rule","ComplianceTypes":["NON_COMPLIANT"]}"#,
+            ),
+        ] {
+            std::fs::write(tmp.path().join(file), text).unwrap();
+        }
         let mut store = MemStore::new();
         index_path_as(&mut store, tmp.path(), None).unwrap();
         let nodes = GraphRead::all_nodes(&store).unwrap();
@@ -5532,22 +5600,31 @@ mod tests {
                     && n.name == "AWS::EC2::SecurityGroup"),
             "the rule's resource type survives"
         );
-        let schema: Vec<&NodeKind> = nodes
-            .iter()
-            .filter(|n| n.location.file == "schema.json")
-            .map(|n| &n.kind)
-            .collect();
-        assert!(
-            !schema
+        for file in ["schema.json", "conditional-schema.json", "request.json"] {
+            let kinds: Vec<&NodeKind> = nodes
                 .iter()
-                .any(|k| matches!(k, NodeKind::Rule | NodeKind::RuleSet)),
-            "a JSON Schema is not a policy: {schema:?}"
-        );
+                .filter(|n| n.location.file == file)
+                .map(|n| &n.kind)
+                .collect();
+            assert!(
+                !kinds
+                    .iter()
+                    .any(|k| matches!(k, NodeKind::Rule | NodeKind::RuleSet)),
+                "{file} is not a rule: {kinds:?}"
+            );
+            // It stays generic JSON: its file node and its keys.
+            assert!(kinds.contains(&&NodeKind::File), "{file}: {kinds:?}");
+            assert!(
+                kinds.iter().any(|k| **k != NodeKind::File),
+                "{file} keeps its JSON keys: {kinds:?}"
+            );
+        }
     }
 
     /// estate#620 (coord ruling: option a): the release binary is built with default features,
     /// and `xml-rules` is one, so Camunda DMN and Salesforce Flow (`.flow-meta.xml`) files index
     /// as rule nodes instead of NOT-INDEXED.
+    #[cfg(feature = "xml-rules")]
     #[test]
     fn the_default_build_indexes_dmn_and_salesforce_flow_620() {
         let fixtures =
@@ -5589,8 +5666,74 @@ mod tests {
         }
     }
 
+    /// Round 1 (agy tests): Drools GDST and Progress Corticon index through the CLI too.
+    #[cfg(feature = "xml-rules")]
+    #[test]
+    fn the_default_build_indexes_gdst_and_corticon_667() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("loan.gdst"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<decision-table52 xmlns="http://www.jboss.org/drools">
+  <tableName>LoanApproval</tableName>
+  <conditionPatterns>
+    <org.drools.workbench.models.guided.dtable.shared.model.Pattern52>
+      <childColumns>
+        <org.drools.workbench.models.guided.dtable.shared.model.ConditionCol52>
+          <header>Credit Score</header>
+        </org.drools.workbench.models.guided.dtable.shared.model.ConditionCol52>
+      </childColumns>
+    </org.drools.workbench.models.guided.dtable.shared.model.Pattern52>
+  </conditionPatterns>
+</decision-table52>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("maint.ers"),
+            r##"<?xml version="1.0" encoding="UTF-8"?>
+<com.corticon.rulesemf.assetmodel:RulesheetAsset xmlns:com.corticon.rulesemf.assetmodel="http:///com/corticon/rulesemf/assetmodel.ecore" majorVersionNumber="2">
+  <languageCode>en_US</languageCode>
+  <ruleset vocabulary="Maintenance.ecore#/">
+    <rule/>
+    <rule documentingRuleStatements="#//@ruleset/@ruleStatements.0">
+      <condition>
+        <opaqueExpression expression="plane.totalMiles.mod ( 5000) &lt; 250"/>
+        <viewExpressions lhs="plane.totalMiles.mod ( 5000)" rhs="&lt; 250"/>
+      </condition>
+      <action>
+        <opaqueExpression expression="plane.maintenance += Maintenance.new[description='Change Tires']"/>
+      </action>
+    </rule>
+    <filter>
+      <opaqueExpression expression="plane.totalMiles > 0"/>
+    </filter>
+  </ruleset>
+</com.corticon.rulesemf.assetmodel:RulesheetAsset>"##,
+        )
+        .unwrap();
+        let mut store = MemStore::new();
+        NOT_INDEXED.with(|notes| notes.borrow_mut().clear());
+        index_path_as(&mut store, tmp.path(), None).unwrap();
+        let notes = NOT_INDEXED.with(|notes| notes.borrow().clone());
+        assert_eq!(notes, Vec::<(String, String)>::new());
+        let nodes = GraphRead::all_nodes(&store).unwrap();
+        for file in ["loan.gdst", "maint.ers"] {
+            let kinds: Vec<&NodeKind> = nodes
+                .iter()
+                .filter(|n| n.location.file == file)
+                .map(|n| &n.kind)
+                .collect();
+            assert!(kinds.contains(&&NodeKind::File), "{file}: {kinds:?}");
+            assert!(
+                kinds.iter().any(|k| **k != NodeKind::File),
+                "{file} has rule nodes: {kinds:?}"
+            );
+        }
+    }
+
     /// S3 PARTIAL FAILURE: one rules file the extractor rejects (malformed DMN XML) does not stop
-    /// the others, and it is reported rather than silently dropped.
+    /// the others, and it keeps its File node (a RULES-PARSE line says so) instead of vanishing.
+    #[cfg(feature = "xml-rules")]
     #[test]
     fn a_malformed_rules_file_is_reported_and_the_rest_index_667() {
         let fixtures =
@@ -5612,11 +5755,16 @@ mod tests {
                 .any(|n| n.location.file == "sample.clp" && n.kind == NodeKind::Rule),
             "the good rules file indexes"
         );
-        let notes = NOT_INDEXED.with(|notes| notes.borrow().clone());
-        let broken_indexed = nodes.iter().any(|n| n.location.file == "broken.dmn");
-        assert!(
-            broken_indexed || notes.iter().any(|(f, _)| f.ends_with("broken.dmn")),
-            "the malformed file is indexed as a file or reported: {notes:?}"
+        let broken: Vec<&NodeKind> = nodes
+            .iter()
+            .filter(|n| n.location.file == "broken.dmn")
+            .map(|n| &n.kind)
+            .collect();
+        // Round 1 (codex, agy): exactly its File node, and no rules.
+        assert_eq!(
+            broken,
+            vec![&NodeKind::File],
+            "the malformed file keeps its file node"
         );
     }
 
