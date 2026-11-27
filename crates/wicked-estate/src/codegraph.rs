@@ -3556,14 +3556,14 @@ mod tests {
         );
     }
 
-    /// estate#671: the same mid-run save, in a file the homonym pass re-extracts only because a
-    /// name it binds changed elsewhere (a pass-1 rebind file). src/util.ts minted an `assist`
-    /// last run; this run renames the `render` it calls, so it is re-extracted in pass 1, and it
-    /// is saved after the mirror read it, so it keeps estate's pipeline and mints nothing. Its
-    /// `assist` is gone: the call parked between the two `assist`s binds the one left, as a full
-    /// index of that state does.
-    #[test]
-    fn a_rebind_file_saved_mid_run_frees_the_call_parked_on_its_minted_name_671() {
+    /// estate#671: a mid-run save (estate#657) in a file the run re-extracts although its own
+    /// bytes did not change when the run classified it. src/util.ts minted an `assist` last run
+    /// and binds `render` (src/fmt.ts, not in codegraph's database) by name. `run2` edits another
+    /// file so that util.ts is re-extracted, and util.ts is saved after the mirror read it: it
+    /// keeps estate's pipeline and mints nothing. Its `assist` is gone, so the call parked between
+    /// the two `assist`s binds the one left, as a full index of that state does. Returns the
+    /// pass-1 rebind count of run 2.
+    fn a_re_extracted_file_saved_mid_run_loses_its_mint_671(run2: impl FnOnce(&Path)) -> usize {
         let tmp = tempfile::tempdir().unwrap();
         let root = fixture_copy(tmp.path());
         let svc = root.join("src/svc.ts");
@@ -3579,11 +3579,8 @@ mod tests {
         let mut text = std::fs::read_to_string(&lib).unwrap();
         text.push_str("export function assist(s: string): string { return s; }\n");
         std::fs::write(&lib, text).unwrap();
-        // src/fmt.ts is not in codegraph's database, so it keeps estate's pipeline, and
-        // util.ts's call into it binds by name (the fall-through).
-        let fmt = root.join("src/fmt.ts");
         std::fs::write(
-            &fmt,
+            root.join("src/fmt.ts"),
             "export function render(n: number): string { return String(n); }\n",
         )
         .unwrap();
@@ -3610,9 +3607,11 @@ mod tests {
         assert!(minted_in_util(&store), "util.ts's assist is minted");
         let calls = edges(&store, EdgeKind::Calls);
         assert!(
-            calls.iter().any(|(s, t, by)| s.contains("src/util/useRender")
-                && t.contains("src/fmt/render")
-                && !by.starts_with("codegraph:")),
+            calls
+                .iter()
+                .any(|(s, t, by)| s.contains("src/util/useRender")
+                    && t.contains("src/fmt/render")
+                    && !by.starts_with("codegraph:")),
             "util.ts's call binds render by name: {calls:?}"
         );
         let lib_assist = "ts-typescript . . . src/lib/util/assist().";
@@ -3622,13 +3621,7 @@ mod tests {
                 .any(|(_, t, _)| t.ends_with("/assist().")),
             "two assists: the call parks"
         );
-        // Run 2 renames render in fmt.ts only; util.ts is unchanged when the run classifies it,
-        // and saved after the mirror read it.
-        std::fs::write(
-            &fmt,
-            "export function rendered(n: number): string { return String(n); }\n",
-        )
-        .unwrap();
+        run2(&root);
         let (path, saved) = (util.clone(), format!("{text}// saved mid-run\n"));
         TEST_MIRROR_HOOK.with(|h| {
             *h.borrow_mut() = Some(Box::new(move |now: &str| {
@@ -3640,10 +3633,7 @@ mod tests {
         crate::TEST_REBIND_FILES.with(|count| count.set(0));
         index(&mut store, &root, Some(&cfg), Some(&sql));
         TEST_MIRROR_HOOK.with(|h| *h.borrow_mut() = None);
-        assert!(
-            crate::TEST_REBIND_FILES.with(|count| count.get()) > 0,
-            "render lost its candidate: util.ts is re-extracted in pass 1"
-        );
+        let rebinds = crate::TEST_REBIND_FILES.with(|count| count.get());
         assert!(
             !minted_in_util(&store),
             "util.ts changed during the run: nothing is minted in it"
@@ -3656,6 +3646,37 @@ mod tests {
             "one assist left: the parked call binds it: {:?}",
             calls_from(&calls, GET)
         );
+        rebinds
+    }
+
+    /// estate#671 as filed: a new `render` elsewhere is a gained candidate, so the homonym pass
+    /// re-extracts util.ts in pass 1.
+    #[test]
+    fn a_rebind_file_saved_mid_run_frees_the_call_parked_on_its_minted_name_671() {
+        let rebinds = a_re_extracted_file_saved_mid_run_loses_its_mint_671(|root| {
+            std::fs::write(
+                root.join("src/fmt2.ts"),
+                "export function render(n: number): string { return `${n}`; }\n",
+            )
+            .unwrap();
+        });
+        assert!(
+            rebinds > 0,
+            "render gained a candidate: util.ts is a rebind file"
+        );
+    }
+
+    /// The same loss in pass 0: renaming `render` changes a callee util.ts calls, so util.ts is
+    /// a forced value-flow caller (#220), re-extracted without being in the changed set.
+    #[test]
+    fn a_forced_caller_saved_mid_run_frees_the_call_parked_on_its_minted_name_671() {
+        a_re_extracted_file_saved_mid_run_loses_its_mint_671(|root| {
+            std::fs::write(
+                root.join("src/fmt.ts"),
+                "export function rendered(n: number): string { return String(n); }\n",
+            )
+            .unwrap();
+        });
     }
 
     #[test]
