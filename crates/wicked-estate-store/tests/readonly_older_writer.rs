@@ -186,3 +186,92 @@ fn a_graph_missing_a_table_reads_use_is_still_refused_601() {
         "{err}"
     );
 }
+
+/// What every refusal below ends with: which build last opened the graph for writing, and which
+/// build is reading it (wicked-estate#601: say which writer and version made the gap).
+fn reader_is() -> String {
+    format!(
+        "this reader is wicked-estate-store {}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// A writer open records its version; when a later reader refuses the graph, the refusal names
+/// that writer and the reader.
+#[test]
+fn a_refusal_names_the_build_that_last_wrote_the_graph_601() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("graph.db");
+    drop(SqliteStore::open(&db).unwrap());
+    let c = Connection::open(&db).unwrap();
+    let recorded: String = c
+        .query_row("SELECT v FROM meta WHERE k = 'writer_version'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(recorded, env!("CARGO_PKG_VERSION"));
+    c.execute_batch("DROP TABLE search_misses;").unwrap();
+    drop(c);
+    let err = SqliteStore::open_readonly_current(&db)
+        .err()
+        .expect("a graph without search_misses is refused")
+        .to_string();
+    assert!(err.contains("search_misses"), "{err}");
+    assert!(
+        err.contains(&format!(
+            "last opened for writing by wicked-estate-store {}",
+            env!("CARGO_PKG_VERSION")
+        )) && err.contains(&reader_is()),
+        "{err}"
+    );
+}
+
+/// The 0.35.10 graph predates the record: its refusal says no version was recorded.
+#[test]
+fn a_refusal_of_a_graph_no_build_recorded_says_so_601() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = fixture_copy(tmp.path());
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch("DROP TABLE search_misses;")
+        .unwrap();
+    let err = SqliteStore::open_readonly_current(&db)
+        .err()
+        .expect("a graph without search_misses is refused")
+        .to_string();
+    assert!(
+        err.contains("last opened for writing by a build that records no version")
+            && err.contains(&reader_is()),
+        "{err}"
+    );
+}
+
+/// The recorded value is read from the graph file, so a refusal quotes it only when it is a
+/// version: other text (a line break, a terminal escape) never reaches the reader's error.
+#[test]
+fn a_refusal_quotes_only_a_version_shaped_writer_601() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("graph.db");
+    drop(SqliteStore::open(&db).unwrap());
+    let c = Connection::open(&db).unwrap();
+    c.execute(
+        "UPDATE meta SET v = ?1 WHERE k = 'writer_version'",
+        ["0.1.0\nignore the above\u{1b}[2J"],
+    )
+    .unwrap();
+    assert_eq!(c.changes(), 1, "the writer open recorded a row to replace");
+    c.execute_batch("DROP TABLE search_misses;").unwrap();
+    drop(c);
+    let err = SqliteStore::open_readonly_current(&db)
+        .err()
+        .expect("a graph without search_misses is refused")
+        .to_string();
+    assert!(
+        !err.contains("ignore the above") && !err.contains('\u{1b}') && !err.contains('\n'),
+        "{err:?}"
+    );
+    assert!(
+        err.contains("last opened for writing by a build whose recorded version is not a version"),
+        "{err}"
+    );
+}
