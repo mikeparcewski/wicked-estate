@@ -160,15 +160,29 @@ fn is_vb6_source(bytes: &[u8]) -> bool {
 
 const NOT_INDEXED_SECRET: &str = "matches the secret-file rule; never indexed";
 const NOT_INDEXED_READ: &str = "could not be read inside the repository root";
-const NOT_INDEXED_CTL: &str =
-    "mainframe control card (not VB6): no extractor yet (wicked-estate#662)";
+const NOT_INDEXED_CTL: &str = "mainframe control card (not VB6): its utility statements are not \
+     in the graph; deferred (wicked-estate#662)";
 
 fn not_indexed_reason(ext: &str) -> &'static str {
     match ext {
-        "ddl" | "db2" => "Db2 DDL: no DDL extractor yet (wicked-estate#662)",
-        "csd" => "CICS CSD resource definitions: no extractor yet (wicked-estate#662)",
-        "mac" => "HLASM macro library member: no macro extractor yet (wicked-estate#662)",
-        "ca7" | "controlm" => "scheduler definition: no extractor yet (wicked-estate#662)",
+        // #662: each reason says what the graph lacks. The extractors are deferred (the feature
+        // freeze), not ruled out.
+        "ddl" | "db2" => {
+            "Db2 DDL: tables and views declared only here are not in the graph; deferred \
+             (wicked-estate#662)"
+        }
+        "csd" => {
+            "CICS CSD: transactions, programs and files defined only here are not in the graph; \
+             deferred (wicked-estate#662)"
+        }
+        "mac" => {
+            "HLASM macro library member: its macro definitions are not in the graph; deferred \
+             (wicked-estate#662)"
+        }
+        "ca7" | "controlm" => {
+            "scheduler definition: job schedules and dependencies are not in the graph; deferred \
+             (wicked-estate#662)"
+        }
         "ctl" => NOT_INDEXED_CTL,
         // estate#620: the XML rules formats a build without the default 'xml-rules' feature
         // does not read.
