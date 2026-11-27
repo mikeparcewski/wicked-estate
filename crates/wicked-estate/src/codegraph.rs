@@ -3413,6 +3413,81 @@ mod tests {
         );
     }
 
+    /// #668 codex-check v2: a type alias and a class get the same minted id (both take the
+    /// Type suffix), but resolvers admit them differently. A definition minted again under the
+    /// same id as another kind is a gained candidate, so its name's bound callers are
+    /// re-extracted.
+    #[test]
+    fn a_same_id_re_mint_of_another_kind_re_extracts_the_names_callers_668() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = root.join("src/svc.ts");
+        let text = std::fs::read_to_string(&svc).unwrap();
+        let from = "return helper(id).trim(); }";
+        assert!(text.contains(from));
+        std::fs::write(
+            &svc,
+            text.replacen(from, "return helper(id).trim() + assist(id); }", 1),
+        )
+        .unwrap();
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function assist(s: string): string { return s; }\n");
+        std::fs::write(&lib, text).unwrap();
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&lib_util_fell_back_sql()),
+        );
+        let util = root.join("src/util.ts");
+        let synthetic = |kind: &str| {
+            format!(
+                "{}\nINSERT INTO nodes VALUES('{kind}:synthetic-assist','{kind}','assist','assist',\
+                 'src/util.ts','typescript',3,3,0,40,NULL,NULL,NULL,1,0,0,0,NULL,NULL,NULL,0);",
+                lib_util_fell_back_sql()
+            )
+        };
+        let minted = |store: &SqliteStore| -> Vec<(String, NodeKind)> {
+            store
+                .all_nodes()
+                .unwrap()
+                .into_iter()
+                .filter(|n| {
+                    n.location.file == "src/util.ts"
+                        && n.name == "assist"
+                        && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+                })
+                .map(|n| (n.symbol.0, n.kind))
+                .collect()
+        };
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched\n");
+        std::fs::write(&util, &text).unwrap();
+        index(
+            &mut store,
+            &root,
+            Some(&cfg),
+            Some(&synthetic("type_alias")),
+        );
+        let alias = minted(&store);
+        assert_eq!(alias.len(), 1, "{alias:?}");
+        text.push_str("// touched again\n");
+        std::fs::write(&util, &text).unwrap();
+        crate::TEST_REBIND_FILES.with(|count| count.set(0));
+        index(&mut store, &root, Some(&cfg), Some(&synthetic("class")));
+        let class = minted(&store);
+        assert_eq!(class.len(), 1, "{class:?}");
+        assert_eq!(class[0].0, alias[0].0, "one minted id for both kinds");
+        assert_ne!(class[0].1, alias[0].1);
+        assert!(
+            crate::TEST_REBIND_FILES.with(|count| count.get()) > 0,
+            "the kind changed under one id: assist's bound callers are re-extracted"
+        );
+    }
+
     #[test]
     fn a_fall_through_call_named_like_a_codegraph_definition_stays_ambiguous_594() {
         // estate#594 (N1, W12): the same fall-back, with the call's only evidence the tsconfig
