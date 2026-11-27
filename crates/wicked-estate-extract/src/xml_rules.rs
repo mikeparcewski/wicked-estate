@@ -81,7 +81,8 @@ pub struct NodeMapping {
     pub name_text: bool,
 }
 
-/// An edge emitted whenever `child_element` appears as a direct child of `parent_element`.
+/// An edge emitted whenever `child_element` appears under `parent_element` with no other mapped
+/// element between them (unmapped wrapper elements are see-through, #682).
 #[derive(Debug, Clone, Deserialize)]
 pub struct EdgeMapping {
     pub parent_element: String,
@@ -266,9 +267,17 @@ impl Extractor for XmlRulesExtractor {
                 let parent_id_str = format!("{}::{}::{}", file.path, parent_path, parent_name);
                 let parent_sym = Symbol::synthetic("xml-rules", &parent_id_str).id();
 
-                // Walk direct children matching the child element.
-                for child in parent_node.children() {
-                    if !child.is_element() {
+                // Walk the child elements whose nearest mapped ancestor is this parent: direct
+                // children, or deeper ones behind unmapped wrappers (GDST nests its columns in
+                // `childColumns` / `actionCols`) (#682).
+                let nearest_mapped = |d: roxmltree::Node<'_, '_>| {
+                    d.ancestors()
+                        .skip(1)
+                        .find(|a| a.is_element() && node_map.contains_key(a.tag_name().name()))
+                        .map(|a| a.id())
+                };
+                for child in parent_node.descendants().skip(1) {
+                    if !child.is_element() || nearest_mapped(child) != Some(parent_node.id()) {
                         continue;
                     }
                     if child.tag_name().name() != edge_mapping.child_element {

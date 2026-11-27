@@ -62,6 +62,23 @@ name_child = "header"
 element    = "org.drools.workbench.models.guided.dtable.shared.model.ActionSetFieldCol52"
 emit_kind  = "action"
 name_child = "header"
+
+# The table's columns sit behind wrappers (conditionPatterns/Pattern52/childColumns, actionCols);
+# an edge reaches a column through them (#682).
+[[edge_mappings]]
+parent_element = "decision-table52"
+child_element  = "org.drools.workbench.models.guided.dtable.shared.model.ConditionCol52"
+edge_kind      = "evaluates"
+
+[[edge_mappings]]
+parent_element = "decision-table52"
+child_element  = "org.drools.workbench.models.guided.dtable.shared.model.ActionInsertFactCol52"
+edge_kind      = "produces"
+
+[[edge_mappings]]
+parent_element = "decision-table52"
+child_element  = "org.drools.workbench.models.guided.dtable.shared.model.ActionSetFieldCol52"
+edge_kind      = "produces"
 "#;
 
 /// Extractor for Drools GDST guided decision table files (`*.gdst`).
