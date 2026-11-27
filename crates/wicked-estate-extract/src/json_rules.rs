@@ -961,14 +961,58 @@ mod tests {
   "policyRule": {"if": {"x": 1}, "then": {"effect": {}}}}}"#,
                 "secret-name-f6",
             ),
+            // DES-670: every detecting key is typed, so detection is the extractor's acceptance
+            // test (json_rules.rs, `AwsConfigRuleExtractor` and `AzurePolicyExtractor`) or
+            // stricter. Each shape the extractor rejects keeps everything masked.
+            (
+                "data/aws-name-object.json",
+                r#"{"ConfigRuleName": {}, "Source": {"Owner": "AWS"}, "Description": "secret-i9"}"#,
+                "secret-i9",
+            ),
+            (
+                "data/aws-name-number.json",
+                r#"{"ConfigRuleName": 7, "Source": {"Owner": "AWS"}, "Description": "secret-j1"}"#,
+                "secret-j1",
+            ),
+            (
+                "data/aws-name-null.json",
+                r#"{"ConfigRuleName": null, "Source": {"Owner": "AWS"}, "Description": "secret-k2"}"#,
+                "secret-k2",
+            ),
+            (
+                "data/aws-name-empty.json",
+                r#"{"ConfigRuleName": "", "Source": {"Owner": "AWS"}, "Description": "secret-l3"}"#,
+                "secret-l3",
+            ),
+            (
+                "data/aws-identifier-object.json",
+                r#"{"ConfigRuleName": "r", "Source": {"Owner": "AWS", "SourceIdentifier": {"x": "secret-m4"}}}"#,
+                "secret-m4",
+            ),
+            (
+                "data/azure-effect-outside.json",
+                r#"{"properties": {"displayName": "secret-n5",
+  "policyRule": {"if": {"field": "type", "equals": "x"}, "then": {"effect": "customer-x"}}}}"#,
+                "secret-n5",
+            ),
+            (
+                "data/azure-if-array.json",
+                r#"{"properties": {"displayName": "secret-o6",
+  "policyRule": {"if": [{"field": "type"}], "then": {"effect": "deny"}}}}"#,
+                "secret-o6",
+            ),
         ];
-        for (path, text, secret) in cases {
-            let masked = crate::redact::redact_source(path, text);
-            assert!(
-                !masked.contains(secret),
-                "{path}: {secret} stays masked: {masked}"
-            );
-        }
+        // Every leak is reported at once.
+        let leaks: Vec<String> = cases
+            .iter()
+            .filter_map(|(path, text, secret)| {
+                let masked = crate::redact::redact_source(path, text);
+                masked
+                    .contains(secret)
+                    .then(|| format!("{path}: {secret} kept: {masked}"))
+            })
+            .collect();
+        assert!(leaks.is_empty(), "{leaks:#?}");
     }
 
     /// #670 codex-check: an AWS Config custom policy rule has no `SourceIdentifier` (AWS ignores
@@ -989,6 +1033,13 @@ mod tests {
         let masked = crate::redact::redact_source("policies/lower.json", azure);
         assert!(masked.contains("Lowercase effect"), "{masked}");
         assert!(masked.contains("\"deny\""), "{masked}");
+        // DES-670: addToNetworkGroup is a documented effect.
+        let network = r#"{"properties": {"displayName": "Join the group",
+  "policyRule": {"if": {"field": "type", "equals": "x"},
+    "then": {"effect": "addToNetworkGroup", "details": {"networkGroupId": "secret-p7"}}}}}"#;
+        let masked = crate::redact::redact_source("policies/network.json", network);
+        assert!(masked.contains("Join the group"), "{masked}");
+        assert!(!masked.contains("secret-p7"), "{masked}");
     }
 
     /// estate#667 S2: a JSON Schema that declares a `policyRule` property is not an Azure
