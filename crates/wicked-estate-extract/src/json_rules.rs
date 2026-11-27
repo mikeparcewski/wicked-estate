@@ -1046,6 +1046,46 @@ mod tests {
                 "secret-dup-d4",
             ),
             (
+                "config/dup-description-last.json",
+                r#"{"ConfigRuleName": "r", "Source": {"Owner": "AWS"},
+  "Description": "public", "Description": "secret-dup-d5"}"#,
+                "secret-dup-d5",
+            ),
+            // Round 1 (codex, agy P1): a key spelled with an escape is the same key to serde_json,
+            // in either order, on a detecting key or a kept one.
+            (
+                "config/dup-escaped.json",
+                r#"{"ConfigRuleName": "r", "ConfigRuleNam\u0065": null, "Source": {"Owner": "AWS"},
+  "Description": "secret-esc-h1"}"#,
+                "secret-esc-h1",
+            ),
+            (
+                "config/dup-escaped-first.json",
+                r#"{"ConfigRuleNam\u0065": null, "ConfigRuleName": "r", "Source": {"Owner": "AWS"},
+  "Description": "secret-esc-h2"}"#,
+                "secret-esc-h2",
+            ),
+            (
+                "config/dup-escaped-owner.json",
+                r#"{"ConfigRuleName": "r", "Source": {"Owner": "AWS", "\u004fwner": {"x": 1}},
+  "Description": "secret-esc-h3"}"#,
+                "secret-esc-h3",
+            ),
+            (
+                "config/dup-escaped-kept.json",
+                r#"{"ConfigRuleName": "r", "Source": {"Owner": "AWS"},
+  "Description": "secret-esc-h4", "Descriptio\u006e": "public"}"#,
+                "secret-esc-h4",
+            ),
+            // Round 1 (agy P1): a repeat inside one array item counts; items are separate objects.
+            (
+                "policies/dup-in-item.json",
+                r#"{"properties": {"displayName": "secret-item-h5", "policyRule": {
+  "if": {"allOf": [{"field": "type", "field": "name", "equals": "a"}]},
+  "then": {"effect": "deny"}}}}"#,
+                "secret-item-h5",
+            ),
+            (
                 "policies/dup-if.json",
                 r#"{"properties": {"displayName": "secret-dup-e5", "policyRule": {
   "if": {"field": "type", "equals": "x"}, "if": false, "then": {"effect": "deny"}}}}"#,

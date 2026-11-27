@@ -636,6 +636,9 @@ struct Walk {
     /// Direct scalar children of each mapping: key -> value text.
     maps: Vec<HashMap<String, String>>,
     docs: usize,
+    /// Documents with a mapping that holds one key twice, or a key spelled with an escape: no
+    /// detect trust for them (estate#676, see `new_map`).
+    dup_docs: HashSet<usize>,
 }
 
 fn config_masks(
@@ -706,17 +709,6 @@ fn config_masks(
             .find(|l| l.doc == doc && l.path.iter().map(String::as_str).eq(p.iter().copied()))
             .map(|l| text[l.start..l.end].to_string())
     };
-    // A document with one key path twice outside arrays (a duplicate key, which JSON allows and
-    // whose last occurrence the extractors keep) gets no detect trust: detection saw any
-    // occurrence, so it could pass on a value the extractor never reads (estate#676). Array
-    // items share a path by design.
-    let mut dup_doc = vec![false; w.docs];
-    let mut seen: HashSet<(usize, &[String])> = HashSet::new();
-    for (d, k) in &w.keys {
-        if !k.iter().any(|s| s == "[]") && !seen.insert((*d, k.as_slice())) {
-            dup_doc[*d] = true;
-        }
-    }
     // Per-document: the trust tables that apply, the structural-deny patterns, known hosts.
     let mut doc_trust: Vec<Vec<&Trust>> = vec![Vec::new(); w.docs];
     let mut doc_deny: Vec<Vec<&str>> = vec![Vec::new(); w.docs];
@@ -724,7 +716,7 @@ fn config_masks(
     for doc in 0..w.docs {
         for t in c.rules.trust.iter().filter(|t| t.grammar == grammar) {
             let by_file = t.files.is_empty() || name_matches(&t.files, name);
-            let by_detect = (t.detect.is_empty() || !dup_doc[doc])
+            let by_detect = (t.detect.is_empty() || !w.dup_docs.contains(&doc))
                 && t.detect.iter().all(|d| match d.split_once('=') {
                     // `path=*` is a non-empty string (not a number, boolean, null or container).
                     Some((k, "*")) => {
@@ -884,7 +876,7 @@ fn walk(
             path.push("[]".into());
         }
         w.keys.push((doc, path.clone()));
-        let m = new_map(node, src, fmt, w);
+        let m = new_map(node, src, fmt, doc, w);
         let mut c = node.walk();
         for ch in node.named_children(&mut c) {
             if key_node.is_some_and(|k| k.id() == ch.id()) {
@@ -938,7 +930,7 @@ fn walk(
         .iter()
         .any(|ch| fmt.pair.iter().any(|r| r.kind == ch.kind()));
     let map = if has_pairs {
-        Some(new_map(node, src, fmt, w))
+        Some(new_map(node, src, fmt, doc, w))
     } else {
         map
     };
@@ -1091,12 +1083,23 @@ fn pair(
     path.truncate(depth);
 }
 
-fn new_map(node: tree_sitter::Node, src: &[u8], fmt: &Format, w: &mut Walk) -> usize {
+fn new_map(node: tree_sitter::Node, src: &[u8], fmt: &Format, doc: usize, w: &mut Walk) -> usize {
     let mut m = HashMap::new();
+    let mut names = HashSet::new();
     let mut c = node.walk();
     for ch in node.named_children(&mut c) {
         if let Some(rule) = fmt.pair.iter().find(|r| r.kind == ch.kind()) {
             let (key, values) = pair_parts(ch, rule, src);
+            // estate#676: JSON allows a key twice and the extractors (serde_json) keep the last,
+            // while a detect sees any occurrence, so a document whose mapping repeats a key gets
+            // no detect trust. Keys are compared as written, so a key spelled with an escape
+            // (which a parser may decode to another key's name) counts as a repeat too.
+            let repeated = key.as_ref().is_some_and(|k| {
+                k.iter().any(|s| s.contains('\\')) || !names.insert(k.join("\u{0}"))
+            });
+            if repeated {
+                w.dup_docs.insert(doc);
+            }
             if let (Some(k), Some(v)) = (key, values.first()) {
                 m.insert(k.join("."), unquote(node_text(*v, src)).to_string());
             }
