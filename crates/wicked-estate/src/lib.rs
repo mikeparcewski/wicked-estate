@@ -9236,48 +9236,4 @@ node_scheme = "reviewmarker"
         assert_eq!(got.requirement_validated_by.as_deref(), Some("bob"));
         assert!(!got.requirement_validated);
     }
-
-    /// A DMN decision with one input table, written the way a DMN modeller saves it.
-    #[cfg(feature = "xml-rules")]
-    fn dmn(decisions: &[(&str, &str)]) -> String {
-        let mut xml = String::from(
-            "<definitions xmlns=\"https://www.omg.org/spec/DMN/20191111/MODEL/\" name=\"Loans\">\n",
-        );
-        for (decision, table) in decisions {
-            xml.push_str(&format!(
-                "  <decision name=\"{decision}\">\n    <decisionTable id=\"{table}\">\n      \
-                 <input label=\"Age\"/>\n      <output label=\"Result\"/>\n    \
-                 </decisionTable>\n  </decision>\n"
-            ));
-        }
-        xml.push_str("</definitions>\n");
-        xml
-    }
-
-    /// #669 codex-check v2 (DES-669): an annotated DMN input keeps its annotation when another
-    /// decision table gains an input with the same label. Its id must not depend on whether a
-    /// same-named element exists elsewhere in the file.
-    #[cfg(feature = "xml-rules")]
-    #[test]
-    fn xml_rules_ids_an_annotation_survives_a_new_same_named_element_669() {
-        let tmp = tempfile::tempdir().unwrap();
-        let file = tmp.path().join("loans.dmn");
-        std::fs::write(&file, dmn(&[("Eligibility", "t1")])).unwrap();
-        let mut store = SqliteStore::in_memory().unwrap();
-        index_path(&mut store, tmp.path()).unwrap();
-        let age = sym_of(&store, "Age");
-        let kept = annotate_with_claim(&mut store, &age);
-
-        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
-        std::fs::write(&file, dmn(&[("Eligibility", "t1"), ("Pricing", "t2")])).unwrap();
-        index_path(&mut store, tmp.path()).unwrap();
-        SEMANTICS_DROPS.with(|notes| {
-            assert!(notes.borrow().is_empty(), "{:?}", notes.borrow());
-        });
-        assert_eq!(
-            store.node_semantics(&age).unwrap(),
-            Some(kept),
-            "Eligibility's Age keeps its id and its annotation"
-        );
-    }
 }
