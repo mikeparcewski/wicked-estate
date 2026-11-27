@@ -4,7 +4,7 @@
 
 ## [0.37.1] — 2026-11-27
 
-Release on the train-18 cut a4d38672, carrying 4 PRs since 0.37.0: #663, #668, #669, #670. The entries were written from each PR's changelog entry.
+Release on the train-18 cut 62960bea, carrying 5 PRs since 0.37.0: #663, #668, #669, #670, #680. The entries were written from each PR's changelog entry.
 
 ### Fixed
 
@@ -15,6 +15,7 @@ Release on the train-18 cut a4d38672, carrying 4 PRs since 0.37.0: #663, #668, #
 - A parenthesis, `;` or `=>` inside a CLIPS string no longer hides later rules or turns conditions into actions (#664, #669).
 - AWS Config rules (owner AWS, CUSTOM_LAMBDA or CUSTOM_POLICY) and Azure Policy definitions (a documented effect, or `[parameters('effect')]`) keep their names, descriptions and effects after redaction. Parameters, condition values and deployment details stay masked; other effect parameter names stay masked as before (#674) (#667, #670).
 - A JSON Schema that declares a `policyRule` property is no longer read as an Azure Policy, and `.JSON` rule files are read (#667, #670).
+- A config file with a duplicated key (for example a JSON AWS Config rule or Azure Policy definition with `ConfigRuleName` twice) is no longer trusted as a governance document. Its values get the default masking instead of that document type's trust (#676, #680).
 
 ## [0.37.0] — 2026-11-27
 
