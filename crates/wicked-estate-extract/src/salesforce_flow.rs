@@ -85,7 +85,12 @@ impl SalesforceFlowExtractor {
     pub fn new() -> Self {
         let cfg: XmlRulesConfig =
             toml::from_str(FLOW_CONFIG).expect("embedded Salesforce Flow TOML config is valid");
-        Self(XmlRulesExtractor::new(cfg))
+        let mut inner = XmlRulesExtractor::new(cfg);
+        // A Flow element's API `<name>` is unique in the flow and survives label edits (#675).
+        for element in ["decisions", "rules", "actionCalls"] {
+            inner = inner.with_id_child(element, "name");
+        }
+        Self(inner)
     }
 }
 
@@ -123,5 +128,90 @@ mod tests {
         let langs = extractor.languages();
         assert_eq!(langs.len(), 1);
         assert_eq!(langs[0].as_str(), "xml-rules:salesforce-flow");
+    }
+
+    /// #675 (from #663 round 1, codex): the two `Account.Status__c` conditions under different
+    /// outcomes of the fixture got one id, and the store kept one. Each is keyed under its rule's
+    /// API name, so every node keeps its own id.
+    #[test]
+    fn same_named_conditions_under_different_rules_keep_their_own_ids_675() {
+        let file = SourceFile {
+            path: "account_validation.flow-meta.xml".into(),
+            language: Language::new("xml-rules:salesforce-flow"),
+            text: include_str!(
+                "../tests/fixtures/salesforce_flow/account_validation.flow-meta.xml"
+            )
+            .into(),
+        };
+        let ex = SalesforceFlowExtractor::new().extract(&file).unwrap();
+        let ids: std::collections::HashSet<_> = ex.nodes.iter().map(|n| &n.symbol).collect();
+        assert_eq!(ids.len(), ex.nodes.len(), "one id per node");
+        let status: Vec<&str> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.name == "Account.Status__c")
+            .map(|n| n.symbol.as_str())
+            .collect();
+        assert_eq!(status.len(), 2);
+        assert!(
+            status
+                .iter()
+                .any(|id| id.contains("rules#Is_Active_Premium/")),
+            "{status:?}"
+        );
+        assert!(
+            status.iter().any(|id| id.contains("rules#Is_Inactive/")),
+            "{status:?}"
+        );
+        for e in &ex.local_edges {
+            assert!(ids.contains(&e.source) && ids.contains(&e.target), "{e:?}");
+        }
+    }
+
+    fn flow_ids(conditions: &[(&str, &str)]) -> Vec<String> {
+        let conditions: String = conditions
+            .iter()
+            .map(|(field, op)| {
+                format!(
+                    "<conditions><leftValueReference>{field}</leftValueReference>\
+                     <operator>{op}</operator></conditions>"
+                )
+            })
+            .collect();
+        let text = format!(
+            "<Flow xmlns=\"http://soap.sforce.com/2006/04/metadata\"><label>F</label>\
+             <decisions><name>D</name><label>D</label><rules><name>R</name><label>R</label>\
+             {conditions}</rules></decisions></Flow>"
+        );
+        let file = SourceFile {
+            path: "f.flow-meta.xml".into(),
+            language: Language::new("xml-rules:salesforce-flow"),
+            text,
+        };
+        let ex = SalesforceFlowExtractor::new().extract(&file).unwrap();
+        ex.nodes
+            .into_iter()
+            .filter(|n| n.name == "Amount")
+            .map(|n| n.symbol.0)
+            .collect()
+    }
+
+    /// Round 1 (agy P2-2): two conditions on one field under one rule (a range) are two
+    /// nodes, told apart by content, and inserting a third condition moves neither.
+    #[test]
+    fn two_conditions_on_one_field_stay_two_nodes_675() {
+        let before = flow_ids(&[("Amount", "GreaterThan"), ("Amount", "LessThan")]);
+        assert_eq!(before.len(), 2, "{before:?}");
+        assert_ne!(before[0], before[1]);
+        let after = flow_ids(&[
+            ("Amount", "EqualTo"),
+            ("Amount", "GreaterThan"),
+            ("Amount", "LessThan"),
+        ]);
+        assert_eq!(after.len(), 3, "{after:?}");
+        assert!(
+            before.iter().all(|id| after.contains(id)),
+            "{before:?} -> {after:?}"
+        );
     }
 }
