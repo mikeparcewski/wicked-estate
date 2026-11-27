@@ -495,14 +495,22 @@ fn call_site_key(location: &Location) -> CallSiteKey {
     )
 }
 
-/// Resolve `refs`: with codegraph on, the refs codegraph owns (switched files, owned kinds) are
-/// answered from its facts and the rest go to estate's resolvers; the two results are merged as
-/// `resolve_all_with_coverage` merges resolvers (per-site edges kept, one edge per
-/// `(source, target, kind)` at the highest confidence).
 /// Whether `node` is a definition codegraph minted (estate#584: `origin: codegraph`).
 fn is_codegraph_minted(node: &Node) -> bool {
     node.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
 }
+
+/// Whether `new` is `old` minted again: one id, one kind and one signature. Anything else (a
+/// type alias minted again as a class keeps its id) is a gained and a lost candidate, as
+/// resolvers admit kinds differently (#668 codex-check v2).
+fn is_same_mint(old: &Node, new: &Node) -> bool {
+    old.symbol == new.symbol && old.kind == new.kind && old.signature == new.signature
+}
+
+/// Resolve `refs`: with codegraph on, the refs codegraph owns (switched files, owned kinds) are
+/// answered from its facts and the rest go to estate's resolvers; the two results are merged as
+/// `resolve_all_with_coverage` merges resolvers (per-site edges kept, one edge per
+/// `(source, target, kind)` at the highest confidence).
 
 fn resolve_with_codegraph(
     resolvers: &[&dyn Resolver],
@@ -3269,8 +3277,8 @@ fn index_path_inner(
         }
         // A definition codegraph will mint in a file extracted this pass is a gained name too:
         // the mapping that mints it runs after this pass (estate#660). One minted last run and
-        // minted again with the same id (so the same kind and owner) is neither gained nor lost
-        // (#668 round 1, codex-check: a type alias minted again as a function is a new callable).
+        // minted again unchanged (`is_same_mint`) is neither gained nor lost (#668 round 1 and
+        // codex-check).
         let mut reminted: HashSet<SymbolId> = HashSet::new();
         if let Some(cg) = codegraph_state.as_ref() {
             let files: HashSet<String> = changed.iter().map(|fw| fw.rel.clone()).collect();
@@ -3283,16 +3291,22 @@ fn index_path_inner(
             let refs: Vec<&Node> = nodes.iter().collect();
             let reader: &dyn GraphRead = &*store;
             let text = |file: &str| reader.file_content(file).ok().flatten();
-            let old_minted: HashSet<&SymbolId> = old_candidates
+            let old_minted: HashMap<&SymbolId, &Node> = old_candidates
                 .iter()
                 .filter(|n| is_codegraph_minted(n))
-                .map(|n| &n.symbol)
+                .map(|n| (&n.symbol, n))
                 .collect();
-            for (file, name, symbol) in cg.minted_names(&refs, &files, &text) {
-                if old_minted.contains(&symbol) {
-                    reminted.insert(symbol);
+            for node in cg.minted_names(&refs, &files, &text) {
+                if old_minted
+                    .get(&node.symbol)
+                    .is_some_and(|old| is_same_mint(old, &node))
+                {
+                    reminted.insert(node.symbol);
                 } else {
-                    changed_names.entry(name).or_default().insert(file);
+                    changed_names
+                        .entry(node.name)
+                        .or_default()
+                        .insert(node.location.file);
                 }
             }
         }

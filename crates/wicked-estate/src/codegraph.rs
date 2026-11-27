@@ -1361,25 +1361,21 @@ pub(crate) struct IdMap {
 }
 
 impl Prepared {
-    /// The (file, name, id) of every definition [`Self::id_map`] will mint in `mint_in`, before
-    /// the mapping runs: the mapping itself on the files' own nodes, so the prediction and the
-    /// minting cannot disagree (#668 round 1). The homonym pass reads it (estate#660); the id
-    /// carries the kind, so a definition minted again as another kind is a new candidate. A
-    /// definition's matches are within its own file, so the files' nodes are enough; the
-    /// dropped-edge count this dry run adds is put back.
+    /// Every node [`Self::id_map`] will mint in `mint_in`, before the mapping runs: the mapping
+    /// itself on the files' own nodes, so the prediction and the minting cannot disagree (#668
+    /// round 1). The homonym pass reads it (estate#660). A definition's matches are within its
+    /// own file, so the files' nodes are enough; the dropped-edge count this dry run adds is put
+    /// back.
     pub(crate) fn minted_names(
         &self,
         nodes: &[&Node],
         mint_in: &HashSet<String>,
         text: &dyn Fn(&str) -> Option<String>,
-    ) -> Vec<(String, String, SymbolId)> {
+    ) -> Vec<Node> {
         let drops = *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner());
         let ids = self.id_map(nodes, mint_in, text);
         *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) = drops;
         ids.minted
-            .into_iter()
-            .map(|n| (n.location.file, n.name, n.symbol))
-            .collect()
     }
 
     /// Map codegraph definitions onto estate nodes. `nodes` is the post-write population (the
