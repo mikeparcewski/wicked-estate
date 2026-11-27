@@ -196,6 +196,15 @@ mod tests {
             .collect()
     }
 
+    /// #679: two conditions on one field that differ only in whitespace inside a literal are
+    /// two nodes; the digest that tells them apart keeps whitespace.
+    #[test]
+    fn conditions_differing_only_in_literal_whitespace_stay_two_nodes_679() {
+        let ids = flow_ids(&[("Amount", "A B"), ("Amount", "A  B")]);
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert_ne!(ids[0], ids[1]);
+    }
+
     /// Round 1 (agy P2-2): two conditions on one field under one rule (a range) are two
     /// nodes, told apart by content, and inserting a third condition moves neither.
     #[test]
