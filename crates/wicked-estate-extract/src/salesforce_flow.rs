@@ -196,6 +196,72 @@ mod tests {
             .collect()
     }
 
+    /// #679: two conditions on one field that differ only in whitespace inside a literal are
+    /// two nodes; the digest that tells them apart keeps whitespace.
+    #[test]
+    fn conditions_differing_only_in_literal_whitespace_stay_two_nodes_679() {
+        let ids = flow_ids(&[("Amount", "A B"), ("Amount", "A  B")]);
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    /// #679: the digest keeps whitespace inside a value but reads line ends as XML does, so a
+    /// CRLF (or CR) checkout of the same file keeps every id.
+    #[test]
+    fn a_crlf_checkout_keeps_the_ids_679() {
+        let lf = flow_ids(&[("Amount", "A\nB"), ("Amount", "A B")]);
+        assert_eq!(lf.len(), 2, "{lf:?}");
+        assert_eq!(flow_ids(&[("Amount", "A\r\nB"), ("Amount", "A B")]), lf);
+        assert_eq!(flow_ids(&[("Amount", "A\rB"), ("Amount", "A B")]), lf);
+    }
+
+    /// #684 R-B: an empty literal and a one-space literal are two values, so two conditions
+    /// that differ only there stay two nodes.
+    #[test]
+    fn an_empty_and_a_blank_literal_stay_two_nodes_684() {
+        let ids = flow_ids(&[("Amount", ""), ("Amount", " ")]);
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    /// #684 round 1 (codex P2): re-indenting the file keeps every id (ADR-002), while the
+    /// literals still tell the two conditions apart.
+    #[test]
+    fn re_indenting_keeps_the_ids_679() {
+        let compact = flow_ids(&[("Amount", "A B"), ("Amount", "A  B")]);
+        assert_eq!(compact.len(), 2, "{compact:?}");
+        let indented = |sep: &str| {
+            let c = |op: &str| {
+                format!(
+                    "<conditions>{sep}<leftValueReference>Amount</leftValueReference>\
+                     {sep}<operator>{op}</operator>{sep}</conditions>"
+                )
+            };
+            let text = format!(
+                "<Flow xmlns=\"http://soap.sforce.com/2006/04/metadata\"><label>F</label>\
+                 <decisions><name>D</name><label>D</label><rules><name>R</name><label>R</label>\
+                 {sep}{}{sep}{}{sep}</rules></decisions></Flow>",
+                c("A B"),
+                c("A  B")
+            );
+            let ex = SalesforceFlowExtractor::new()
+                .extract(&SourceFile {
+                    path: "f.flow-meta.xml".into(),
+                    language: Language::new("xml-rules:salesforce-flow"),
+                    text,
+                })
+                .unwrap();
+            ex.nodes
+                .into_iter()
+                .filter(|n| n.name == "Amount")
+                .map(|n| n.symbol.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(indented(""), compact);
+        assert_eq!(indented("\n    "), compact);
+        assert_eq!(indented("\r\n\t\t"), compact);
+    }
+
     /// Round 1 (agy P2-2): two conditions on one field under one rule (a range) are two
     /// nodes, told apart by content, and inserting a third condition moves neither.
     #[test]

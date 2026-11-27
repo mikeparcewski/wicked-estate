@@ -117,18 +117,67 @@ impl SourceId {
     }
 }
 
-/// FNV-1a over `text` with whitespace runs collapsed: a stable digest (no new dependency, and
-/// the same on every platform and toolchain, unlike `DefaultHasher`).
-fn content_digest(text: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for (i, word) in text.split_whitespace().enumerate() {
-        if i > 0 {
-            h ^= u64::from(b' ');
-            h = h.wrapping_mul(0x0100_0000_01b3);
+/// FNV-1a over the element's parsed content: a stable digest (no new dependency, and the same on
+/// every platform and toolchain, unlike `DefaultHasher`). It hashes the element's structure (tag
+/// names, attributes and text, each with a marker byte), so:
+/// - the text of a leaf element (one with no child elements) is a value and always counts, even
+///   when it is only whitespace, so `A B` and `A  B`, or `<x></x>` and `<x> </x>`, stay apart
+///   (#679, #684);
+/// - whitespace-only text beside child elements is indentation and is skipped, so re-indenting a
+///   file keeps every id (ADR-002: a reformat leaves identity unchanged);
+/// - attributes are hashed in sorted order, because XML gives their order no meaning;
+/// - element and attribute names are hashed with their namespace URI, so `camunda:x` and `other:x`
+///   differ;
+/// - line ends arrive normalized by the parser (XML 1.0 §2.11), so a CRLF checkout keeps every id.
+///
+/// The walk uses an explicit stack, so a deeply nested element cannot overflow the call stack.
+fn content_digest(el: roxmltree::Node<'_, '_>) -> u64 {
+    fn feed(h: &mut u64, bytes: &[u8]) {
+        for b in bytes {
+            *h ^= u64::from(*b);
+            *h = h.wrapping_mul(0x0100_0000_01b3);
         }
-        for b in word.bytes() {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    // (node, close, beside_elements): `close` ends an element opened earlier, and
+    // `beside_elements` says the node's parent also has child elements.
+    let mut stack = vec![(el, false, false)];
+    while let Some((n, close, beside_elements)) = stack.pop() {
+        if close {
+            feed(&mut h, &[5]);
+        } else if n.is_element() {
+            // A name is its namespace URI plus its local name: `camunda:x` and `other:x` differ,
+            // while rebinding a prefix to the same URI changes nothing.
+            feed(&mut h, &[1]);
+            feed(&mut h, n.tag_name().namespace().unwrap_or("").as_bytes());
+            feed(&mut h, &[6]);
+            feed(&mut h, n.tag_name().name().as_bytes());
+            let mut attrs: Vec<_> = n
+                .attributes()
+                .map(|a| (a.namespace(), a.name(), a.value()))
+                .collect();
+            attrs.sort_unstable();
+            for (namespace, name, value) in attrs {
+                feed(&mut h, &[2]);
+                feed(&mut h, namespace.unwrap_or("").as_bytes());
+                feed(&mut h, &[6]);
+                feed(&mut h, name.as_bytes());
+                feed(&mut h, &[3]);
+                feed(&mut h, value.as_bytes());
+            }
+            stack.push((n, true, false));
+            let has_elements = n.children().any(|c| c.is_element());
+            let mut child = n.last_child();
+            while let Some(c) = child {
+                stack.push((c, false, has_elements));
+                child = c.prev_sibling();
+            }
+        } else if n.is_text() {
+            let text = n.text().unwrap_or("");
+            if !(beside_elements && text.trim().is_empty()) {
+                feed(&mut h, &[4]);
+                feed(&mut h, text.as_bytes());
+            }
         }
     }
     h
@@ -255,8 +304,7 @@ fn element_ids(
         } in keyed
         {
             let key = if anchored && !own && uses[&key] > 1 {
-                let text = &doc.input_text()[n.range()];
-                format!("{key}~{:016x}", content_digest(text))
+                format!("{key}~{:016x}", content_digest(n))
             } else {
                 key
             };

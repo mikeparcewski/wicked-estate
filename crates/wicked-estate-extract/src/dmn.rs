@@ -349,6 +349,52 @@ mod tests {
         assert!(named(&got, "Rate")[0].ends_with("input#in1:"), "{got:?}");
     }
 
+    /// #684 R-B: attribute order carries no meaning in XML, so moving an attribute of two
+    /// id-less, same-label inputs keeps both ids.
+    #[test]
+    fn reordering_attributes_keeps_the_ids_684() {
+        let table = |one: &str, two: &str| {
+            ids(&model(&format!(
+                "  <decision name=\"A\" id=\"a\">\n    <decisionTable id=\"ta\">\n      \
+                 {one}<inputExpression typeRef=\"number\"/></input>\n      \
+                 {two}<inputExpression typeRef=\"string\"/></input>\n    \
+                 </decisionTable>\n  </decision>\n"
+            )))
+        };
+        let before = table(
+            "<input label=\"Age\" width=\"1\">",
+            "<input label=\"Age\" width=\"2\">",
+        );
+        let after = table(
+            "<input width=\"1\" label=\"Age\">",
+            "<input width=\"2\" label=\"Age\">",
+        );
+        let mut want = named(&before, "Age");
+        want.sort();
+        assert_eq!(want.len(), 2, "{before:?}");
+        let mut got = named(&after, "Age");
+        got.sort();
+        assert_eq!(got, want);
+    }
+
+    /// #684 R-B 2: an attribute's namespace is part of its name, so two same-label inputs that
+    /// differ only in which namespace an attribute belongs to stay two nodes.
+    #[test]
+    fn attributes_in_different_namespaces_stay_apart_684() {
+        let got = ids(&format!(
+            "<definitions xmlns=\"https://www.omg.org/spec/DMN/20191111/MODEL/\" \
+             xmlns:camunda=\"http://camunda.org/schema/1.0/dmn\" xmlns:other=\"urn:other\" \
+             name=\"Loans\" id=\"loans\">\n  <decision name=\"A\" id=\"a\">\n    \
+             <decisionTable id=\"ta\">\n      \
+             <input label=\"Age\" camunda:inputVariable=\"currentAge\"/>\n      \
+             <input label=\"Age\" other:inputVariable=\"currentAge\"/>\n    \
+             </decisionTable>\n  </decision>\n</definitions>\n"
+        ));
+        let age = named(&got, "Age");
+        assert_eq!(age.len(), 2, "{got:?}");
+        assert_ne!(age[0], age[1]);
+    }
+
     /// DES-675 (d): a DMN input without an `id` is keyed under the nearest element that has
     /// one, so same-labelled inputs of two tables stay two nodes.
     #[test]
