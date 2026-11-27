@@ -62,7 +62,7 @@ postgres = ["wicked-estate-store/postgres"]
 # formats the README lists. Their deps (roxmltree, quick-xml) are small and pure Rust.
 default = ["xml-rules"]
 # W15 rules engine — XML/Excel rules extractors wired into `index` dispatch.
-xml-rules = ["wicked-estate-extract/xml-rules"]     # Camunda DMN, Progress Corticon, Salesforce Flow (.dmn/.ers/.erf/.ecore/.flow-meta.xml)
+xml-rules = ["wicked-estate-extract/xml-rules"]     # Camunda DMN, Progress Corticon, Drools GDST, Salesforce Flow (.dmn/.ers/.erf/.ecore/.gdst/.flow-meta.xml)
 # Opt-in: calamine and zip. The CLI reads .xlsx as a document; decision tables need
 # `ExcelRulesExtractor` and a sheet config through the library.
 excel-rules = ["wicked-estate-extract/excel-rules"] # Excel/XLSX decision tables

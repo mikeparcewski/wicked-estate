@@ -193,20 +193,21 @@ fn grammarless_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
     }
 }
 
-/// The rules extractor for a `.json` file whose keys name an Azure Policy definition
-/// (`policyRule`) or an AWS Config rule (`ConfigRuleName`); each checks the shape itself and
-/// returns no nodes for any other JSON (estate#620).
-fn rules_json_extractor(ext: &str, text: &str) -> Option<Box<dyn Extractor>> {
+/// The rules extractors a `.json` file's text names: an Azure Policy definition (`policyRule`)
+/// and an AWS Config rule (`ConfigRuleName`). Each checks the shape itself and returns no nodes
+/// for any other JSON, so a file mentioning both keys tries both (estate#620).
+fn rules_json_extractors(ext: &str, text: &str) -> Vec<Box<dyn Extractor>> {
+    let mut found: Vec<Box<dyn Extractor>> = Vec::new();
     if ext != "json" {
-        return None;
+        return found;
     }
     if text.contains("\"policyRule\"") {
-        Some(Box::new(AzurePolicyExtractor::new()))
-    } else if text.contains("\"ConfigRuleName\"") {
-        Some(Box::new(AwsConfigRuleExtractor::new()))
-    } else {
-        None
+        found.push(Box::new(AzurePolicyExtractor::new()));
     }
+    if text.contains("\"ConfigRuleName\"") {
+        found.push(Box::new(AwsConfigRuleExtractor::new()));
+    }
+    found
 }
 
 /// Run a grammar-less extractor on one file and give it the same File node + Contains edges the
@@ -316,9 +317,10 @@ fn base_extraction(
     }
     // AWS Config rules and Azure Policy definitions are JSON: a file whose rules extractor finds
     // its shape is a rules file; any other JSON stays on the paths below (estate#620).
-    if let Some(extraction) = rules_json_extractor(ext, text)
-        .and_then(|extractor| grammarless_extraction(&*extractor, rel_path, text))
-        .filter(|extraction| extraction.nodes.len() > 1)
+    if let Some(extraction) = rules_json_extractors(ext, text)
+        .iter()
+        .filter_map(|extractor| grammarless_extraction(&**extractor, rel_path, text))
+        .find(|extraction| extraction.nodes.len() > 1)
     {
         return Some(extraction);
     }
