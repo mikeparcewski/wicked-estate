@@ -750,11 +750,11 @@ fn xml_masks(text: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
             todo.extend(els[j].children.iter().copied());
         }
     };
-    for i in 0..els.len() {
-        if denied_name(&els[i].local) {
+    for (i, el) in els.iter().enumerate() {
+        if denied_name(&el.local) {
             mask_subtree(i, masks);
         }
-        let kids = &els[i].children;
+        let kids = &el.children;
         if kids
             .iter()
             .any(|&c| named(c, XML_NAME_HOLDERS) && denied_name(&xml_unescape(&text_of(c))))
