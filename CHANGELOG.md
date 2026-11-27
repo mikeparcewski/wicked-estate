@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.37.0] — 2026-11-27
+
+Minor release on the train-17 cut 1235c5ef, carrying 2 PRs since 0.36.2: #584 and #659. The minor bump is for #584, a new opt-in index mode. The entries were written from each PR's changelog entry (the PR title and summary where it had none).
+
+### Added
+
+- **Opt-in codegraph import** (#584; closes #590, #591, #593, #594, #595, #596, #597, #652, #657). `index --codegraph <bundle-dir>` (and `watch`) hands extraction and resolution for TS/JS, Java, Kotlin, C#, Scala, Swift, VB.NET, C/C++ and PHP to the pinned codegraph 1.6.4 bundle, and maps its facts onto estate's own ids. Without the flag nothing changes. The import refuses on any platform without a pinned bundle digest (only darwin-arm64 today), and estate's own pipeline then runs. A file codegraph cannot answer for keeps estate's pipeline (`CODEGRAPH-SKIPPED: <path> <reason>`); a failed codegraph run stops the index (`CODEGRAPH-FAILED:`) before any node or edge is written.
+
+### Fixed
+
+- `index --codegraph` binds calls to the definitions it mints on the same run, reports minted nodes lost by a file that falls back at mapping time, and compares codegraph's columns in bytes, so calls after non-ASCII text on one line bind their own targets (#654, #656, #653; #659).
+
 ## [0.36.2] — 2026-11-26
 
 Patch release on the train-16 cut 890b42e6, carrying 6 PRs since 0.36.1: #638, #640, #642, #643, #645, #648. The #642, #643, #645 and #648 entries were written from each PR's changelog entry.
