@@ -1361,14 +1361,10 @@ pub(crate) struct IdMap {
 }
 
 impl Prepared {
-    /// Map codegraph definitions onto estate nodes. `nodes` is the post-write population (the
-    /// resolution index); `mint_in` names the files extracted this run, the only ones whose
-    /// unmatched definitions get new nodes (an unchanged file's were minted when it changed).
-    /// `text` returns a file's stored source (estate path), from which a minted node's byte span
-    /// is computed, so `symbol_source` returns its body (estate#590).
-    /// The (file, name) of every definition [`Self::id_map`] will mint in `mint_in`, before the
-    /// mapping runs: the mapping itself on the files' own nodes, so the prediction and the
-    /// minting cannot disagree (#668 round 1). The homonym pass reads it (estate#660). A
+    /// The (file, name, id) of every definition [`Self::id_map`] will mint in `mint_in`, before
+    /// the mapping runs: the mapping itself on the files' own nodes, so the prediction and the
+    /// minting cannot disagree (#668 round 1). The homonym pass reads it (estate#660); the id
+    /// carries the kind, so a definition minted again as another kind is a new candidate. A
     /// definition's matches are within its own file, so the files' nodes are enough; the
     /// dropped-edge count this dry run adds is put back.
     pub(crate) fn minted_names(
@@ -1376,16 +1372,21 @@ impl Prepared {
         nodes: &[&Node],
         mint_in: &HashSet<String>,
         text: &dyn Fn(&str) -> Option<String>,
-    ) -> Vec<(String, String)> {
+    ) -> Vec<(String, String, SymbolId)> {
         let drops = *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner());
         let ids = self.id_map(nodes, mint_in, text);
         *self.dropped_edges.lock().unwrap_or_else(|e| e.into_inner()) = drops;
         ids.minted
             .into_iter()
-            .map(|n| (n.location.file, n.name))
+            .map(|n| (n.location.file, n.name, n.symbol))
             .collect()
     }
 
+    /// Map codegraph definitions onto estate nodes. `nodes` is the post-write population (the
+    /// resolution index); `mint_in` names the files extracted this run, the only ones whose
+    /// unmatched definitions get new nodes (an unchanged file's were minted when it changed).
+    /// `text` returns a file's stored source (estate path), from which a minted node's byte span
+    /// is computed, so `symbol_source` returns its body (estate#590).
     pub(crate) fn id_map(
         &self,
         nodes: &[&Node],

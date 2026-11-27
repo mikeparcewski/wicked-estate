@@ -3269,8 +3269,9 @@ fn index_path_inner(
         }
         // A definition codegraph will mint in a file extracted this pass is a gained name too:
         // the mapping that mints it runs after this pass (estate#660). One minted last run and
-        // minted again is neither gained nor lost (#668 round 1).
-        let mut reminted: HashSet<(String, String)> = HashSet::new();
+        // minted again with the same id (so the same kind and owner) is neither gained nor lost
+        // (#668 round 1, codex-check: a type alias minted again as a function is a new callable).
+        let mut reminted: HashSet<SymbolId> = HashSet::new();
         if let Some(cg) = codegraph_state.as_ref() {
             let files: HashSet<String> = changed.iter().map(|fw| fw.rel.clone()).collect();
             let mut nodes = Vec::new();
@@ -3282,14 +3283,14 @@ fn index_path_inner(
             let refs: Vec<&Node> = nodes.iter().collect();
             let reader: &dyn GraphRead = &*store;
             let text = |file: &str| reader.file_content(file).ok().flatten();
-            let old_minted: HashSet<(&str, &str)> = old_candidates
+            let old_minted: HashSet<&SymbolId> = old_candidates
                 .iter()
                 .filter(|n| is_codegraph_minted(n))
-                .map(|n| (n.location.file.as_str(), n.name.as_str()))
+                .map(|n| &n.symbol)
                 .collect();
-            for (file, name) in cg.minted_names(&refs, &files, &text) {
-                if old_minted.contains(&(file.as_str(), name.as_str())) {
-                    reminted.insert((file, name));
+            for (file, name, symbol) in cg.minted_names(&refs, &files, &text) {
+                if old_minted.contains(&symbol) {
+                    reminted.insert(symbol);
                 } else {
                     changed_names.entry(name).or_default().insert(file);
                 }
@@ -3300,9 +3301,7 @@ fn index_path_inner(
             if node.name.is_empty() || store.get_node(&node.symbol)?.is_some() {
                 continue;
             }
-            if is_codegraph_minted(node)
-                && reminted.contains(&(node.location.file.clone(), node.name.clone()))
-            {
+            if is_codegraph_minted(node) && reminted.contains(&node.symbol) {
                 continue;
             }
             // Removed homonyms can make a parked name unique, including typed probe forms.
