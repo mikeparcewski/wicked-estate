@@ -1263,3 +1263,36 @@ fn clips_parens_inside_strings_do_not_hide_later_rules_664() {
         .collect();
     assert_eq!(actions, vec!["printout", "printout", "assert", "halt"]);
 }
+
+/// estate#669 round 1: text in a string never reads as structure, so a `=>` in a rule's
+/// comment string or in a pattern's value does not end the rule's conditions.
+#[test]
+fn clips_strings_on_the_left_hand_side_stay_conditions_669() {
+    use wicked_estate_extract::ClipsExtractor;
+
+    let snippet = r#"
+(defrule doc "state (A) => state B"
+  (msg (text "a => b"))
+  (input)
+  =>
+  (halt))
+"#;
+    let file = SourceFile {
+        path: "test.clp".to_string(),
+        language: Language::new("clips"),
+        text: snippet.to_string(),
+    };
+    let extraction = ClipsExtractor::new()
+        .extract(&file)
+        .expect("clips snippet must succeed");
+    let of = |kind: NodeKind| -> Vec<&str> {
+        extraction
+            .nodes
+            .iter()
+            .filter(|n| n.kind == kind)
+            .map(|n| n.name.as_str())
+            .collect()
+    };
+    assert_eq!(of(NodeKind::Condition), vec!["msg", "input"]);
+    assert_eq!(of(NodeKind::Action), vec!["halt"]);
+}

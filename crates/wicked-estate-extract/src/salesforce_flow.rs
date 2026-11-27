@@ -110,6 +110,7 @@ impl Extractor for SalesforceFlowExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wicked_estate_core::{NodeKind, SymbolId};
 
     #[test]
     fn config_parses_without_panic() {
@@ -139,9 +140,81 @@ mod tests {
             .filter(|n| n.name == "Account.Status__c")
             .count();
         assert_eq!(conditions, 2);
-        // Each edge ends at a node the extraction emitted.
+        // Each edge ends at a node the extraction emitted, and each Account.Status__c condition
+        // hangs off its own rule.
+        assert!(!ex.local_edges.is_empty());
         for e in &ex.local_edges {
             assert!(ids.contains(&e.source) && ids.contains(&e.target), "{e:?}");
+        }
+        let keyed = keyed_ids(&ex);
+        assert!(
+            keyed.contains_key("Is Active Premium/Account.Status__c"),
+            "{keyed:?}"
+        );
+        assert!(
+            keyed.contains_key("Is Inactive/Account.Status__c"),
+            "{keyed:?}"
+        );
+    }
+
+    const FIXTURE: &str =
+        include_str!("../tests/fixtures/salesforce_flow/account_validation.flow-meta.xml");
+
+    fn flow(text: &str) -> Extraction {
+        SalesforceFlowExtractor::new()
+            .extract(&SourceFile {
+                path: "account_validation.flow-meta.xml".into(),
+                language: Language::new("xml-rules:salesforce-flow"),
+                text: text.into(),
+            })
+            .unwrap()
+    }
+
+    /// Each node's id keyed by its name, and a condition's by its rule's name too.
+    fn keyed_ids(ex: &Extraction) -> std::collections::BTreeMap<String, SymbolId> {
+        let name = |id: &SymbolId| {
+            ex.nodes
+                .iter()
+                .find(|n| &n.symbol == id)
+                .map(|n| n.name.clone())
+                .unwrap_or_default()
+        };
+        let mut out = std::collections::BTreeMap::new();
+        for n in &ex.nodes {
+            let parent = ex
+                .local_edges
+                .iter()
+                .find(|e| e.target == n.symbol && n.kind == NodeKind::Condition)
+                .map(|e| format!("{}/", name(&e.source)))
+                .unwrap_or_default();
+            out.insert(format!("{parent}{}", n.name), n.symbol.clone());
+        }
+        out
+    }
+
+    /// estate#667 round 1 (ADR-002): a node's id does not depend on unrelated siblings. Adding
+    /// a rule before the others and swapping the two outcomes leaves every existing node,
+    /// including each Account.Status__c condition, with the id it had.
+    #[test]
+    fn ids_survive_an_inserted_rule_and_reordered_outcomes_667() {
+        let start = FIXTURE.find("        <rules>").unwrap();
+        let second = FIXTURE[start + 1..].find("        <rules>").unwrap() + start + 1;
+        let end = FIXTURE.find("    </decisions>").unwrap();
+        let (first_rule, second_rule) = (&FIXTURE[start..second], &FIXTURE[second..end]);
+        let inserted = "        <rules>\n            <name>Is_New</name>\n            \
+            <label>Is New</label>\n            <conditions>\n                \
+            <leftValueReference>Account.Status__c</leftValueReference>\n            \
+            </conditions>\n        </rules>\n";
+        let edited = format!(
+            "{}{inserted}{second_rule}{first_rule}{}",
+            &FIXTURE[..start],
+            &FIXTURE[end..]
+        );
+        let before = keyed_ids(&flow(FIXTURE));
+        let after = keyed_ids(&flow(&edited));
+        assert_eq!(after.len(), before.len() + 2, "{after:?}");
+        for (key, id) in &before {
+            assert_eq!(after.get(key), Some(id), "{key} keeps its id");
         }
     }
 

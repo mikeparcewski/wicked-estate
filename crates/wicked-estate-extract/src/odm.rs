@@ -514,6 +514,38 @@ rule "Quoted" {
         );
     }
 
+    /// estate#669 round 1: a rule's span starts at its own `rule` keyword, not in a comment
+    /// before it; text in strings that reads like a header or a package is not one; an
+    /// unbalanced quote does not panic.
+    #[test]
+    fn irl_headers_and_packages_are_read_outside_strings_and_comments_669() {
+        let text = "/* disabled */\nrule \"Live\" {\n  when { Audit a(msg == \"package x;\"); }\n  \
+                    then { log(\"rule \" + name + \" {\"); }\n}\n";
+        let ex = OdmExtractor::new().extract(&irl_file(text)).unwrap();
+        let rules: Vec<&Node> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Rule)
+            .collect();
+        assert_eq!(rules.len(), 1, "{:?}", ex.nodes);
+        assert_eq!(
+            rules[0].location.span.start_byte as usize,
+            text.find("rule").unwrap()
+        );
+        assert!(
+            !ex.nodes.iter().any(|n| n.kind == NodeKind::RuleSet),
+            "no live package: {:?}",
+            ex.nodes
+        );
+        let then = ex.nodes.iter().find(|n| n.name == "Live::then");
+        assert_eq!(
+            then.and_then(|n| n.signature.as_deref()),
+            Some(r#"log("rule " + name + " {");"#)
+        );
+        // An unbalanced quote before a header leaves its brace masked: no panic.
+        let _ = OdmExtractor::new().extract(&irl_file("\"\nrule \"R\" {\n\"\n}\n"));
+    }
+
     #[test]
     fn irl_package_emits_ruleset() {
         let ex = OdmExtractor::new()
