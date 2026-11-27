@@ -29,16 +29,18 @@
 //! ```
 //!
 //! # Node identity
-//! `Symbol::synthetic("xml-rules", "<file>::<element_path>::<name>")`, where `<element_path>` is
-//! each element from the root down as `tag[n]` (its position among same-tag siblings): stable
-//! while the name and the element order do not change (ADR-002).
+//! `Symbol::synthetic("xml-rules", "<file>::<key>")`, where `<key>` is each element from the root
+//! down as `tag:name` (a mapped element with a name) or `tag` (any other element). A key another
+//! element already took gets `[n]`, its position among the elements with that same key. So an id
+//! depends on the element's own name and its ancestors' names, never on unrelated siblings: it is
+//! stable while those names do not change (ADR-002), and indistinguishable siblings stay apart.
 
 #![cfg(feature = "xml-rules")]
 
 use serde::Deserialize;
 use wicked_estate_core::{
     Edge, EdgeKind, Error, Extraction, Extractor, Language, Location, Node, NodeKind,
-    ResolutionTier, Result, SourceFile, Span, Symbol,
+    ResolutionTier, Result, SourceFile, Span, Symbol, SymbolId,
 };
 
 // ── Config structs (TOML-deserializable) ─────────────────────────────────────
@@ -174,24 +176,44 @@ impl XmlRulesExtractor {
     }
 }
 
-/// The id path of an element: each element from the root down, as its tag and its position
-/// among its same-tag siblings. Two elements with one tag chain and one display name (the same
-/// condition under two rules) keep distinct ids (#663 round 1).
-fn element_path(node: roxmltree::Node) -> String {
-    let mut parts: Vec<String> = node
-        .ancestors()
-        .filter(|a| a.is_element())
-        .map(|a| {
-            let tag = a.tag_name().name();
-            let pos = a
-                .prev_siblings()
-                .filter(|s| s.is_element() && s.tag_name().name() == tag)
-                .count();
-            format!("{tag}[{pos}]")
-        })
-        .collect();
-    parts.reverse();
-    parts.join("/")
+/// The display name and id of every mapped element with a name, in one pass in document order
+/// (see "Node identity" above). The node and edge passes both read it, so they agree.
+fn element_ids(
+    doc: &roxmltree::Document<'_>,
+    file: &str,
+    node_map: &std::collections::HashMap<&str, &NodeMapping>,
+) -> std::collections::HashMap<roxmltree::NodeId, (String, SymbolId)> {
+    let mut keys: std::collections::HashMap<roxmltree::NodeId, String> =
+        std::collections::HashMap::new();
+    let mut taken: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut out = std::collections::HashMap::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        let tag = node.tag_name().name();
+        let name = node_map
+            .get(tag)
+            .map(|m| resolve_name(m, node, tag))
+            .unwrap_or_default();
+        let segment = if name.is_empty() {
+            tag.to_string()
+        } else {
+            format!("{tag}:{name}")
+        };
+        let mut key = match node.parent_element().and_then(|p| keys.get(&p.id())) {
+            Some(parent) => format!("{parent}/{segment}"),
+            None => segment,
+        };
+        let seen = taken.entry(key.clone()).or_insert(0);
+        if *seen > 0 {
+            key = format!("{key}[{seen}]");
+        }
+        *seen += 1;
+        if !name.is_empty() {
+            let symbol = Symbol::synthetic("xml-rules", format!("{file}::{key}")).id();
+            out.insert(node.id(), (name, symbol));
+        }
+        keys.insert(node.id(), key);
+    }
+    out
 }
 
 impl Extractor for XmlRulesExtractor {
@@ -215,26 +237,17 @@ impl Extractor for XmlRulesExtractor {
             .map(|m| (m.element.as_str(), m))
             .collect();
 
-        // Walk all elements in document order, emitting nodes for mapped elements.
+        let ids = element_ids(&doc, &file.path, &node_map);
+
+        // Walk all elements in document order, emitting nodes for mapped, named elements.
         for node in doc.descendants() {
-            if !node.is_element() {
-                continue;
-            }
-            let elem_name = node.tag_name().name();
-            let Some(mapping) = node_map.get(elem_name) else {
+            let Some((name, symbol)) = ids.get(&node.id()) else {
                 continue;
             };
-
-            // Resolve the node's display name.
-            let name = resolve_name(mapping, node, elem_name);
-
-            if name.is_empty() {
+            let Some(mapping) = node_map.get(node.tag_name().name()) else {
                 continue;
-            }
-
-            let element_path = element_path(node);
-            let id_str = format!("{}::{}::{}", file.path, element_path, name);
-            let symbol = Symbol::synthetic("xml-rules", &id_str).id();
+            };
+            let (name, symbol) = (name.clone(), symbol.clone());
 
             let location = Location::new(&file.path, Span::ZERO);
             let kind = parse_node_kind(&mapping.emit_kind);
@@ -254,21 +267,9 @@ impl Extractor for XmlRulesExtractor {
                     continue;
                 }
 
-                // Resolve the parent symbol id.
-                let parent_name =
-                    if let Some(nm) = node_map.get(edge_mapping.parent_element.as_str()) {
-                        let n = resolve_name(nm, parent_node, &edge_mapping.parent_element);
-                        if n.is_empty() {
-                            continue;
-                        }
-                        n
-                    } else {
-                        continue;
-                    };
-
-                let parent_path = element_path(parent_node);
-                let parent_id_str = format!("{}::{}::{}", file.path, parent_path, parent_name);
-                let parent_sym = Symbol::synthetic("xml-rules", &parent_id_str).id();
+                let Some((_, parent_sym)) = ids.get(&parent_node.id()) else {
+                    continue;
+                };
 
                 // Walk direct children matching the child element.
                 for child in parent_node.children() {
@@ -279,26 +280,16 @@ impl Extractor for XmlRulesExtractor {
                         continue;
                     }
 
-                    let child_nm = match node_map.get(edge_mapping.child_element.as_str()) {
-                        Some(nm) => nm,
-                        None => continue,
-                    };
-
-                    let child_name = resolve_name(child_nm, child, &edge_mapping.child_element);
-                    if child_name.is_empty() {
+                    let Some((_, child_sym)) = ids.get(&child.id()) else {
                         continue;
-                    }
-
-                    let child_path = element_path(child);
-                    let child_id_str = format!("{}::{}::{}", file.path, child_path, child_name);
-                    let child_sym = Symbol::synthetic("xml-rules", &child_id_str).id();
+                    };
 
                     // Edge: source = parent (dependent / governer), target = child (dependency).
                     // "A governs B" → source=A (the rule set), target=B (the rule).
                     // This matches the edge-direction invariant: source is the dependent.
                     let edge = Edge::new(
                         parent_sym.clone(),
-                        child_sym,
+                        child_sym.clone(),
                         // Parsed at construction (#361); a refused kind fails here, loudly.
                         edge_kind.clone().map_err(Error::Extraction)?,
                         ResolutionTier::Parsed,

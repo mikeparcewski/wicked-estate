@@ -28,7 +28,7 @@ static RE_PACKAGE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Matches `rule "RuleName" {` in IRL
 static RE_IRL_RULE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)^\s*rule\s+"([^"]+)"\s*\{"#).expect("RE_IRL_RULE must compile")
+    Regex::new(r#"(?m)^[ \t]*rule\s+"([^"]+)"\s*\{"#).expect("RE_IRL_RULE must compile")
 });
 
 /// Matches `when {` block opener in IRL
@@ -102,7 +102,8 @@ fn extract_irl(path: &str, content: &str) -> Result<Extraction> {
     let scan = crate::rules_text::mask_strings(content);
 
     // 1. Package → RuleSet node
-    let ruleset_sym = if let Some(caps) = RE_PACKAGE.captures(text) {
+    // A package name is unquoted, so it is read on `scan`: one in a string is not live.
+    let ruleset_sym = if let Some(caps) = RE_PACKAGE.captures(&scan) {
         let pkg = caps[1].to_string();
         let sym = Symbol::synthetic("odm", format!("{}::package::{}", path, pkg)).id();
         let mut node = Node::new(
@@ -120,14 +121,10 @@ fn extract_irl(path: &str, content: &str) -> Result<Extraction> {
     };
 
     // 2. Parse each `rule "Name" { when {...} then {...} }` block.
-    // We walk the text character by character to find matching braces for each rule body.
-    let mut search_start = 0usize;
-    while let Some(rule_caps) = RE_IRL_RULE.captures(&text[search_start..]) {
-        let full_match = rule_caps.get(0).unwrap();
-        let abs_rule_start = search_start + full_match.start();
-        let abs_rule_end = search_start + full_match.end();
-
-        let rule_name = rule_caps[1].to_string();
+    let headers = irl_headers(text, &scan);
+    for (k, (abs_rule_start, abs_rule_end, rule_name)) in headers.iter().enumerate() {
+        let (abs_rule_start, abs_rule_end) = (*abs_rule_start, *abs_rule_end);
+        let rule_name = rule_name.clone();
         let rule_sym = Symbol::synthetic("odm", format!("{}::rule::{}", path, rule_name)).id();
 
         let rule_loc = Location::new(path, byte_span(abs_rule_start, abs_rule_end));
@@ -154,9 +151,7 @@ fn extract_irl(path: &str, content: &str) -> Result<Extraction> {
 
         // The rule body runs from just past the header's `{` to its matching `}`, and never past
         // the next rule header, so a rule without `then` cannot take the next rule's.
-        let next_rule = RE_IRL_RULE
-            .find(&text[abs_rule_end..])
-            .map_or(text.len(), |m| abs_rule_end + m.start());
+        let next_rule = headers.get(k + 1).map_or(text.len(), |h| h.0);
         let body_end = crate::rules_text::match_brace_end(&scan, abs_rule_end - 1).min(next_rule);
         let body_text = &text[abs_rule_end..body_end];
         let body_scan = &scan[abs_rule_end..body_end];
@@ -208,9 +203,6 @@ fn extract_irl(path: &str, content: &str) -> Result<Extraction> {
                 "odm-irl",
             ));
         }
-
-        // Advance past this rule header so we find the next one
-        search_start = abs_rule_end;
     }
 
     Ok(Extraction {
@@ -218,6 +210,23 @@ fn extract_irl(path: &str, content: &str) -> Result<Extraction> {
         local_edges,
         refs: Vec::new(),
     })
+}
+
+/// The live `rule "Name" {` headers in `text`, as (keyword start, end past the `{`, name). A header
+/// counts only when its `rule` keyword and its `{` survive string masking in `scan`, so text in a
+/// string that reads like a header is not one, and the span starts at the keyword, not on a
+/// blanked comment line before it (#669 round 1).
+fn irl_headers(text: &str, scan: &str) -> Vec<(usize, usize, String)> {
+    let b = scan.as_bytes();
+    RE_IRL_RULE
+        .captures_iter(text)
+        .filter_map(|c| {
+            let m = c.get(0)?;
+            let start = m.start() + (m.as_str().len() - m.as_str().trim_start().len());
+            (b.get(start) == Some(&b'r') && b.get(m.end() - 1) == Some(&b'{'))
+                .then(|| (start, m.end(), c[1].to_string()))
+        })
+        .collect()
 }
 
 /// The content of a `keyword { ... }` block in `text`: the opener and its matching brace are found

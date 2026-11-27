@@ -114,9 +114,12 @@ fn skip_string(b: &[u8], mut i: usize) -> usize {
 }
 
 /// Index of the `}` matching the `{` at `open` (depth-counted over `scan`, which should already have
-/// strings/comments masked). Returns `scan.len()` if unbalanced.
+/// strings/comments masked). Returns `scan.len()` if unbalanced, or if `open` is not a `{`.
 pub(crate) fn match_brace_end(scan: &str, open: usize) -> usize {
     let b = scan.as_bytes();
+    if b.get(open) != Some(&b'{') {
+        return scan.len();
+    }
     let mut depth = 0usize;
     let mut i = open;
     while i < b.len() {

@@ -441,9 +441,11 @@ fn flush_rule(
 
 // ── Lexer helpers ──────────────────────────────────────────────────────────────
 
-/// `text` with each `;` comment outside a string replaced by spaces, and each `(`, `)` and `;`
-/// inside a `"…"` string (with `\` escapes, across lines) replaced by a space. Every other
-/// character, and every newline, is kept, so line numbers and quoted names are unchanged.
+/// `text` with each `;` comment outside a string, and every character inside a `"…"` string
+/// (with `\` escapes, across lines), replaced by a space; the quotes and every newline are kept,
+/// so line numbers are unchanged. Nothing in a string reads as structure: no parenthesis, `;`
+/// or `=>` (estate#664, #669 round 1). Construct, template and function names are unquoted
+/// symbols, so no name is lost.
 fn mask_clips(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
@@ -454,23 +456,19 @@ fn mask_clips(text: &str) -> String {
             in_comment = c != '\n';
             out.push(if in_comment { ' ' } else { c });
         } else if in_string {
+            let blank = |c: char| if c == '\n' { '\n' } else { ' ' };
             match c {
                 '\\' => {
-                    out.push(c);
+                    out.push(' ');
                     if let Some(next) = chars.next() {
-                        out.push(if matches!(next, '(' | ')' | ';') {
-                            ' '
-                        } else {
-                            next
-                        });
+                        out.push(blank(next));
                     }
                 }
                 '"' => {
                     in_string = false;
                     out.push(c);
                 }
-                '(' | ')' | ';' => out.push(' '),
-                _ => out.push(c),
+                _ => out.push(blank(c)),
             }
         } else {
             match c {
