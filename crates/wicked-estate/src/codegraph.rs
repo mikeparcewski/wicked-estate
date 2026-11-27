@@ -3639,7 +3639,7 @@ mod tests {
         let rebinds = crate::TEST_REBIND_FILES.with(|count| count.get());
         assert_eq!(
             minted_assist(&store),
-            [assist.clone()],
+            std::slice::from_ref(&assist),
             "util.ts changed during the run: it is left as indexed, its minted assist too"
         );
         assert!(
@@ -3656,7 +3656,7 @@ mod tests {
         // the same assist.
         index(&mut store, &root, Some(&cfg), Some(&sql));
         assert_ne!(store.file_digest("src/util.ts").unwrap(), indexed);
-        assert_eq!(minted_assist(&store), [assist.clone()]);
+        assert_eq!(minted_assist(&store), std::slice::from_ref(&assist));
         assert!(
             binds(&store, caller, &assist),
             "{:?}",
