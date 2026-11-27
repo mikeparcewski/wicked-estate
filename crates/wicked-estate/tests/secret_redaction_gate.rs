@@ -764,6 +764,55 @@ fn index_migrates_an_old_store_on_its_first_write_open() {
     assert_clean("index-migrated store", &scan_db(&db, &old_needles()));
 }
 
+/// #686: a store an epoch-1 build wrote holds XML element values unmasked. Epoch 2 re-redacts it
+/// on the first write open, although no file changed (so the index alone would not rewrite it).
+#[test]
+fn an_epoch_1_store_with_an_xml_secret_is_masked_on_open_686() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fixture(&root);
+    let db = dir.path().join("e1.db");
+    let dbs = db.to_str().unwrap();
+    let (ok, out) = run(&["index", root.to_str().unwrap(), "--db", dbs]);
+    assert!(ok, "index: {out}");
+    // What an epoch-1 build stored: the Flow file's raw text, its digest current, epoch 1.
+    let rel = "flows/Reset.flow-meta.xml";
+    let raw = std::fs::read_to_string(root.join(rel)).unwrap();
+    {
+        let mut s = SqliteStore::open(&db).unwrap();
+        s.begin_batch().unwrap();
+        s.set_file_content(rel, &raw).unwrap();
+        s.commit_batch().unwrap();
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("UPDATE meta SET v='1' WHERE k='redaction_epoch'", [])
+        .unwrap();
+    drop(conn);
+    assert!(
+        all_content(&db).contains("PLANTEDflowPw35"),
+        "the epoch-1 store holds the value"
+    );
+    let (ok, out) = run(&["index", root.to_str().unwrap(), "--db", dbs]);
+    assert!(ok, "index: {out}");
+    assert!(
+        out.contains("REDACTION: cleaned a store written before secret redaction"),
+        "{out}"
+    );
+    let text = SqliteStore::open(&db)
+        .unwrap()
+        .file_content(rel)
+        .unwrap()
+        .expect("the Flow file is still stored");
+    assert!(
+        !text.contains("PLANTEDflowPw35") && text.contains("REDACTED"),
+        "{text}"
+    );
+    assert_clean(
+        "epoch-1 store after its first write open",
+        &scan_db(&db, &["PLANTEDflowPw35"]),
+    );
+}
+
 /// Review x0-r1 L1: a code graph written before `indexed_root` existed (file rows, no root) is
 /// still recognised as pending and is migrated, never stamped clean.
 #[test]
