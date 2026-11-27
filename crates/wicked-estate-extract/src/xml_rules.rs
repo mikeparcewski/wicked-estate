@@ -326,6 +326,56 @@ impl Extractor for XmlRulesExtractor {
 mod tests {
     use super::*;
 
+    /// estate#683 R-B: a parent whose name child comes after N mapped children is named once,
+    /// not once per child. Recomputing it per child scans N siblings N times (about 9e8 steps
+    /// here, tens of seconds in a debug build); computing it once takes milliseconds.
+    #[test]
+    fn a_parent_with_many_children_is_named_once_683() {
+        let ex = XmlRulesExtractor::from_toml(
+            r#"
+[engine]
+name       = "t"
+file_globs = ["**/*.t"]
+
+[[node_mappings]]
+element    = "r"
+emit_kind  = "rule"
+name_child = "label"
+
+[[node_mappings]]
+element   = "c"
+emit_kind = "condition"
+name_attr = "n"
+
+[[edge_mappings]]
+parent_element = "r"
+child_element  = "c"
+edge_kind      = "evaluates"
+"#,
+        )
+        .unwrap();
+        const N: usize = 30_000;
+        let mut text = String::from("<r>");
+        for i in 0..N {
+            text.push_str(&format!(r#"<c n="c{i}"/>"#));
+        }
+        text.push_str("<label>R</label></r>");
+        let started = std::time::Instant::now();
+        let got = ex
+            .extract(&SourceFile {
+                path: "f.t".into(),
+                language: Language::new("xml-rules:t"),
+                text,
+            })
+            .unwrap();
+        let took = started.elapsed();
+        assert_eq!(got.local_edges.len(), N);
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "extraction took {took:?}"
+        );
+    }
+
     /// estate#682: an edge reaches a child through unmapped wrappers, stops at any mapped element
     /// in between (another tag, or a nested parent of the same tag), and is emitted once.
     #[test]
