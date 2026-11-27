@@ -444,6 +444,42 @@ mod tests {
         }
     }
 
+    /// estate#665: a rule kept in a comment is not a live rule. Only the live rule, with its
+    /// own condition and action, is extracted; a `/*` inside a string is not a comment.
+    #[test]
+    fn irl_rules_inside_comments_are_not_extracted_665() {
+        let ex = OdmExtractor::new()
+            .extract(&irl_file(
+                r#"package com.example.lending;
+/*
+rule "Disabled" {
+  when { Customer c(score < 300); }
+  then { c.reject(); }
+}
+*/
+// rule "AlsoDisabled" {
+rule "CheckScore" {
+  when { Customer c(note == "/* not a comment"); }
+  then { c.approve(); }
+}
+"#,
+            ))
+            .unwrap();
+        let rules: Vec<&str> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Rule)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert_eq!(rules, vec!["CheckScore"]);
+        let actions = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Action)
+            .count();
+        assert_eq!(actions, 1, "only the live rule's action: {:?}", ex.nodes);
+    }
+
     #[test]
     fn irl_package_emits_ruleset() {
         let ex = OdmExtractor::new()
