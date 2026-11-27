@@ -79,8 +79,11 @@ impl Extractor for OdmExtractor {
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
         // Detect format by extension or content heuristic.
         // IRL files typically have `rule "Name" {` patterns; BAL files use `conditions` / `actions`.
-        if file.path.ends_with(".irl") || RE_IRL_RULE.is_match(&file.text) {
-            extract_irl(file)
+        // IRL is read with its comments blanked, so a rule kept in a comment is not live
+        // (estate#665).
+        let content = crate::rules_text::blank_c_comments(&file.text);
+        if file.path.ends_with(".irl") || RE_IRL_RULE.is_match(&content) {
+            extract_irl(&file.path, &content)
         } else {
             extract_bal(file)
         }
@@ -89,21 +92,25 @@ impl Extractor for OdmExtractor {
 
 // ── IRL extractor ─────────────────────────────────────────────────────────────
 
-fn extract_irl(file: &SourceFile) -> Result<Extraction> {
+/// `content` is the file's text with its comments blanked (same offsets). Names and signatures
+/// are read from it; braces and the `when`/`then` openers are found on a copy with string
+/// contents masked too, so a `}` in a string is text (estate#667).
+fn extract_irl(path: &str, content: &str) -> Result<Extraction> {
     let mut nodes = Vec::new();
     let mut local_edges = Vec::new();
-    let text = &file.text;
+    let text = content;
+    let scan = crate::rules_text::mask_strings(content);
 
     // 1. Package → RuleSet node
     let ruleset_sym = if let Some(caps) = RE_PACKAGE.captures(text) {
         let pkg = caps[1].to_string();
-        let sym = Symbol::synthetic("odm", format!("{}::package::{}", file.path, pkg)).id();
+        let sym = Symbol::synthetic("odm", format!("{}::package::{}", path, pkg)).id();
         let mut node = Node::new(
             sym.clone(),
             NodeKind::RuleSet,
             pkg.clone(),
             Language::new("ibm-odm-irl"),
-            Location::new(&file.path, Span::ZERO),
+            Location::new(path, Span::ZERO),
         );
         node.signature = Some(format!("package {pkg}"));
         nodes.push(node);
@@ -121,9 +128,9 @@ fn extract_irl(file: &SourceFile) -> Result<Extraction> {
         let abs_rule_end = search_start + full_match.end();
 
         let rule_name = rule_caps[1].to_string();
-        let rule_sym = Symbol::synthetic("odm", format!("{}::rule::{}", file.path, rule_name)).id();
+        let rule_sym = Symbol::synthetic("odm", format!("{}::rule::{}", path, rule_name)).id();
 
-        let rule_loc = Location::new(&file.path, byte_span(abs_rule_start, abs_rule_end));
+        let rule_loc = Location::new(path, byte_span(abs_rule_start, abs_rule_end));
         let mut rule_node = Node::new(
             rule_sym.clone(),
             NodeKind::Rule,
@@ -145,21 +152,26 @@ fn extract_irl(file: &SourceFile) -> Result<Extraction> {
             ));
         }
 
-        // Find the outer `{` that opens the rule body (just after the `{` at end of rule header).
-        // abs_rule_end points past the `{`; the rule body starts there.
-        let body_text = &text[abs_rule_end..];
+        // The rule body runs from just past the header's `{` to its matching `}`, and never past
+        // the next rule header, so a rule without `then` cannot take the next rule's.
+        let next_rule = RE_IRL_RULE
+            .find(&text[abs_rule_end..])
+            .map_or(text.len(), |m| abs_rule_end + m.start());
+        let body_end = crate::rules_text::match_brace_end(&scan, abs_rule_end - 1).min(next_rule);
+        let body_text = &text[abs_rule_end..body_end];
+        let body_scan = &scan[abs_rule_end..body_end];
 
         // Extract `when { ... }` block content
-        if let Some(when_content) = extract_block(body_text, &RE_IRL_WHEN) {
+        if let Some(when_content) = extract_block(body_scan, body_text, &RE_IRL_WHEN) {
             let cond_name = format!("{rule_name}::when");
             let cond_sym =
-                Symbol::synthetic("odm", format!("{}::condition::{}", file.path, cond_name)).id();
+                Symbol::synthetic("odm", format!("{}::condition::{}", path, cond_name)).id();
             let mut cond_node = Node::new(
                 cond_sym.clone(),
                 NodeKind::Condition,
                 cond_name,
                 Language::new("ibm-odm-irl"),
-                Location::new(&file.path, Span::ZERO),
+                Location::new(path, Span::ZERO),
             );
             cond_node.signature = Some(when_content.trim().to_string());
             nodes.push(cond_node);
@@ -174,16 +186,16 @@ fn extract_irl(file: &SourceFile) -> Result<Extraction> {
         }
 
         // Extract `then { ... }` block content
-        if let Some(then_content) = extract_block(body_text, &RE_IRL_THEN) {
+        if let Some(then_content) = extract_block(body_scan, body_text, &RE_IRL_THEN) {
             let action_name = format!("{rule_name}::then");
             let action_sym =
-                Symbol::synthetic("odm", format!("{}::action::{}", file.path, action_name)).id();
+                Symbol::synthetic("odm", format!("{}::action::{}", path, action_name)).id();
             let mut action_node = Node::new(
                 action_sym.clone(),
                 NodeKind::Action,
                 action_name,
                 Language::new("ibm-odm-irl"),
-                Location::new(&file.path, Span::ZERO),
+                Location::new(path, Span::ZERO),
             );
             action_node.signature = Some(then_content.trim().to_string());
             nodes.push(action_node);
@@ -208,30 +220,12 @@ fn extract_irl(file: &SourceFile) -> Result<Extraction> {
     })
 }
 
-/// Extract the content of a `keyword { ... }` block. Returns the text inside the braces.
-fn extract_block(text: &str, opener_re: &Regex) -> Option<String> {
-    let m = opener_re.find(text)?;
-    // Find the `{` at the end of the opener match
-    let after_open = &text[m.end()..];
-    let mut depth = 1i32;
-    let mut end = 0usize;
-    for (i, c) in after_open.char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = i;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    if depth != 0 {
-        return None;
-    }
-    Some(after_open[..end].to_string())
+/// The content of a `keyword { ... }` block in `text`: the opener and its matching brace are found
+/// on `scan` (the same text with string contents masked), the content is sliced from `text`.
+fn extract_block(scan: &str, text: &str, opener_re: &Regex) -> Option<String> {
+    let m = opener_re.find(scan)?;
+    let end = crate::rules_text::match_brace_end(scan, m.end() - 1);
+    (end < scan.len()).then(|| text[m.end()..end].to_string())
 }
 
 // ── BAL extractor ─────────────────────────────────────────────────────────────
