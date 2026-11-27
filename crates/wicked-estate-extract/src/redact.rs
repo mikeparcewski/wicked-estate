@@ -706,6 +706,17 @@ fn config_masks(
             .find(|l| l.doc == doc && l.path.iter().map(String::as_str).eq(p.iter().copied()))
             .map(|l| text[l.start..l.end].to_string())
     };
+    // A document with one key path twice outside arrays (a duplicate key, which JSON allows and
+    // whose last occurrence the extractors keep) gets no detect trust: detection saw any
+    // occurrence, so it could pass on a value the extractor never reads (estate#676). Array
+    // items share a path by design.
+    let mut dup_doc = vec![false; w.docs];
+    let mut seen: HashSet<(usize, &[String])> = HashSet::new();
+    for (d, k) in &w.keys {
+        if !k.iter().any(|s| s == "[]") && !seen.insert((*d, k.as_slice())) {
+            dup_doc[*d] = true;
+        }
+    }
     // Per-document: the trust tables that apply, the structural-deny patterns, known hosts.
     let mut doc_trust: Vec<Vec<&Trust>> = vec![Vec::new(); w.docs];
     let mut doc_deny: Vec<Vec<&str>> = vec![Vec::new(); w.docs];
@@ -713,36 +724,37 @@ fn config_masks(
     for doc in 0..w.docs {
         for t in c.rules.trust.iter().filter(|t| t.grammar == grammar) {
             let by_file = t.files.is_empty() || name_matches(&t.files, name);
-            let by_detect = t.detect.iter().all(|d| match d.split_once('=') {
-                // `path=*` is a non-empty string (not a number, boolean, null or container).
-                Some((k, "*")) => {
-                    let kp = key_path(k);
-                    w.leaves.iter().any(|l| {
-                        l.doc == doc
-                            && l.path.iter().map(String::as_str).eq(kp.iter().copied())
-                            && !l.numeric
-                            && !l.boolean
-                            && l.end > l.start
-                    })
-                }
-                // `path=value` is exact; `path=a|b` is one of the alternatives, ASCII case
-                // ignored as in a row's `values` (estate#670).
-                Some((k, v)) => scalar_at(doc, &key_path(k)).is_some_and(|s| {
-                    if v.contains('|') {
-                        v.split('|').any(|x| x.eq_ignore_ascii_case(&s))
-                    } else {
-                        s == v
+            let by_detect = (t.detect.is_empty() || !dup_doc[doc])
+                && t.detect.iter().all(|d| match d.split_once('=') {
+                    // `path=*` is a non-empty string (not a number, boolean, null or container).
+                    Some((k, "*")) => {
+                        let kp = key_path(k);
+                        w.leaves.iter().any(|l| {
+                            l.doc == doc
+                                && l.path.iter().map(String::as_str).eq(kp.iter().copied())
+                                && !l.numeric
+                                && !l.boolean
+                                && l.end > l.start
+                        })
                     }
-                }),
-                // A key path that must exist; `*`/`**` match as in row paths, so
-                // `/a/if/*` requires `if` to be an object with a key (estate#670).
-                None => {
-                    let kp = key_path(d);
-                    w.keys
-                        .iter()
-                        .any(|(kd, k)| *kd == doc && path_match(&kp, k))
-                }
-            });
+                    // `path=value` is exact; `path=a|b` is one of the alternatives, ASCII case
+                    // ignored as in a row's `values` (estate#670).
+                    Some((k, v)) => scalar_at(doc, &key_path(k)).is_some_and(|s| {
+                        if v.contains('|') {
+                            v.split('|').any(|x| x.eq_ignore_ascii_case(&s))
+                        } else {
+                            s == v
+                        }
+                    }),
+                    // A key path that must exist; `*`/`**` match as in row paths, so
+                    // `/a/if/*` requires `if` to be an object with a key (estate#670).
+                    None => {
+                        let kp = key_path(d);
+                        w.keys
+                            .iter()
+                            .any(|(kd, k)| *kd == doc && path_match(&kp, k))
+                    }
+                });
             if by_file && by_detect {
                 doc_trust[doc].push(t);
             }
