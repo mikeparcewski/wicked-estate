@@ -54,32 +54,32 @@ fn assert_not_indexed_report(stderr: &str) {
     let expected = [
         (
             "ca7",
-            "scheduler definition: no extractor yet (wicked-estate#662)",
+            "scheduler definition: job schedules and dependencies are not in the graph; deferred (wicked-estate#662)",
             "app/scheduler/CARDDEMO.ca7",
         ),
         (
             "controlm",
-            "scheduler definition: no extractor yet (wicked-estate#662)",
+            "scheduler definition: job schedules and dependencies are not in the graph; deferred (wicked-estate#662)",
             "app/scheduler/CARDDEMO.controlm",
         ),
         (
             "csd",
-            "CICS CSD resource definitions: no extractor yet (wicked-estate#662)",
+            "CICS CSD: its transaction, program and file definitions are not in the graph; deferred (wicked-estate#662)",
             "app/csd/CARDDEMO.CSD",
         ),
         (
             "ctl",
-            "mainframe control card (not VB6): no extractor yet (wicked-estate#662)",
+            "mainframe control card (not VB6): its utility statements are not in the graph; deferred (wicked-estate#662)",
             "app/ctl/REPROCT.ctl",
         ),
         (
             "ddl",
-            "Db2 DDL: no DDL extractor yet (wicked-estate#662)",
+            "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a node, from its DCLGEN copybook or as a boundary); deferred (wicked-estate#662)",
             "app/ddl/TRNTYPE.ddl",
         ),
         (
             "mac",
-            "HLASM macro library member: no macro extractor yet (wicked-estate#662)",
+            "HLASM macro library member: its macro definitions are not in the graph; deferred (wicked-estate#662)",
             "app/asm/CDMAC.mac",
         ),
         ("txt", "no extractor for this file type", "README.txt"),
@@ -153,6 +153,57 @@ fn dcl_is_indexed_as_a_cobol_copybook_with_its_db2_table() {
     assert_eq!(table.location.file, path);
     assert!(!table.is_declaration());
     assert!(store.indexed_files().unwrap().contains(&path.to_string()));
+}
+
+#[test]
+fn ddl_table_named_in_exec_sql_is_a_boundary_node_not_a_definition_662() {
+    // The .ddl reason says the DDL's definitions are not in the graph, but a table that COBOL
+    // EXEC SQL names still is a node: from its DCLGEN copybook when one is indexed
+    // (dcl_is_indexed_as_a_cobol_copybook_with_its_db2_table), else as a boundary
+    // (cobol_links::Pass::exec_sql). Without the DCLGEN copybook, this is the boundary case.
+    let (_tmp, root, db) = fixture();
+    fs::remove_file(root.join("app/dcl/DCLTRTYP.dcl")).unwrap();
+    fs::create_dir_all(root.join("app/cbl")).unwrap();
+    let program = [
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. TRNRPT.",
+        "       DATA DIVISION.",
+        "       WORKING-STORAGE SECTION.",
+        "       01  WS-DESC PIC X(50).",
+        "       PROCEDURE DIVISION.",
+        "           EXEC SQL SELECT TR_DESCRIPTION INTO :WS-DESC",
+        "                FROM CARDDEMO.TRANSACTION_TYPE END-EXEC.",
+        "           GOBACK.",
+    ]
+    .join("\n")
+        + "\n";
+    fs::write(root.join("app/cbl/TRNRPT.cbl"), program).unwrap();
+    let stderr = index(&root, &db);
+    let ddl = "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC \
+               SQL names is still a node, from its DCLGEN copybook or as a boundary); deferred \
+               (wicked-estate#662) (e.g. app/ddl/TRNTYPE.ddl)";
+    assert!(
+        not_indexed_lines(&stderr)
+            .iter()
+            .any(|line| line.starts_with("NOT-INDEXED: .ddl: 1 file(s): ") && line.ends_with(ddl)),
+        "{stderr}"
+    );
+    let store = SqliteStore::open(&db).unwrap();
+    let nodes = store.all_nodes().unwrap();
+    let table = nodes
+        .iter()
+        .find(|node| node.symbol == Symbol::synthetic("db2", "CARDDEMO.TRANSACTION_TYPE").id())
+        .expect("the table EXEC SQL names is a node");
+    assert_eq!(table.kind, NodeKind::Other("db2_table".to_string()));
+    assert_eq!(table.location.file, "app/cbl/TRNRPT.cbl");
+    assert!(table.is_declaration(), "{table:?}");
+    assert!(table.metadata.contains_key("boundary_reason"), "{table:?}");
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node.location.file != "app/ddl/TRNTYPE.ddl"),
+        "the DDL is not read"
+    );
 }
 
 #[test]

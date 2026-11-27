@@ -160,15 +160,30 @@ fn is_vb6_source(bytes: &[u8]) -> bool {
 
 const NOT_INDEXED_SECRET: &str = "matches the secret-file rule; never indexed";
 const NOT_INDEXED_READ: &str = "could not be read inside the repository root";
-const NOT_INDEXED_CTL: &str =
-    "mainframe control card (not VB6): no extractor yet (wicked-estate#662)";
+const NOT_INDEXED_CTL: &str = "mainframe control card (not VB6): its utility statements are not \
+     in the graph; deferred (wicked-estate#662)";
 
 fn not_indexed_reason(ext: &str) -> &'static str {
     match ext {
-        "ddl" | "db2" => "Db2 DDL: no DDL extractor yet (wicked-estate#662)",
-        "csd" => "CICS CSD resource definitions: no extractor yet (wicked-estate#662)",
-        "mac" => "HLASM macro library member: no macro extractor yet (wicked-estate#662)",
-        "ca7" | "controlm" => "scheduler definition: no extractor yet (wicked-estate#662)",
+        // #662: each reason says what the graph lacks. The extractors are deferred (the feature
+        // freeze), not ruled out.
+        "ddl" | "db2" => {
+            "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL \
+             EXEC SQL names is still a node, from its DCLGEN copybook or as a boundary); deferred \
+             (wicked-estate#662)"
+        }
+        "csd" => {
+            "CICS CSD: its transaction, program and file definitions are not in the graph; \
+             deferred (wicked-estate#662)"
+        }
+        "mac" => {
+            "HLASM macro library member: its macro definitions are not in the graph; deferred \
+             (wicked-estate#662)"
+        }
+        "ca7" | "controlm" => {
+            "scheduler definition: job schedules and dependencies are not in the graph; deferred \
+             (wicked-estate#662)"
+        }
         "ctl" => NOT_INDEXED_CTL,
         // estate#620: the XML rules formats a build without the default 'xml-rules' feature
         // does not read.
@@ -5772,27 +5787,33 @@ mod tests {
     fn not_indexed_reasons_describe_export_formats() {
         // Red on main: no reason helper or NOT-INDEXED reporting exists.
         for (ext, reason) in [
-            ("ddl", "Db2 DDL: no DDL extractor yet (wicked-estate#662)"),
-            ("db2", "Db2 DDL: no DDL extractor yet (wicked-estate#662)"),
+            (
+                "ddl",
+                "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a node, from its DCLGEN copybook or as a boundary); deferred (wicked-estate#662)",
+            ),
+            (
+                "db2",
+                "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a node, from its DCLGEN copybook or as a boundary); deferred (wicked-estate#662)",
+            ),
             (
                 "csd",
-                "CICS CSD resource definitions: no extractor yet (wicked-estate#662)",
+                "CICS CSD: its transaction, program and file definitions are not in the graph; deferred (wicked-estate#662)",
             ),
             (
                 "mac",
-                "HLASM macro library member: no macro extractor yet (wicked-estate#662)",
+                "HLASM macro library member: its macro definitions are not in the graph; deferred (wicked-estate#662)",
             ),
             (
                 "ca7",
-                "scheduler definition: no extractor yet (wicked-estate#662)",
+                "scheduler definition: job schedules and dependencies are not in the graph; deferred (wicked-estate#662)",
             ),
             (
                 "controlm",
-                "scheduler definition: no extractor yet (wicked-estate#662)",
+                "scheduler definition: job schedules and dependencies are not in the graph; deferred (wicked-estate#662)",
             ),
             (
                 "ctl",
-                "mainframe control card (not VB6): no extractor yet (wicked-estate#662)",
+                "mainframe control card (not VB6): its utility statements are not in the graph; deferred (wicked-estate#662)",
             ),
             // estate#620: the XML rules formats say what a build without 'xml-rules' needs.
             ("dmn", "Camunda DMN: requires the 'xml-rules' feature"),
@@ -5846,7 +5867,7 @@ mod tests {
                     ),
                     (
                         "export/REPROCT.ctl".to_string(),
-                        "mainframe control card (not VB6): no extractor yet (wicked-estate#662)"
+                        "mainframe control card (not VB6): its utility statements are not in the graph; deferred (wicked-estate#662)"
                             .to_string(),
                     ),
                     (
