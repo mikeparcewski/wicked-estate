@@ -5230,6 +5230,50 @@ mod tests {
         }
     }
 
+    /// estate#620 (coord ruling: option a): the release binary is built with default features,
+    /// and `xml-rules` is one, so Camunda DMN and Salesforce Flow (`.flow-meta.xml`) files index
+    /// as rule nodes instead of NOT-INDEXED.
+    #[test]
+    fn the_default_build_indexes_dmn_and_salesforce_flow_620() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../wicked-estate-extract/tests/fixtures");
+        let files = [
+            "dmn/loan_decision.dmn",
+            "salesforce_flow/account_validation.flow-meta.xml",
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        for file in files {
+            let to = tmp.path().join(file);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(fixtures.join(file), &to).unwrap();
+        }
+        let mut store = MemStore::new();
+        NOT_INDEXED.with(|notes| notes.borrow_mut().clear());
+        index_path_as(&mut store, tmp.path(), None).unwrap();
+        let notes = NOT_INDEXED.with(|notes| notes.borrow().clone());
+        assert_eq!(
+            notes,
+            Vec::<(String, String)>::new(),
+            "every rules file is indexed"
+        );
+        let nodes = GraphRead::all_nodes(&store).unwrap();
+        for file in files {
+            let kinds: Vec<NodeKind> = nodes
+                .iter()
+                .filter(|n| n.location.file == file)
+                .map(|n| n.kind.clone())
+                .collect();
+            assert!(
+                kinds.contains(&NodeKind::Rule) || kinds.contains(&NodeKind::RuleSet),
+                "{file} indexes as rule nodes: {kinds:?}"
+            );
+            assert!(
+                kinds.contains(&NodeKind::File),
+                "{file} has its file node: {kinds:?}"
+            );
+        }
+    }
+
     #[test]
     fn not_indexed_reasons_describe_export_formats() {
         // Red on main: no reason helper or NOT-INDEXED reporting exists.
