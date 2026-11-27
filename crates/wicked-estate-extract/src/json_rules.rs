@@ -1015,6 +1015,79 @@ mod tests {
         assert!(leaks.is_empty(), "{leaks:#?}");
     }
 
+    /// estate#676: JSON allows a key twice and the extractor keeps the last, while detection saw
+    /// any occurrence. A document with a key path twice outside arrays gets no detect trust,
+    /// so every value stays masked, in either order and for every detecting key.
+    #[test]
+    fn a_duplicate_key_keeps_every_customer_value_masked_676() {
+        let cases = [
+            (
+                "config/dup-name.json",
+                r#"{"ConfigRuleName": "r", "ConfigRuleName": null, "Source": {"Owner": "AWS"},
+  "Description": "secret-dup-a1"}"#,
+                "secret-dup-a1",
+            ),
+            (
+                "config/dup-name-reversed.json",
+                r#"{"ConfigRuleName": null, "ConfigRuleName": "r", "Source": {"Owner": "AWS"},
+  "Description": "secret-dup-b2"}"#,
+                "secret-dup-b2",
+            ),
+            (
+                "config/dup-owner.json",
+                r#"{"ConfigRuleName": "r", "Source": {"Owner": "AWS", "Owner": {"x": 1}},
+  "Description": "secret-dup-c3"}"#,
+                "secret-dup-c3",
+            ),
+            (
+                "config/dup-description.json",
+                r#"{"ConfigRuleName": "r", "Source": {"Owner": "AWS"},
+  "Description": "secret-dup-d4", "Description": "public"}"#,
+                "secret-dup-d4",
+            ),
+            (
+                "policies/dup-if.json",
+                r#"{"properties": {"displayName": "secret-dup-e5", "policyRule": {
+  "if": {"field": "type", "equals": "x"}, "if": false, "then": {"effect": "deny"}}}}"#,
+                "secret-dup-e5",
+            ),
+            (
+                "policies/dup-effect.json",
+                r#"{"properties": {"displayName": "secret-dup-f6", "policyRule": {
+  "if": {"field": "type", "equals": "x"}, "then": {"effect": "deny", "effect": {}}}}}"#,
+                "secret-dup-f6",
+            ),
+            // A duplicate in a document that also fails to parse stays masked too.
+            (
+                "config/dup-broken.json",
+                r#"{"ConfigRuleName": "r", "ConfigRuleName": "r", "Source": {"Owner": "AWS"},
+  "Description": "secret-dup-g7", "#,
+                "secret-dup-g7",
+            ),
+        ];
+        let leaks: Vec<String> = cases
+            .iter()
+            .filter_map(|(path, text, secret)| {
+                let masked = crate::redact::redact_source(path, text);
+                masked
+                    .contains(secret)
+                    .then(|| format!("{path}: {secret} kept: {masked}"))
+            })
+            .collect();
+        assert!(leaks.is_empty(), "{leaks:#?}");
+    }
+
+    /// estate#676 guard: array items share one key path by design, so a policy whose `allOf`
+    /// items each name a `field` is still a governance document and keeps its names.
+    #[test]
+    fn repeated_keys_in_array_items_still_detect_676() {
+        let text = r#"{"properties": {"displayName": "Require tags", "policyRule": {
+  "if": {"allOf": [{"field": "type", "equals": "a"}, {"field": "location", "equals": "b"}]},
+  "then": {"effect": "deny"}}}}"#;
+        let masked = crate::redact::redact_source("policies/tags.json", text);
+        assert!(masked.contains("Require tags"), "{masked}");
+    }
+
     /// #670 codex-check: an AWS Config custom policy rule has no `SourceIdentifier` (AWS ignores
     /// it for `CUSTOM_POLICY`), and Azure effects are case-insensitive. Both keep their names;
     /// the Guard policy text stays masked.
