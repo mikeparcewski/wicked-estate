@@ -504,6 +504,14 @@ fn writer_and_reader(conn: &Connection) -> String {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Called when the read-only check has refused, before the refusal's diagnostics read the
+    /// graph: a test writes the graph here, as a concurrent writer can (#601 round 1).
+    static TEST_AFTER_REFUSED_CHECK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The read-only currency check behind [`SqliteStore::open_readonly_current`]. Its error names
 /// what is missing: a schema object, or the columns this build's schema has that the graph lacks,
 /// and which builds last wrote and are reading the graph.
@@ -519,6 +527,12 @@ fn check_current(conn: &Connection) -> Result<()> {
             }
         })
         .map_err(|e| {
+            #[cfg(test)]
+            TEST_AFTER_REFUSED_CHECK.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().as_mut() {
+                    hook();
+                }
+            });
             let missing = missing_columns(conn);
             let builds = writer_and_reader(conn);
             if missing.is_empty() {
@@ -8705,6 +8719,77 @@ mod tests {
 
     /// wicked-estate#601: each writer-only name is an object a fresh graph has, so a rename in
     /// the schema cannot leave the exemption naming nothing while the renamed object refuses.
+    #[test]
+    fn a_refusal_names_the_writer_its_own_snapshot_saw_601() {
+        // #601 round 1 (codex): a writer that repairs the graph between the failed check and the
+        // refusal's diagnostics must not be named as the build that lacks what was missing.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("g.db");
+        drop(SqliteStore::open(&path).unwrap());
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "UPDATE meta SET v = '0.0.1' WHERE k = 'writer_version'; \
+                 DROP TABLE search_misses;",
+            )
+            .unwrap();
+        let ro = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let repair = path.clone();
+        TEST_AFTER_REFUSED_CHECK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                drop(SqliteStore::open(&repair).unwrap());
+            }))
+        });
+        let err = check_current(&ro).err().map(|e| e.to_string());
+        TEST_AFTER_REFUSED_CHECK.with(|hook| *hook.borrow_mut() = None);
+        let err = err.expect("the graph lacked search_misses when checked");
+        assert!(err.contains("search_misses"), "{err}");
+        assert!(
+            err.contains("last opened for writing by wicked-estate-store 0.0.1;"),
+            "the writer its snapshot recorded, not the one that repaired it since: {err}"
+        );
+        assert!(ro.is_autocommit(), "the check's read transaction is over");
+        drop(ro);
+        let fixed = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert!(check_current(&fixed).is_ok(), "the repaired graph passes");
+    }
+
+    #[test]
+    fn a_refusal_quotes_a_recorded_version_of_at_most_64_bytes_601() {
+        // #601 round 1 (codex): the recorded value is bounded in SQL, before it is read into the
+        // reader; 64 version-shaped bytes are quoted, 65 or a large value are not.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("g.db");
+        drop(SqliteStore::open(&path).unwrap());
+        let refusal = |value: &str| -> String {
+            let c = Connection::open(&path).unwrap();
+            c.execute(
+                "UPDATE meta SET v = ?1 WHERE k = 'writer_version'",
+                params![value],
+            )
+            .unwrap();
+            c.execute_batch("DROP TABLE IF EXISTS search_misses;")
+                .unwrap();
+            drop(c);
+            let ro = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            check_current(&ro).unwrap_err().to_string()
+        };
+        let at_limit = format!("1.{}", "0".repeat(62));
+        assert_eq!(at_limit.len(), 64);
+        let err = refusal(&at_limit);
+        assert!(
+            err.contains(&format!("wicked-estate-store {at_limit};")),
+            "{err}"
+        );
+        let not_a_version = "a build whose recorded version is not a version";
+        let over = format!("1.{}", "0".repeat(63));
+        let err = refusal(&over);
+        assert!(err.contains(not_a_version) && !err.contains(&over), "{err}");
+        let large = "1".repeat(1 << 20);
+        let err = refusal(&large);
+        assert!(err.contains(not_a_version) && err.len() < 1024, "{err}");
+    }
+
     #[test]
     fn writer_only_objects_are_schema_objects_601() {
         let fresh = SqliteStore::in_memory().unwrap();
