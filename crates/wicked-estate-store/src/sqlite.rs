@@ -476,11 +476,14 @@ fn record_writer_version(conn: &Connection) -> Result<()> {
 }
 
 /// Which build last opened the graph for writing and which is reading it, for a refusal (#601).
-/// The recorded value comes from the graph file, so only a version-shaped one is quoted.
+/// The recorded value comes from the graph file, so only a version-shaped one is quoted, and SQL
+/// bounds it before it is read: at most 65 characters of a text value, `''` for any other type
+/// (#601 round 1).
 fn writer_and_reader(conn: &Connection) -> String {
     let recorded: Option<String> = conn
         .query_row(
-            "SELECT v FROM meta WHERE k = ?1",
+            "SELECT CASE WHEN typeof(v) = 'text' THEN substr(v, 1, 65) ELSE '' END \
+             FROM meta WHERE k = ?1",
             params![WRITER_VERSION_KEY],
             |r| r.get(0),
         )
@@ -516,6 +519,22 @@ thread_local! {
 /// what is missing: a schema object, or the columns this build's schema has that the graph lacks,
 /// and which builds last wrote and are reading the graph.
 fn check_current(conn: &Connection) -> Result<()> {
+    // One read transaction for the check and the refusal's diagnostics (#601 round 1): a writer
+    // that repairs the graph in between is never named as the build that lacked the object.
+    let own = conn.is_autocommit();
+    if own {
+        conn.execute_batch("BEGIN").map_err(st)?;
+    }
+    let res = check_current_in(conn);
+    if own {
+        // A read transaction: ending it changes nothing.
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    res
+}
+
+/// [`check_current`] inside the caller's read transaction.
+fn check_current_in(conn: &Connection) -> Result<()> {
     schema_objects_present(conn)
         .and_then(|()| migrate_schema(conn))
         .and_then(|()| {
