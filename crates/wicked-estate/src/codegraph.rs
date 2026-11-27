@@ -3670,13 +3670,17 @@ mod tests {
     /// a forced value-flow caller (#220), re-extracted without being in the changed set.
     #[test]
     fn a_forced_caller_saved_mid_run_frees_the_call_parked_on_its_minted_name_671() {
-        a_re_extracted_file_saved_mid_run_loses_its_mint_671(|root| {
+        let rebinds = a_re_extracted_file_saved_mid_run_loses_its_mint_671(|root| {
             std::fs::write(
                 root.join("src/fmt.ts"),
                 "export function rendered(n: number): string { return String(n); }\n",
             )
             .unwrap();
         });
+        assert_eq!(
+            rebinds, 0,
+            "util.ts was re-extracted as a forced caller, in pass 0"
+        );
     }
 
     #[test]

@@ -2798,10 +2798,10 @@ fn index_path_inner(
     let mut rederive_refs: Vec<wicked_estate_core::UnresolvedRef> = Vec::new();
     let mut pre_run_symbols = HashSet::new();
     let mut old_candidates = Vec::new();
-    // Pre-run codegraph-minted nodes of files outside the changed seed: the run may still
-    // re-extract their file (a forced caller or importer, a rebind file), and it then loses them
-    // unless the mapping mints them again (#671).
-    let mut minted_elsewhere: Vec<Node> = Vec::new();
+    // The backfill probes of the pre-run codegraph-minted nodes of files outside the changed
+    // seed, by file: the run may still re-extract their file (a forced value-flow caller, a
+    // rebind file), and it then loses them unless the mapping mints them again (#671).
+    let mut minted_elsewhere: Vec<(String, Vec<String>)> = Vec::new();
     let mut file_by_symbol: HashMap<SymbolId, String> = HashMap::new();
     if !force_full && (!changed_seed.is_empty() || !deleted.is_empty()) {
         // Keep the pre-run population and removed candidates for homonym invalidation (#425).
@@ -2826,7 +2826,10 @@ fn index_path_inner(
                 old_candidates.push(node);
             } else {
                 if is_codegraph_minted(&node) && !node.name.is_empty() {
-                    minted_elsewhere.push(node.clone());
+                    minted_elsewhere.push((
+                        node.location.file.clone(),
+                        node_backfill_probes(&node).collect(),
+                    ));
                 }
                 file_by_symbol.insert(node.symbol, node.location.file);
             }
@@ -3735,17 +3738,16 @@ fn index_path_inner(
     // again (it was saved during the run and fell back, estate#657), a call parked on one of
     // their names is retried here, as a seed file's lost candidates are; one minted again was
     // probed above (#671).
-    for node in minted_elsewhere
-        .iter()
-        .filter(|n| extracted_files.contains(&n.location.file))
-    {
-        for probe in node_backfill_probes(node) {
+    for (file, probes) in minted_elsewhere {
+        if !extracted_files.contains(&file) {
+            continue;
+        }
+        for probe in probes {
             if seen_probes.insert(probe.clone()) {
                 backfill_probes.push(probe);
             }
         }
     }
-    drop(minted_elsewhere);
     drop(seen_probes);
     let codegraph_pair = codegraph_state.as_ref().zip(codegraph_ids.as_ref());
     let resolution = {
