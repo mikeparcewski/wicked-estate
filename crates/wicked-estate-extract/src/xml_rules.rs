@@ -3,7 +3,8 @@
 //! Handles structured XML rules documents: DMN (Decision Model and Notation), Drools DRL
 //! descriptors, BPMN decision tables, and any XML dialect that maps elements to rule-model nodes.
 //! The mapping is **entirely data-driven** — a `XmlRulesConfig` TOML file describes which XML
-//! element names emit which `NodeKind`s and which parent→child pairs emit `EdgeKind`s. No
+//! element names emit which `NodeKind`s and which parent→child pairs emit `EdgeKind`s (a child
+//! pairs with its nearest mapped ancestor; unmapped wrapper elements are see-through, #682). No
 //! per-dialect Rust code is required.
 //!
 //! # Config TOML example (DMN)
@@ -271,7 +272,8 @@ fn element_ids(
     ids
 }
 
-/// An edge emitted whenever `child_element` appears as a direct child of `parent_element`.
+/// An edge emitted whenever `child_element` appears under `parent_element` with no other mapped
+/// element between them (unmapped wrapper elements are see-through, #682).
 #[derive(Debug, Clone, Deserialize)]
 pub struct EdgeMapping {
     pub parent_element: String,
@@ -432,7 +434,26 @@ impl Extractor for XmlRulesExtractor {
             ));
         }
 
-        // Emit edges for parent→child element pairs defined in edge_mappings, each once.
+        // Emit edges for parent→child element pairs defined in edge_mappings, each once. A child
+        // links to its nearest MAPPED ancestor when that ancestor is the mapping's parent, so
+        // unmapped wrappers are see-through (GDST nests its columns in `childColumns` /
+        // `actionCols`, #682). One pass in document order (a parent is visited before its
+        // children) records every element's nearest mapped ancestor.
+        let mut nearest: std::collections::HashMap<roxmltree::NodeId, roxmltree::Node<'_, '_>> =
+            std::collections::HashMap::new();
+        for node in doc.descendants().filter(|n| n.is_element()) {
+            let Some(parent) = node.parent_element() else {
+                continue;
+            };
+            let owner = if node_map.contains_key(parent.tag_name().name()) {
+                Some(parent)
+            } else {
+                nearest.get(&parent.id()).copied()
+            };
+            if let Some(owner) = owner {
+                nearest.insert(node.id(), owner);
+            }
+        }
         let mut linked = std::collections::HashSet::new();
         for (i, (edge_mapping, edge_kind)) in self
             .config
@@ -441,38 +462,36 @@ impl Extractor for XmlRulesExtractor {
             .zip(&self.edge_kinds)
             .enumerate()
         {
-            for parent_node in doc.descendants() {
-                if !parent_node.is_element()
-                    || parent_node.tag_name().name() != edge_mapping.parent_element
-                {
+            for child in doc.descendants() {
+                if !child.is_element() || child.tag_name().name() != edge_mapping.child_element {
                     continue;
                 }
-                let Some((_, parent_sym)) = ids.get(&parent_node.id()) else {
+                let Some(parent) = nearest.get(&child.id()).copied() else {
                     continue;
                 };
-                for child in parent_node.children() {
-                    if !child.is_element() || child.tag_name().name() != edge_mapping.child_element
-                    {
-                        continue;
-                    }
-                    let Some((_, child_sym)) = ids.get(&child.id()) else {
-                        continue;
-                    };
-                    if !linked.insert((i, parent_sym.clone(), child_sym.clone())) {
-                        continue;
-                    }
-                    // Edge: source = parent (dependent / governer), target = child (dependency).
-                    // "A governs B" → source=A (the rule set), target=B (the rule).
-                    // This matches the edge-direction invariant: source is the dependent.
-                    local_edges.push(Edge::new(
-                        parent_sym.clone(),
-                        child_sym.clone(),
-                        // Parsed at construction (#361); a refused kind fails here, loudly.
-                        edge_kind.clone().map_err(Error::Extraction)?,
-                        ResolutionTier::Parsed,
-                        "xml-rules",
-                    ));
+                if parent.tag_name().name() != edge_mapping.parent_element {
+                    continue;
                 }
+                // Ids come from the one shared map (#675), computed once per element.
+                let (Some((_, parent_sym)), Some((_, child_sym))) =
+                    (ids.get(&parent.id()), ids.get(&child.id()))
+                else {
+                    continue;
+                };
+                if !linked.insert((i, parent_sym.clone(), child_sym.clone())) {
+                    continue;
+                }
+                // Edge: source = parent (dependent / governer), target = child (dependency).
+                // "A governs B" → source=A (the rule set), target=B (the rule).
+                // This matches the edge-direction invariant: source is the dependent.
+                local_edges.push(Edge::new(
+                    parent_sym.clone(),
+                    child_sym.clone(),
+                    // Parsed at construction (#361); a refused kind fails here, loudly.
+                    edge_kind.clone().map_err(Error::Extraction)?,
+                    ResolutionTier::Parsed,
+                    "xml-rules",
+                ));
             }
         }
 
@@ -489,6 +508,121 @@ impl Extractor for XmlRulesExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// estate#683 R-B: a parent whose name child comes after N mapped children is named once,
+    /// not once per child. Recomputing it per child scans N siblings N times (about 9e8 steps
+    /// here, tens of seconds in a debug build); computing it once takes milliseconds.
+    #[test]
+    fn a_parent_with_many_children_is_named_once_683() {
+        let ex = XmlRulesExtractor::from_toml(
+            r#"
+[engine]
+name       = "t"
+file_globs = ["**/*.t"]
+
+[[node_mappings]]
+element    = "r"
+emit_kind  = "rule"
+name_child = "label"
+
+[[node_mappings]]
+element   = "c"
+emit_kind = "condition"
+name_attr = "n"
+
+[[edge_mappings]]
+parent_element = "r"
+child_element  = "c"
+edge_kind      = "evaluates"
+"#,
+        )
+        .unwrap();
+        const N: usize = 30_000;
+        let mut text = String::from("<r>");
+        for i in 0..N {
+            text.push_str(&format!(r#"<c n="c{i}"/>"#));
+        }
+        text.push_str("<label>R</label></r>");
+        let started = std::time::Instant::now();
+        let got = ex
+            .extract(&SourceFile {
+                path: "f.t".into(),
+                language: Language::new("xml-rules:t"),
+                text,
+            })
+            .unwrap();
+        let took = started.elapsed();
+        assert_eq!(got.local_edges.len(), N);
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "extraction took {took:?}"
+        );
+    }
+
+    /// estate#682: an edge reaches a child through unmapped wrappers, stops at any mapped element
+    /// in between (another tag, or a nested parent of the same tag), and is emitted once.
+    #[test]
+    fn an_edge_links_a_child_to_its_nearest_mapped_ancestor_682() {
+        let ex = XmlRulesExtractor::from_toml(
+            r#"
+[engine]
+name       = "t"
+file_globs = ["**/*.t"]
+
+[[node_mappings]]
+element   = "a"
+emit_kind = "rule_set"
+name_attr = "n"
+
+[[node_mappings]]
+element   = "b"
+emit_kind = "rule"
+name_attr = "n"
+
+[[node_mappings]]
+element   = "c"
+emit_kind = "condition"
+name_attr = "n"
+
+[[edge_mappings]]
+parent_element = "a"
+child_element  = "c"
+edge_kind      = "evaluates"
+
+[[edge_mappings]]
+parent_element = "b"
+child_element  = "c"
+edge_kind      = "evaluates"
+"#,
+        )
+        .unwrap();
+        let text = r#"<a n="A1"><w><b n="B1"><c n="C1"/></b><c n="C2"/><c n="C2"/></w><a n="A2"><x><c n="C3"/></x></a></a>"#;
+        let got = ex
+            .extract(&SourceFile {
+                path: "f.t".into(),
+                language: Language::new("xml-rules:t"),
+                text: text.into(),
+            })
+            .unwrap();
+        let name = |id: &SymbolId| {
+            got.nodes
+                .iter()
+                .find(|n| &n.symbol == id)
+                .map(|n| n.name.clone())
+                .unwrap()
+        };
+        let mut edges: Vec<(String, String)> = got
+            .local_edges
+            .iter()
+            .map(|e| (name(&e.source), name(&e.target)))
+            .collect();
+        edges.sort();
+        let want = [("A1", "C2"), ("A2", "C3"), ("B1", "C1")];
+        assert_eq!(
+            edges,
+            want.map(|(a, b)| (a.to_string(), b.to_string())).to_vec()
+        );
+    }
 
     const DMN_CONFIG: &str = r#"
 [engine]

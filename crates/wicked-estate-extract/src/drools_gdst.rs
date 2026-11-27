@@ -62,6 +62,25 @@ name_child = "header"
 element    = "org.drools.workbench.models.guided.dtable.shared.model.ActionSetFieldCol52"
 emit_kind  = "action"
 name_child = "header"
+
+# The table's columns sit behind wrappers (conditionPatterns/Pattern52/childColumns, actionCols);
+# an edge reaches a column through them (#682).
+# Pattern52, childColumns and actionCols are unmapped on purpose: mapping one of them would make
+# it the columns' nearest mapped ancestor, and these edges would then need it as their parent.
+[[edge_mappings]]
+parent_element = "decision-table52"
+child_element  = "org.drools.workbench.models.guided.dtable.shared.model.ConditionCol52"
+edge_kind      = "evaluates"
+
+[[edge_mappings]]
+parent_element = "decision-table52"
+child_element  = "org.drools.workbench.models.guided.dtable.shared.model.ActionInsertFactCol52"
+edge_kind      = "produces"
+
+[[edge_mappings]]
+parent_element = "decision-table52"
+child_element  = "org.drools.workbench.models.guided.dtable.shared.model.ActionSetFieldCol52"
+edge_kind      = "produces"
 "#;
 
 /// Extractor for Drools GDST guided decision table files (`*.gdst`).
@@ -150,6 +169,66 @@ mod tests {
                 .any(|n| n.kind == NodeKind::RuleSet || n.kind == NodeKind::Condition),
             "expected at least one RuleSet or Condition node; got {:?}",
             extraction.nodes.iter().map(|n| &n.kind).collect::<Vec<_>>()
+        );
+    }
+
+    /// estate#682: a table links to its condition columns (`Evaluates`) and action columns
+    /// (`Produces`) through GDST's wrapper elements, one edge per column.
+    #[test]
+    fn a_table_links_to_its_condition_and_action_columns_682() {
+        use wicked_estate_core::EdgeKind;
+        const M: &str = "org.drools.workbench.models.guided.dtable.shared.model";
+        let text = format!(
+            r#"<decision-table52>
+  <tableName>LoanApproval</tableName>
+  <conditionPatterns>
+    <{M}.Pattern52>
+      <childColumns>
+        <{M}.ConditionCol52><header>Credit Score</header></{M}.ConditionCol52>
+        <{M}.ConditionCol52><header>Income</header></{M}.ConditionCol52>
+      </childColumns>
+    </{M}.Pattern52>
+  </conditionPatterns>
+  <actionCols>
+    <{M}.ActionInsertFactCol52><header>Approve</header></{M}.ActionInsertFactCol52>
+    <{M}.ActionSetFieldCol52><header>Rate</header></{M}.ActionSetFieldCol52>
+  </actionCols>
+</decision-table52>"#
+        );
+        let ex = DroolsGdstExtractor::new()
+            .extract(&SourceFile {
+                path: "loan.gdst".to_string(),
+                language: Language::new("xml-rules:drools-gdst"),
+                text,
+            })
+            .expect("extraction must succeed");
+        let id = |name: &str| {
+            ex.nodes
+                .iter()
+                .find(|n| n.name == name)
+                .map(|n| n.symbol.clone())
+                .unwrap_or_else(|| panic!("{name} is a node"))
+        };
+        let table = id("LoanApproval");
+        // Every edge the file emits, so a stray one fails too.
+        assert!(ex.local_edges.iter().all(|e| e.source == table));
+        let mut got: Vec<(String, EdgeKind)> = ex
+            .local_edges
+            .iter()
+            .map(|e| {
+                let to = ex.nodes.iter().find(|n| n.symbol == e.target).unwrap();
+                (to.name.clone(), e.kind.clone())
+            })
+            .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got,
+            vec![
+                ("Approve".to_string(), EdgeKind::Produces),
+                ("Credit Score".to_string(), EdgeKind::Evaluates),
+                ("Income".to_string(), EdgeKind::Evaluates),
+                ("Rate".to_string(), EdgeKind::Produces),
+            ]
         );
     }
 }
