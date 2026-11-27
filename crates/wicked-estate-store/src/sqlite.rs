@@ -476,14 +476,15 @@ fn record_writer_version(conn: &Connection) -> Result<()> {
 }
 
 /// Which build last opened the graph for writing and which is reading it, for a refusal (#601).
-/// The recorded value comes from the graph file, so only a version-shaped one is quoted, and SQL
-/// bounds it before it is read: at most 65 characters of a text value, `''` for any other type
-/// (#601 round 1).
+/// The recorded value comes from the graph file, so only a version-shaped one is quoted, and only
+/// a text value of 1 to 64 bytes is read at all: `typeof` and `octet_length` of a column read its
+/// header, not its content, so a huge value is never loaded (`''` stands for any other, #601
+/// codex-check).
 fn writer_and_reader(conn: &Connection) -> String {
     let recorded: Option<String> = conn
         .query_row(
-            "SELECT CASE WHEN typeof(v) = 'text' THEN substr(v, 1, 65) ELSE '' END \
-             FROM meta WHERE k = ?1",
+            "SELECT CASE WHEN typeof(v) = 'text' AND octet_length(v) BETWEEN 1 AND 64 \
+             THEN v ELSE '' END FROM meta WHERE k = ?1",
             params![WRITER_VERSION_KEY],
             |r| r.get(0),
         )
