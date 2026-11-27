@@ -5212,7 +5212,7 @@ mod tests {
             Vec::<(String, String)>::new(),
             "every rules file is indexed"
         );
-        let nodes = store.all_nodes().unwrap();
+        let nodes = GraphRead::all_nodes(&store).unwrap();
         for file in files {
             let kinds: Vec<NodeKind> = nodes
                 .iter()
