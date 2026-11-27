@@ -222,6 +222,10 @@ struct TrustRow {
     class: Class,
     #[serde(default)]
     key_sibling: Option<String>,
+    /// When set, a value is kept only if it equals one of these (ASCII case ignored), so a
+    /// closed vocabulary (an Azure Policy effect) cannot carry free text (estate#670).
+    #[serde(default)]
+    values: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -711,11 +715,13 @@ fn config_masks(
             let by_file = t.files.is_empty() || name_matches(&t.files, name);
             let by_detect = t.detect.iter().all(|d| match d.split_once('=') {
                 Some((k, v)) => scalar_at(doc, &key_path(k)).is_some_and(|s| s == v),
+                // A key path that must exist; `*`/`**` match as in row paths, so
+                // `/a/if/*` requires `if` to be an object with a key (estate#670).
                 None => {
                     let kp = key_path(d);
-                    w.keys.iter().any(|(kd, k)| {
-                        *kd == doc && k.iter().map(String::as_str).eq(kp.iter().copied())
-                    })
+                    w.keys
+                        .iter()
+                        .any(|(kd, k)| *kd == doc && path_match(&kp, k))
                 }
             });
             if by_file && by_detect {
@@ -1232,6 +1238,9 @@ fn decide(
             Unkeyed::Command => argv_masks(value, leaf),
         };
     };
+    if !row.values.is_empty() && !row.values.iter().any(|x| x.eq_ignore_ascii_case(v)) {
+        return all;
+    }
     match row.class {
         Class::Plain => {
             if core_redact::value_looks_secret(value) {
