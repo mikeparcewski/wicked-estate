@@ -74,7 +74,7 @@ fn assert_not_indexed_report(stderr: &str) {
         ),
         (
             "ddl",
-            "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a boundary node); deferred (wicked-estate#662)",
+            "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a node, from its DCLGEN copybook or as a boundary); deferred (wicked-estate#662)",
             "app/ddl/TRNTYPE.ddl",
         ),
         (
@@ -158,8 +158,9 @@ fn dcl_is_indexed_as_a_cobol_copybook_with_its_db2_table() {
 #[test]
 fn ddl_table_named_in_exec_sql_is_a_boundary_node_not_a_definition_662() {
     // The .ddl reason says the DDL's definitions are not in the graph, but a table that COBOL
-    // EXEC SQL names still is, as a boundary node (cobol_links::Pass::exec_sql). Without the
-    // DCLGEN copybook, the table is declared only in the unread DDL.
+    // EXEC SQL names still is a node: from its DCLGEN copybook when one is indexed
+    // (dcl_is_indexed_as_a_cobol_copybook_with_its_db2_table), else as a boundary
+    // (cobol_links::Pass::exec_sql). Without the DCLGEN copybook, this is the boundary case.
     let (_tmp, root, db) = fixture();
     fs::remove_file(root.join("app/dcl/DCLTRTYP.dcl")).unwrap();
     fs::create_dir_all(root.join("app/cbl")).unwrap();
@@ -179,8 +180,8 @@ fn ddl_table_named_in_exec_sql_is_a_boundary_node_not_a_definition_662() {
     fs::write(root.join("app/cbl/TRNRPT.cbl"), program).unwrap();
     let stderr = index(&root, &db);
     let ddl = "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC \
-               SQL names is still a boundary node); deferred (wicked-estate#662) (e.g. \
-               app/ddl/TRNTYPE.ddl)";
+               SQL names is still a node, from its DCLGEN copybook or as a boundary); deferred \
+               (wicked-estate#662) (e.g. app/ddl/TRNTYPE.ddl)";
     assert!(
         not_indexed_lines(&stderr)
             .iter()

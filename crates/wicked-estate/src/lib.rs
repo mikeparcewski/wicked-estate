@@ -169,7 +169,8 @@ fn not_indexed_reason(ext: &str) -> &'static str {
         // freeze), not ruled out.
         "ddl" | "db2" => {
             "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL \
-             EXEC SQL names is still a boundary node); deferred (wicked-estate#662)"
+             EXEC SQL names is still a node, from its DCLGEN copybook or as a boundary); deferred \
+             (wicked-estate#662)"
         }
         "csd" => {
             "CICS CSD: its transaction, program and file definitions are not in the graph; \
@@ -5788,11 +5789,11 @@ mod tests {
         for (ext, reason) in [
             (
                 "ddl",
-                "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a boundary node); deferred (wicked-estate#662)",
+                "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a node, from its DCLGEN copybook or as a boundary); deferred (wicked-estate#662)",
             ),
             (
                 "db2",
-                "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a boundary node); deferred (wicked-estate#662)",
+                "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a node, from its DCLGEN copybook or as a boundary); deferred (wicked-estate#662)",
             ),
             (
                 "csd",
