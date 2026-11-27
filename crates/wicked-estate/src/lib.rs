@@ -5772,27 +5772,33 @@ mod tests {
     fn not_indexed_reasons_describe_export_formats() {
         // Red on main: no reason helper or NOT-INDEXED reporting exists.
         for (ext, reason) in [
-            ("ddl", "Db2 DDL: no DDL extractor yet (wicked-estate#662)"),
-            ("db2", "Db2 DDL: no DDL extractor yet (wicked-estate#662)"),
+            (
+                "ddl",
+                "Db2 DDL: tables and views declared only here are not in the graph; deferred (wicked-estate#662)",
+            ),
+            (
+                "db2",
+                "Db2 DDL: tables and views declared only here are not in the graph; deferred (wicked-estate#662)",
+            ),
             (
                 "csd",
-                "CICS CSD resource definitions: no extractor yet (wicked-estate#662)",
+                "CICS CSD: transactions, programs and files defined only here are not in the graph; deferred (wicked-estate#662)",
             ),
             (
                 "mac",
-                "HLASM macro library member: no macro extractor yet (wicked-estate#662)",
+                "HLASM macro library member: its macro definitions are not in the graph; deferred (wicked-estate#662)",
             ),
             (
                 "ca7",
-                "scheduler definition: no extractor yet (wicked-estate#662)",
+                "scheduler definition: job schedules and dependencies are not in the graph; deferred (wicked-estate#662)",
             ),
             (
                 "controlm",
-                "scheduler definition: no extractor yet (wicked-estate#662)",
+                "scheduler definition: job schedules and dependencies are not in the graph; deferred (wicked-estate#662)",
             ),
             (
                 "ctl",
-                "mainframe control card (not VB6): no extractor yet (wicked-estate#662)",
+                "mainframe control card (not VB6): its utility statements are not in the graph; deferred (wicked-estate#662)",
             ),
             // estate#620: the XML rules formats say what a build without 'xml-rules' needs.
             ("dmn", "Camunda DMN: requires the 'xml-rules' feature"),
