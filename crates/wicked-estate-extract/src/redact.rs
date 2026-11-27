@@ -3022,4 +3022,112 @@ mod tests {
         assert_eq!(literal_interior("r#\"raw\"#"), (3, 6));
         assert_eq!(literal_interior("\"\""), (1, 1));
     }
+
+    /// A Salesforce Flow assignment and condition on a secret-named field, in the shape of
+    /// `tests/fixtures/salesforce_flow/account_validation.flow-meta.xml` (estate#686).
+    const FLOW_686: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<Flow xmlns=\"http://soap.sforce.com/2006/04/metadata\">
+    <assignments>
+        <name>Set_Reset_Value</name>
+        <assignmentItems>
+            <assignToReference>User.@PW_KEY@__c</assignToReference>
+            <operator>Assign</operator>
+            <value>
+                <stringValue>rosebud7</stringValue>
+            </value>
+        </assignmentItems>
+    </assignments>
+    <decisions>
+        <name>Check_Reset</name>
+        <rules>
+            <name>Matches</name>
+            <conditionLogic>and</conditionLogic>
+            <conditions>
+                <leftValueReference>User.@PW_KEY@__c</leftValueReference>
+                <operator>EqualTo</operator>
+                <rightValue>
+                    <stringValue>rosebud7</stringValue>
+                </rightValue>
+            </conditions>
+        </rules>
+    </decisions>
+</Flow>
+";
+
+    /// estate#686: an XML value under a secret name is masked in every XML-shaped file. Red on
+    /// main: no XML file has a grammar here, and the `name=value` masks never see element text.
+    #[test]
+    fn xml_values_under_secret_names_are_masked_686() {
+        let cases: &[(&str, &str)] = &[
+            // (a) the element's own name is denied: its text, or its CDATA.
+            (
+                "conf/settings.xml",
+                "<config>\n  <@PW_KEY@>rosebud7</@PW_KEY@>\n  <cfg:apiToken xmlns:cfg=\"urn:x\"><![CDATA[rosebud7]]></cfg:apiToken>\n</config>\n",
+            ),
+            // (b1) a Hadoop/Maven property: the name child is denied, the value child is masked.
+            (
+                "conf/core-site.xml",
+                "<configuration>\n  <property>\n    <name>db.@PW_KEY@</name>\n    <value>rosebud7</value>\n  </property>\n</configuration>\n",
+            ),
+            // (b2) a Salesforce Flow assignment and condition on a secret-named field.
+            ("flows/Reset.flow-meta.xml", FLOW_686),
+            // (c) .NET appSettings and Camunda properties: key= or name= is denied, value= is
+            // masked.
+            (
+                "App.xml",
+                "<appSettings>\n  <add key=\"DbPassword\" value=\"rosebud7\"/>\n</appSettings>\n",
+            ),
+            (
+                "rules/loan.dmn",
+                "<definitions xmlns=\"https://www.omg.org/spec/DMN/20191111/MODEL/\" xmlns:camunda=\"http://camunda.org/schema/1.0/dmn\" id=\"loans\" name=\"Loans\">\n  <decision id=\"a\" name=\"A\">\n    <extensionElements>\n      <camunda:properties>\n        <camunda:property name=\"db_@PW_KEY@\" value=\"rosebud7\"/>\n      </camunda:properties>\n    </extensionElements>\n  </decision>\n</definitions>\n",
+            ),
+        ];
+        for (path, src) in cases {
+            let out = same_len(path, &fill(src));
+            assert!(!out.contains("rosebud7"), "{path}: value kept:\n{out}");
+        }
+    }
+
+    /// estate#686: what the XML masks must leave alone.
+    #[test]
+    fn xml_names_and_innocent_values_survive_686() {
+        // The real Flow fixture holds no secret, so it comes back byte for byte.
+        let flow =
+            include_str!("../tests/fixtures/salesforce_flow/account_validation.flow-meta.xml");
+        assert_eq!(
+            redact_source("account_validation.flow-meta.xml", flow),
+            flow
+        );
+        let cases: &[(&str, &str, &str)] = &[
+            // A rule NAMED like a secret keeps its condition values: (b2) keys on the reference.
+            (
+                "flows/R.flow-meta.xml",
+                "<Flow>\n  <rules>\n    <name>Check_@PW_KEY@_Reset</name>\n    <conditions>\n      <leftValueReference>User.Status__c</leftValueReference>\n      <operator>EqualTo</operator>\n      <rightValue>\n        <stringValue>Active</stringValue>\n      </rightValue>\n    </conditions>\n  </rules>\n</Flow>\n",
+                "<stringValue>Active</stringValue>",
+            ),
+            // A property whose name is not denied keeps its value.
+            (
+                "conf/hdfs-site.xml",
+                "<configuration>\n  <property>\n    <name>dfs.replication</name>\n    <value>3</value>\n  </property>\n</configuration>\n",
+                "<value>3</value>",
+            ),
+            // Element names stay; only the text is masked.
+            (
+                "conf/settings.xml",
+                "<config><@PW_KEY@>rosebud7</@PW_KEY@></config>\n",
+                "<@PW_KEY@>",
+            ),
+            // An attribute pair whose key is not denied keeps its value.
+            (
+                "App.xml",
+                "<appSettings><add key=\"Region\" value=\"eu-west-1\"/></appSettings>\n",
+                "value=\"eu-west-1\"",
+            ),
+        ];
+        for (path, src, kept) in cases {
+            let src = fill(src);
+            let out = same_len(path, &src);
+            assert!(out.contains(&fill(kept)), "{path}: `{kept}` lost:\n{out}");
+        }
+    }
 }

@@ -30,6 +30,8 @@ const PLANTED: &[&str] = &[
     "PLANTEDcredFile44", // committed credentials.json (excluded file)
     "PLANTEDtfvarsPw61", // terraform variables file
     "PLANTEDpropsLike71", // INI file
+    "PLANTEDflowPw35", // Salesforce Flow condition on a secret-named field (#686)
+    "PLANTEDdmnProp36", // Camunda DMN property named like a secret (#686)
 ];
 /// Token-shaped values planted through the ingress that never pass the extractor (G7.9).
 const INGRESS: &[&str] = &[
@@ -127,6 +129,17 @@ fn fixture(root: &Path) {
         "db_password = \"PLANTEDtfvarsPw61\"\nregion = \"us-east-1\"\n",
     );
     write(root, "conf/app.ini", "[db]\nhost = PLANTEDpropsLike71\n");
+    // #686: XML rules files the default build indexes (their stored text is the masked text).
+    write(
+        root,
+        "flows/Reset.flow-meta.xml",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Flow xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n    <decisions>\n        <name>Check_Reset</name>\n        <rules>\n            <name>Matches</name>\n            <conditionLogic>and</conditionLogic>\n            <conditions>\n                <leftValueReference>User.@PW_KEY@__c</leftValueReference>\n                <operator>EqualTo</operator>\n                <rightValue>\n                    <stringValue>PLANTEDflowPw35</stringValue>\n                </rightValue>\n            </conditions>\n        </rules>\n    </decisions>\n</Flow>\n",
+    );
+    write(
+        root,
+        "rules/loan.dmn",
+        "<definitions xmlns=\"https://www.omg.org/spec/DMN/20191111/MODEL/\" xmlns:camunda=\"http://camunda.org/schema/1.0/dmn\" id=\"loans\" name=\"Loans\">\n  <decision id=\"a\" name=\"A\">\n    <extensionElements>\n      <camunda:properties>\n        <camunda:property name=\"db_@PW_KEY@\" value=\"PLANTEDdmnProp36\"/>\n      </camunda:properties>\n    </extensionElements>\n  </decision>\n</definitions>\n",
+    );
     // A drop-in rule (a user-declared identity extractor) over a catalog holding a token shape.
     write(
         root,
