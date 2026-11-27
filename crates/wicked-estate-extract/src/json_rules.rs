@@ -947,6 +947,20 @@ mod tests {
                 r#"{"properties": {"mode": "secret-mode-d4", "policyRule": {"if": false, "then": false}}}"#,
                 "secret-mode-d4",
             ),
+            // #670 codex-check: the detecting keys must hold a governance document's values,
+            // not objects.
+            (
+                "data/aws-typed.json",
+                r#"{"ConfigRuleName": {}, "Source": {"Owner": {}, "SourceIdentifier": {}},
+  "Description": "secret-desc-e5"}"#,
+                "secret-desc-e5",
+            ),
+            (
+                "data/azure-typed.json",
+                r#"{"properties": {"displayName": "secret-name-f6",
+  "policyRule": {"if": {"x": 1}, "then": {"effect": {}}}}}"#,
+                "secret-name-f6",
+            ),
         ];
         for (path, text, secret) in cases {
             let masked = crate::redact::redact_source(path, text);
@@ -955,6 +969,26 @@ mod tests {
                 "{path}: {secret} stays masked: {masked}"
             );
         }
+    }
+
+    /// #670 codex-check: an AWS Config custom policy rule has no `SourceIdentifier` (AWS ignores
+    /// it for `CUSTOM_POLICY`), and Azure effects are case-insensitive. Both keep their names;
+    /// the Guard policy text stays masked.
+    #[test]
+    fn custom_policy_rules_and_lowercase_effects_keep_their_names_670() {
+        let aws = r#"{"ConfigRuleName": "tagged-policy", "Description": "Buckets carry tags",
+  "Source": {"Owner": "CUSTOM_POLICY",
+    "CustomPolicyDetails": {"PolicyRuntime": "guard-2.x.x", "PolicyText": "secret-policy-g7"}}}"#;
+        let masked = crate::redact::redact_source("config/tagged.json", aws);
+        for kept in ["tagged-policy", "Buckets carry tags", "CUSTOM_POLICY"] {
+            assert!(masked.contains(kept), "{kept}: {masked}");
+        }
+        assert!(!masked.contains("secret-policy-g7"), "{masked}");
+        let azure = r#"{"properties": {"displayName": "Lowercase effect",
+  "policyRule": {"if": {"field": "type", "equals": "x"}, "then": {"effect": "deny"}}}}"#;
+        let masked = crate::redact::redact_source("policies/lower.json", azure);
+        assert!(masked.contains("Lowercase effect"), "{masked}");
+        assert!(masked.contains("\"deny\""), "{masked}");
     }
 
     /// estate#667 S2: a JSON Schema that declares a `policyRule` property is not an Azure
