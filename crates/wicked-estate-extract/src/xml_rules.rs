@@ -270,6 +270,14 @@ impl Extractor for XmlRulesExtractor {
             let id = format!("{}::{}::{}", file.path, path.join("/"), name);
             Some(Symbol::synthetic("xml-rules", &id).id())
         };
+        // Each element's id is computed once: a parent with N children would otherwise re-scan
+        // its own children for its name N times (#683 R-B). The key is the element, and the tag
+        // passed is always that element's own tag.
+        let mut ids: std::collections::HashMap<roxmltree::NodeId, Option<SymbolId>> =
+            std::collections::HashMap::new();
+        let mut id_once = |el: roxmltree::Node<'_, '_>, tag: &str| {
+            ids.entry(el.id()).or_insert_with(|| id_of(el, tag)).clone()
+        };
         // Each (mapping, parent, child) edge is emitted once, even when two elements share an id.
         let mut linked = std::collections::HashSet::new();
         for (i, (edge_mapping, edge_kind)) in self
@@ -290,8 +298,8 @@ impl Extractor for XmlRulesExtractor {
                     continue;
                 }
                 let (Some(parent_sym), Some(child_sym)) = (
-                    id_of(parent, &edge_mapping.parent_element),
-                    id_of(child, &edge_mapping.child_element),
+                    id_once(parent, &edge_mapping.parent_element),
+                    id_once(child, &edge_mapping.child_element),
                 ) else {
                     continue;
                 };
