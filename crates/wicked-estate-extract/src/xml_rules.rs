@@ -29,8 +29,9 @@
 //! ```
 //!
 //! # Node identity
-//! `Symbol::synthetic("xml-rules", "<file>::<element_path>::<name>")` — stable as long as the
-//! element name attribute does not change (ADR-002).
+//! `Symbol::synthetic("xml-rules", "<file>::<element_path>::<name>")`, where `<element_path>` is
+//! each element from the root down as `tag[n]` (its position among same-tag siblings): stable
+//! while the name and the element order do not change (ADR-002).
 
 #![cfg(feature = "xml-rules")]
 
@@ -173,6 +174,26 @@ impl XmlRulesExtractor {
     }
 }
 
+/// The id path of an element: each element from the root down, as its tag and its position
+/// among its same-tag siblings. Two elements with one tag chain and one display name (the same
+/// condition under two rules) keep distinct ids (#663 round 1).
+fn element_path(node: roxmltree::Node) -> String {
+    let mut parts: Vec<String> = node
+        .ancestors()
+        .filter(|a| a.is_element())
+        .map(|a| {
+            let tag = a.tag_name().name();
+            let pos = a
+                .prev_siblings()
+                .filter(|s| s.is_element() && s.tag_name().name() == tag)
+                .count();
+            format!("{tag}[{pos}]")
+        })
+        .collect();
+    parts.reverse();
+    parts.join("/")
+}
+
 impl Extractor for XmlRulesExtractor {
     fn languages(&self) -> Vec<Language> {
         vec![self.language()]
@@ -211,16 +232,7 @@ impl Extractor for XmlRulesExtractor {
                 continue;
             }
 
-            // Build an element path (ancestor chain, names only) for a stable id.
-            let mut path_parts: Vec<String> = node
-                .ancestors()
-                .filter(|a| a.is_element())
-                .map(|a| a.tag_name().name().to_string())
-                .collect::<Vec<_>>();
-            path_parts.reverse();
-            path_parts.push(elem_name.to_string());
-            let element_path = path_parts.join("/");
-
+            let element_path = element_path(node);
             let id_str = format!("{}::{}::{}", file.path, element_path, name);
             let symbol = Symbol::synthetic("xml-rules", &id_str).id();
 
@@ -254,15 +266,7 @@ impl Extractor for XmlRulesExtractor {
                         continue;
                     };
 
-                // Build the parent's element path.
-                let mut pp: Vec<String> = parent_node
-                    .ancestors()
-                    .filter(|a| a.is_element())
-                    .map(|a| a.tag_name().name().to_string())
-                    .collect::<Vec<_>>();
-                pp.reverse();
-                pp.push(edge_mapping.parent_element.clone());
-                let parent_path = pp.join("/");
+                let parent_path = element_path(parent_node);
                 let parent_id_str = format!("{}::{}::{}", file.path, parent_path, parent_name);
                 let parent_sym = Symbol::synthetic("xml-rules", &parent_id_str).id();
 
@@ -285,15 +289,7 @@ impl Extractor for XmlRulesExtractor {
                         continue;
                     }
 
-                    // Build the child's element path.
-                    let mut cp: Vec<String> = child
-                        .ancestors()
-                        .filter(|a| a.is_element())
-                        .map(|a| a.tag_name().name().to_string())
-                        .collect::<Vec<_>>();
-                    cp.reverse();
-                    cp.push(edge_mapping.child_element.clone());
-                    let child_path = cp.join("/");
+                    let child_path = element_path(child);
                     let child_id_str = format!("{}::{}::{}", file.path, child_path, child_name);
                     let child_sym = Symbol::synthetic("xml-rules", &child_id_str).id();
 
