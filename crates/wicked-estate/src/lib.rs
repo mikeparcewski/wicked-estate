@@ -3262,6 +3262,21 @@ fn index_path_inner(
                     .insert(node.location.file);
             }
         }
+        // A definition codegraph will mint in a file extracted this pass is a gained name too:
+        // the mapping that mints it runs after this pass (estate#660).
+        if let Some(cg) = codegraph_state.as_ref() {
+            let files: HashSet<String> = changed.iter().map(|fw| fw.rel.clone()).collect();
+            let mut nodes = Vec::new();
+            for symbol in &extracted_symbols {
+                if let Some(node) = store.get_node(symbol)? {
+                    nodes.push(node);
+                }
+            }
+            let refs: Vec<&Node> = nodes.iter().collect();
+            for (file, name) in cg.mint_candidates(&files, &refs) {
+                changed_names.entry(name).or_default().insert(file);
+            }
+        }
         let mut lost_by_name: HashMap<String, Vec<SymbolId>> = HashMap::new();
         for node in &old_candidates {
             if node.name.is_empty() || store.get_node(&node.symbol)?.is_some() {
