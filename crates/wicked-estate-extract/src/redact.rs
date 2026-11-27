@@ -636,6 +636,9 @@ struct Walk {
     /// Direct scalar children of each mapping: key -> value text.
     maps: Vec<HashMap<String, String>>,
     docs: usize,
+    /// Documents with a mapping that holds one key twice, or a key spelled with an escape: no
+    /// detect trust for them (estate#676, see `new_map`).
+    dup_docs: HashSet<usize>,
 }
 
 fn config_masks(
@@ -713,36 +716,37 @@ fn config_masks(
     for doc in 0..w.docs {
         for t in c.rules.trust.iter().filter(|t| t.grammar == grammar) {
             let by_file = t.files.is_empty() || name_matches(&t.files, name);
-            let by_detect = t.detect.iter().all(|d| match d.split_once('=') {
-                // `path=*` is a non-empty string (not a number, boolean, null or container).
-                Some((k, "*")) => {
-                    let kp = key_path(k);
-                    w.leaves.iter().any(|l| {
-                        l.doc == doc
-                            && l.path.iter().map(String::as_str).eq(kp.iter().copied())
-                            && !l.numeric
-                            && !l.boolean
-                            && l.end > l.start
-                    })
-                }
-                // `path=value` is exact; `path=a|b` is one of the alternatives, ASCII case
-                // ignored as in a row's `values` (estate#670).
-                Some((k, v)) => scalar_at(doc, &key_path(k)).is_some_and(|s| {
-                    if v.contains('|') {
-                        v.split('|').any(|x| x.eq_ignore_ascii_case(&s))
-                    } else {
-                        s == v
+            let by_detect = (t.detect.is_empty() || !w.dup_docs.contains(&doc))
+                && t.detect.iter().all(|d| match d.split_once('=') {
+                    // `path=*` is a non-empty string (not a number, boolean, null or container).
+                    Some((k, "*")) => {
+                        let kp = key_path(k);
+                        w.leaves.iter().any(|l| {
+                            l.doc == doc
+                                && l.path.iter().map(String::as_str).eq(kp.iter().copied())
+                                && !l.numeric
+                                && !l.boolean
+                                && l.end > l.start
+                        })
                     }
-                }),
-                // A key path that must exist; `*`/`**` match as in row paths, so
-                // `/a/if/*` requires `if` to be an object with a key (estate#670).
-                None => {
-                    let kp = key_path(d);
-                    w.keys
-                        .iter()
-                        .any(|(kd, k)| *kd == doc && path_match(&kp, k))
-                }
-            });
+                    // `path=value` is exact; `path=a|b` is one of the alternatives, ASCII case
+                    // ignored as in a row's `values` (estate#670).
+                    Some((k, v)) => scalar_at(doc, &key_path(k)).is_some_and(|s| {
+                        if v.contains('|') {
+                            v.split('|').any(|x| x.eq_ignore_ascii_case(&s))
+                        } else {
+                            s == v
+                        }
+                    }),
+                    // A key path that must exist; `*`/`**` match as in row paths, so
+                    // `/a/if/*` requires `if` to be an object with a key (estate#670).
+                    None => {
+                        let kp = key_path(d);
+                        w.keys
+                            .iter()
+                            .any(|(kd, k)| *kd == doc && path_match(&kp, k))
+                    }
+                });
             if by_file && by_detect {
                 doc_trust[doc].push(t);
             }
@@ -872,7 +876,7 @@ fn walk(
             path.push("[]".into());
         }
         w.keys.push((doc, path.clone()));
-        let m = new_map(node, src, fmt, w);
+        let m = new_map(node, src, fmt, doc, w);
         let mut c = node.walk();
         for ch in node.named_children(&mut c) {
             if key_node.is_some_and(|k| k.id() == ch.id()) {
@@ -926,7 +930,7 @@ fn walk(
         .iter()
         .any(|ch| fmt.pair.iter().any(|r| r.kind == ch.kind()));
     let map = if has_pairs {
-        Some(new_map(node, src, fmt, w))
+        Some(new_map(node, src, fmt, doc, w))
     } else {
         map
     };
@@ -1079,12 +1083,23 @@ fn pair(
     path.truncate(depth);
 }
 
-fn new_map(node: tree_sitter::Node, src: &[u8], fmt: &Format, w: &mut Walk) -> usize {
+fn new_map(node: tree_sitter::Node, src: &[u8], fmt: &Format, doc: usize, w: &mut Walk) -> usize {
     let mut m = HashMap::new();
+    let mut names = HashSet::new();
     let mut c = node.walk();
     for ch in node.named_children(&mut c) {
         if let Some(rule) = fmt.pair.iter().find(|r| r.kind == ch.kind()) {
             let (key, values) = pair_parts(ch, rule, src);
+            // estate#676: JSON allows a key twice and the extractors (serde_json) keep the last,
+            // while a detect sees any occurrence, so a document whose mapping repeats a key gets
+            // no detect trust. Keys are compared as written, so a key spelled with an escape
+            // (which a parser may decode to another key's name) counts as a repeat too.
+            let repeated = key.as_ref().is_some_and(|k| {
+                k.iter().any(|s| s.contains('\\')) || !names.insert(k.join("\u{0}"))
+            });
+            if repeated {
+                w.dup_docs.insert(doc);
+            }
             if let (Some(k), Some(v)) = (key, values.first()) {
                 m.insert(k.join("."), unquote(node_text(*v, src)).to_string());
             }
