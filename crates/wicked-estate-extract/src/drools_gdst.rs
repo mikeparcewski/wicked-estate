@@ -65,6 +65,8 @@ name_child = "header"
 
 # The table's columns sit behind wrappers (conditionPatterns/Pattern52/childColumns, actionCols);
 # an edge reaches a column through them (#682).
+# Pattern52, childColumns and actionCols are unmapped on purpose: mapping one of them would make
+# it the columns' nearest mapped ancestor, and these edges would then need it as their parent.
 [[edge_mappings]]
 parent_element = "decision-table52"
 child_element  = "org.drools.workbench.models.guided.dtable.shared.model.ConditionCol52"
@@ -208,10 +210,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} is a node"))
         };
         let table = id("LoanApproval");
+        // Every edge the file emits, so a stray one fails too.
+        assert!(ex.local_edges.iter().all(|e| e.source == table));
         let mut got: Vec<(String, EdgeKind)> = ex
             .local_edges
             .iter()
-            .filter(|e| e.source == table)
             .map(|e| {
                 let to = ex.nodes.iter().find(|n| n.symbol == e.target).unwrap();
                 (to.name.clone(), e.kind.clone())
