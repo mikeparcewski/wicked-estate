@@ -714,7 +714,15 @@ fn config_masks(
         for t in c.rules.trust.iter().filter(|t| t.grammar == grammar) {
             let by_file = t.files.is_empty() || name_matches(&t.files, name);
             let by_detect = t.detect.iter().all(|d| match d.split_once('=') {
-                Some((k, v)) => scalar_at(doc, &key_path(k)).is_some_and(|s| s == v),
+                // `path=value` is exact; `path=a|b` is one of the alternatives, ASCII case
+                // ignored as in a row's `values` (estate#670).
+                Some((k, v)) => scalar_at(doc, &key_path(k)).is_some_and(|s| {
+                    if v.contains('|') {
+                        v.split('|').any(|x| x.eq_ignore_ascii_case(&s))
+                    } else {
+                        s == v
+                    }
+                }),
                 // A key path that must exist; `*`/`**` match as in row paths, so
                 // `/a/if/*` requires `if` to be an object with a key (estate#670).
                 None => {
