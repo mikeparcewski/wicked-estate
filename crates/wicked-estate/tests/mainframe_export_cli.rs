@@ -64,7 +64,7 @@ fn assert_not_indexed_report(stderr: &str) {
         ),
         (
             "csd",
-            "CICS CSD: transactions, programs and files defined only here are not in the graph; deferred (wicked-estate#662)",
+            "CICS CSD: its transaction, program and file definitions are not in the graph; deferred (wicked-estate#662)",
             "app/csd/CARDDEMO.CSD",
         ),
         (
@@ -74,7 +74,7 @@ fn assert_not_indexed_report(stderr: &str) {
         ),
         (
             "ddl",
-            "Db2 DDL: tables and views declared only here are not in the graph; deferred (wicked-estate#662)",
+            "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a boundary node); deferred (wicked-estate#662)",
             "app/ddl/TRNTYPE.ddl",
         ),
         (
@@ -153,6 +153,56 @@ fn dcl_is_indexed_as_a_cobol_copybook_with_its_db2_table() {
     assert_eq!(table.location.file, path);
     assert!(!table.is_declaration());
     assert!(store.indexed_files().unwrap().contains(&path.to_string()));
+}
+
+#[test]
+fn ddl_table_named_in_exec_sql_is_a_boundary_node_not_a_definition_662() {
+    // The .ddl reason says the DDL's definitions are not in the graph, but a table that COBOL
+    // EXEC SQL names still is, as a boundary node (cobol_links::Pass::exec_sql). Without the
+    // DCLGEN copybook, the table is declared only in the unread DDL.
+    let (_tmp, root, db) = fixture();
+    fs::remove_file(root.join("app/dcl/DCLTRTYP.dcl")).unwrap();
+    fs::create_dir_all(root.join("app/cbl")).unwrap();
+    let program = [
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. TRNRPT.",
+        "       DATA DIVISION.",
+        "       WORKING-STORAGE SECTION.",
+        "       01  WS-DESC PIC X(50).",
+        "       PROCEDURE DIVISION.",
+        "           EXEC SQL SELECT TR_DESCRIPTION INTO :WS-DESC",
+        "                FROM CARDDEMO.TRANSACTION_TYPE END-EXEC.",
+        "           GOBACK.",
+    ]
+    .join("\n")
+        + "\n";
+    fs::write(root.join("app/cbl/TRNRPT.cbl"), program).unwrap();
+    let stderr = index(&root, &db);
+    let ddl = "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC \
+               SQL names is still a boundary node); deferred (wicked-estate#662) (e.g. \
+               app/ddl/TRNTYPE.ddl)";
+    assert!(
+        not_indexed_lines(&stderr)
+            .iter()
+            .any(|line| line.starts_with("NOT-INDEXED: .ddl: 1 file(s): ") && line.ends_with(ddl)),
+        "{stderr}"
+    );
+    let store = SqliteStore::open(&db).unwrap();
+    let nodes = store.all_nodes().unwrap();
+    let table = nodes
+        .iter()
+        .find(|node| node.symbol == Symbol::synthetic("db2", "CARDDEMO.TRANSACTION_TYPE").id())
+        .expect("the table EXEC SQL names is a node");
+    assert_eq!(table.kind, NodeKind::Other("db2_table".to_string()));
+    assert_eq!(table.location.file, "app/cbl/TRNRPT.cbl");
+    assert!(table.is_declaration(), "{table:?}");
+    assert!(table.metadata.contains_key("boundary_reason"), "{table:?}");
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node.location.file != "app/ddl/TRNTYPE.ddl"),
+        "the DDL is not read"
+    );
 }
 
 #[test]

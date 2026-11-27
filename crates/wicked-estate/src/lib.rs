@@ -168,11 +168,11 @@ fn not_indexed_reason(ext: &str) -> &'static str {
         // #662: each reason says what the graph lacks. The extractors are deferred (the feature
         // freeze), not ruled out.
         "ddl" | "db2" => {
-            "Db2 DDL: tables and views declared only here are not in the graph; deferred \
-             (wicked-estate#662)"
+            "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL \
+             EXEC SQL names is still a boundary node); deferred (wicked-estate#662)"
         }
         "csd" => {
-            "CICS CSD: transactions, programs and files defined only here are not in the graph; \
+            "CICS CSD: its transaction, program and file definitions are not in the graph; \
              deferred (wicked-estate#662)"
         }
         "mac" => {
@@ -5788,15 +5788,15 @@ mod tests {
         for (ext, reason) in [
             (
                 "ddl",
-                "Db2 DDL: tables and views declared only here are not in the graph; deferred (wicked-estate#662)",
+                "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a boundary node); deferred (wicked-estate#662)",
             ),
             (
                 "db2",
-                "Db2 DDL: tables and views declared only here are not in the graph; deferred (wicked-estate#662)",
+                "Db2 DDL: its table and view definitions are not in the graph (a table that COBOL EXEC SQL names is still a boundary node); deferred (wicked-estate#662)",
             ),
             (
                 "csd",
-                "CICS CSD: transactions, programs and files defined only here are not in the graph; deferred (wicked-estate#662)",
+                "CICS CSD: its transaction, program and file definitions are not in the graph; deferred (wicked-estate#662)",
             ),
             (
                 "mac",
@@ -5866,7 +5866,7 @@ mod tests {
                     ),
                     (
                         "export/REPROCT.ctl".to_string(),
-                        "mainframe control card (not VB6): no extractor yet (wicked-estate#662)"
+                        "mainframe control card (not VB6): its utility statements are not in the graph; deferred (wicked-estate#662)"
                             .to_string(),
                     ),
                     (

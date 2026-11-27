@@ -106,18 +106,21 @@ indexed ./demo (/tmp/demo.db) → 8 nodes, 11 edges, 2 files
 ### What gets indexed
 
 `wicked-estate index` walks the tree, dispatches each file to the matching tree-sitter extractor
-(by extension), runs EXTRACT→RESOLVE, and writes nodes and edges to SQLite. A file that no wired
-extractor reads is not indexed, and `index` reports it on stderr, one line per extension and
-reason (`NOT-INDEXED: .ddl: 6 file(s): <reason> (e.g. <path>)`), then a total. Check
+(by extension), runs EXTRACT→RESOLVE, and writes nodes and edges to SQLite. The walk skips
+hidden files, gitignored files and vendor/build directories. A walked file that no wired extractor
+reads is not indexed, and `index` reports it on stderr, one line per extension and reason
+(`NOT-INDEXED: .ddl: 6 file(s): <reason> (e.g. <path>)`), then a total. Check
 `wicked-estate stats` after indexing to confirm coverage.
 
 Wired extractors (v0.15.0): **103 of the 114 manifest languages** have wired tree-sitter
 extractors, plus **5 grammar-less mainframe extractors** (JCL, HLASM, RACF, IMS, MQ), the
 `EXEC CICS` / `EXEC SQL` links read from COBOL programs, and IaC via
-**cloudformation**/**kubernetes** sniff-dispatch. Db2 DDL, CICS CSD resource definitions,
-HLASM macro library members, mainframe control cards and scheduler definitions are not read yet;
-they are reported as NOT-INDEXED ([#662](https://github.com/mikeparcewski/wicked-estate/issues/662)).
-See
+**cloudformation**/**kubernetes** sniff-dispatch. These mainframe exports are not read yet and
+are reported as NOT-INDEXED ([#662](https://github.com/mikeparcewski/wicked-estate/issues/662)):
+Db2 DDL (`.ddl`, `.db2`), CICS CSD resource definitions (`.csd`), HLASM macro library members
+(`.mac`), mainframe control cards (`.ctl` that is not VB6) and scheduler definitions (`.ca7`,
+`.controlm`). DDL saved as `.sql` is read by the SQL extractor, which takes `CREATE TABLE` and
+`CREATE VIEW`. See
 `docs/language-coverage-matrix.md` (generated) for the full per-language matrix, and
 `wicked-estate plugins list` for runtime-loaded grammar plugins.
 
