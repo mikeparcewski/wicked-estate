@@ -205,6 +205,16 @@ mod tests {
         assert_ne!(ids[0], ids[1]);
     }
 
+    /// #679: the digest keeps whitespace but reads line ends as XML does, so a CRLF (or CR)
+    /// checkout of the same file keeps every id.
+    #[test]
+    fn a_crlf_checkout_keeps_the_ids_679() {
+        let lf = flow_ids(&[("Amount", "A\nB"), ("Amount", "A B")]);
+        assert_eq!(lf.len(), 2, "{lf:?}");
+        assert_eq!(flow_ids(&[("Amount", "A\r\nB"), ("Amount", "A B")]), lf);
+        assert_eq!(flow_ids(&[("Amount", "A\rB"), ("Amount", "A B")]), lf);
+    }
+
     /// Round 1 (agy P2-2): two conditions on one field under one rule (a range) are two
     /// nodes, told apart by content, and inserting a third condition moves neither.
     #[test]

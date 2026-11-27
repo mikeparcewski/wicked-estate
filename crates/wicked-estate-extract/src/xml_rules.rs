@@ -116,19 +116,23 @@ impl SourceId {
     }
 }
 
-/// FNV-1a over `text` with whitespace runs collapsed: a stable digest (no new dependency, and
-/// the same on every platform and toolchain, unlike `DefaultHasher`).
+/// FNV-1a over the element's bytes as written: a stable digest (no new dependency, and the same
+/// on every platform and toolchain, unlike `DefaultHasher`). Whitespace counts, so two literals
+/// that differ only in spacing stay apart (#679). Line ends are normalized first, as XML 1.0
+/// §2.11 requires of a parser (`\r\n` and a lone `\r` read as `\n`), so a CRLF checkout of a
+/// file gets the same ids as an LF one.
 fn content_digest(text: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for (i, word) in text.split_whitespace().enumerate() {
-        if i > 0 {
-            h ^= u64::from(b' ');
-            h = h.wrapping_mul(0x0100_0000_01b3);
+    let mut bytes = text.bytes().peekable();
+    while let Some(mut b) = bytes.next() {
+        if b == b'\r' {
+            if bytes.peek() == Some(&b'\n') {
+                bytes.next();
+            }
+            b = b'\n';
         }
-        for b in word.bytes() {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
     }
     h
 }
