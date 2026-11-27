@@ -119,10 +119,12 @@ impl SourceId {
 /// FNV-1a over the element's parsed content: a stable digest (no new dependency, and the same on
 /// every platform and toolchain, unlike `DefaultHasher`). It hashes the element's structure (tag
 /// names, attributes and text, each with a marker byte), so:
-/// - whitespace inside a value counts, and two literals that differ only in spacing stay apart
-///   (#679);
-/// - whitespace-only text between elements (indentation) is skipped, so re-indenting a file keeps
-///   every id (ADR-002: a reformat leaves identity unchanged);
+/// - the text of a leaf element (one with no child elements) is a value and always counts, even
+///   when it is only whitespace, so `A B` and `A  B`, or `<x></x>` and `<x> </x>`, stay apart
+///   (#679, #684);
+/// - whitespace-only text beside child elements is indentation and is skipped, so re-indenting a
+///   file keeps every id (ADR-002: a reformat leaves identity unchanged);
+/// - attributes are hashed in sorted order, because XML gives their order no meaning;
 /// - line ends arrive normalized by the parser (XML 1.0 §2.11), so a CRLF checkout keeps every id.
 ///
 /// The walk uses an explicit stack, so a deeply nested element cannot overflow the call stack.
@@ -134,29 +136,36 @@ fn content_digest(el: roxmltree::Node<'_, '_>) -> u64 {
         }
     }
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    // (node, true) closes an element that was opened earlier.
-    let mut stack = vec![(el, false)];
-    while let Some((n, close)) = stack.pop() {
+    // (node, close, beside_elements): `close` ends an element opened earlier, and
+    // `beside_elements` says the node's parent also has child elements.
+    let mut stack = vec![(el, false, false)];
+    while let Some((n, close, beside_elements)) = stack.pop() {
         if close {
             feed(&mut h, &[5]);
         } else if n.is_element() {
             feed(&mut h, &[1]);
             feed(&mut h, n.tag_name().name().as_bytes());
-            for a in n.attributes() {
+            let mut attrs: Vec<_> = n
+                .attributes()
+                .map(|a| (a.namespace(), a.name(), a.value()))
+                .collect();
+            attrs.sort_unstable();
+            for (_, name, value) in attrs {
                 feed(&mut h, &[2]);
-                feed(&mut h, a.name().as_bytes());
+                feed(&mut h, name.as_bytes());
                 feed(&mut h, &[3]);
-                feed(&mut h, a.value().as_bytes());
+                feed(&mut h, value.as_bytes());
             }
-            stack.push((n, true));
+            stack.push((n, true, false));
+            let has_elements = n.children().any(|c| c.is_element());
             let mut child = n.last_child();
             while let Some(c) = child {
-                stack.push((c, false));
+                stack.push((c, false, has_elements));
                 child = c.prev_sibling();
             }
         } else if n.is_text() {
             let text = n.text().unwrap_or("");
-            if !text.trim().is_empty() {
+            if !(beside_elements && text.trim().is_empty()) {
                 feed(&mut h, &[4]);
                 feed(&mut h, text.as_bytes());
             }
