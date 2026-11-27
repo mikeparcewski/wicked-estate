@@ -3484,6 +3484,78 @@ mod tests {
         );
     }
 
+    /// #668 codex-check v3 (DES-668, option A): a file saved during the run keeps estate's
+    /// pipeline (estate#657), so the definition it minted last run is not minted again. Its
+    /// name lost a candidate: the call parked between two `assist`s binds the one left, as a
+    /// full index of that state does.
+    #[test]
+    fn a_re_mint_stopped_by_a_mid_run_save_frees_the_parked_call_668() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let svc = root.join("src/svc.ts");
+        let text = std::fs::read_to_string(&svc).unwrap();
+        let from = "return helper(id).trim(); }";
+        assert!(text.contains(from));
+        std::fs::write(
+            &svc,
+            text.replacen(from, "return helper(id).trim() + assist(id); }", 1),
+        )
+        .unwrap();
+        let lib = root.join("src/lib/util.ts");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("export function assist(s: string): string { return s; }\n");
+        std::fs::write(&lib, text).unwrap();
+        let util = root.join("src/util.ts");
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched\n");
+        std::fs::write(&util, &text).unwrap();
+        let sql = format!(
+            "{}\nINSERT INTO nodes VALUES('function:synthetic-assist','function','assist','assist',\
+             'src/util.ts','typescript',3,3,0,40,NULL,'(s: string): string',NULL,1,0,0,0,NULL,NULL,\
+             NULL,0);",
+            lib_util_fell_back_sql()
+        );
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        let lib_assist = "ts-typescript . . . src/lib/util/assist().";
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            !calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t.ends_with("/assist().")),
+            "two assists: the call parks"
+        );
+        // Run 2 edits util.ts, and it is saved again after the mirror read it.
+        text.push_str("// edited\n");
+        std::fs::write(&util, &text).unwrap();
+        let (path, saved) = (util.clone(), format!("{text}// saved mid-run\n"));
+        TEST_MIRROR_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move |now: &str| {
+                if now == "after-mirror" {
+                    std::fs::write(&path, &saved).unwrap();
+                }
+            }))
+        });
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        TEST_MIRROR_HOOK.with(|h| *h.borrow_mut() = None);
+        assert!(
+            !store.all_nodes().unwrap().iter().any(|n| {
+                n.location.file == "src/util.ts"
+                    && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+            }),
+            "util.ts changed during the run: nothing is minted in it"
+        );
+        let calls = edges(&store, EdgeKind::Calls);
+        assert!(
+            calls_from(&calls, GET)
+                .iter()
+                .any(|(_, t, _)| t == lib_assist),
+            "one assist left: the parked call binds it: {:?}",
+            calls_from(&calls, GET)
+        );
+    }
+
     #[test]
     fn a_fall_through_call_named_like_a_codegraph_definition_stays_ambiguous_594() {
         // estate#594 (N1, W12): the same fall-back, with the call's only evidence the tsconfig
