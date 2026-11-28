@@ -3556,6 +3556,155 @@ mod tests {
         );
     }
 
+    /// estate#671: a mid-run save (estate#657) in a file the run re-extracts although its bytes
+    /// were unchanged when the run classified it. src/util.ts mints `assist`, which src/fmt.ts
+    /// (not in codegraph's database) calls by name, and it binds `render` in fmt.ts by name.
+    /// `run2` edits another file so that util.ts is re-extracted, and util.ts is saved after the
+    /// mirror read it. Re-extracting it would drop the minted `assist` and leave fmt.ts's edge
+    /// dangling, to be pruned with nothing parked (codex-check on #689). It is left exactly as
+    /// indexed instead, and the next run re-extracts it as a changed file. `caller` is fmt.ts's
+    /// function after `run2`. Returns the pass-1 rebind count of run 2.
+    fn a_re_extracted_file_saved_mid_run_is_left_for_the_next_run_671(
+        run2: impl FnOnce(&Path),
+        caller: &str,
+    ) -> usize {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        std::fs::write(
+            root.join("src/fmt.ts"),
+            "export function render(n: number): string { return assist(String(n)); }\n",
+        )
+        .unwrap();
+        let util = root.join("src/util.ts");
+        let mut text = std::fs::read_to_string(&util).unwrap();
+        text.push_str("// touched\n");
+        text.push_str("export function useRender(n: number): string { return render(n); }\n");
+        std::fs::write(&util, &text).unwrap();
+        let sql = format!(
+            "{}\nINSERT INTO nodes VALUES('function:synthetic-assist','function','assist','assist',\
+             'src/util.ts','typescript',3,3,0,40,NULL,'(s: string): string',NULL,1,0,0,0,NULL,NULL,\
+             NULL,0);",
+            lib_util_fell_back_sql()
+        );
+        let cfg = config(tmp.path());
+        let mut store = SqliteStore::open(tmp.path().join("g.db")).unwrap();
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        let minted_assist = |store: &SqliteStore| -> Vec<String> {
+            store
+                .all_nodes()
+                .unwrap()
+                .into_iter()
+                .filter(|n| {
+                    n.location.file == "src/util.ts"
+                        && n.name == "assist"
+                        && n.metadata.get("origin").and_then(|v| v.as_str()) == Some("codegraph")
+                })
+                .map(|n| n.symbol.0)
+                .collect()
+        };
+        let assist = minted_assist(&store);
+        assert_eq!(assist.len(), 1, "util.ts's assist is minted: {assist:?}");
+        let assist = assist[0].clone();
+        let binds = |store: &SqliteStore, from: &str, to: &str| {
+            edges(store, EdgeKind::Calls)
+                .iter()
+                .any(|(s, t, _)| s.contains(from) && t == to)
+        };
+        assert!(
+            binds(&store, "src/fmt/render", &assist),
+            "fmt.ts's call binds the minted assist by name: {:?}",
+            edges(&store, EdgeKind::Calls)
+        );
+        assert!(
+            edges(&store, EdgeKind::Calls)
+                .iter()
+                .any(|(s, t, by)| s.contains("src/util/useRender")
+                    && t.contains("src/fmt/render")
+                    && !by.starts_with("codegraph:")),
+            "util.ts's call binds render by name"
+        );
+        let indexed = store.file_digest("src/util.ts").unwrap();
+        run2(&root);
+        let (path, saved) = (util.clone(), format!("{text}// saved mid-run\n"));
+        TEST_MIRROR_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move |now: &str| {
+                if now == "after-mirror" {
+                    std::fs::write(&path, &saved).unwrap();
+                }
+            }))
+        });
+        crate::TEST_REBIND_FILES.with(|count| count.set(0));
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        TEST_MIRROR_HOOK.with(|h| *h.borrow_mut() = None);
+        let rebinds = crate::TEST_REBIND_FILES.with(|count| count.get());
+        assert_eq!(
+            minted_assist(&store),
+            std::slice::from_ref(&assist),
+            "util.ts changed during the run: it is left as indexed, its minted assist too"
+        );
+        assert!(
+            binds(&store, caller, &assist),
+            "the call into util.ts's assist keeps its edge: {:?}",
+            edges(&store, EdgeKind::Calls)
+        );
+        assert_eq!(
+            store.file_digest("src/util.ts").unwrap(),
+            indexed,
+            "util.ts keeps the digest it was indexed with, so the next run re-extracts it"
+        );
+        // The next run re-extracts util.ts as a changed file; its codegraph facts still mint
+        // the same assist.
+        index(&mut store, &root, Some(&cfg), Some(&sql));
+        assert_ne!(store.file_digest("src/util.ts").unwrap(), indexed);
+        assert_eq!(minted_assist(&store), std::slice::from_ref(&assist));
+        assert!(
+            binds(&store, caller, &assist),
+            "{:?}",
+            edges(&store, EdgeKind::Calls)
+        );
+        rebinds
+    }
+
+    /// estate#671 as filed: a new `render` elsewhere is a gained candidate, so the homonym pass
+    /// re-extracts util.ts in pass 1. fmt.ts is unchanged: only util.ts's staying keeps its edge.
+    #[test]
+    fn a_rebind_file_saved_mid_run_keeps_what_others_bind_to_671() {
+        let rebinds = a_re_extracted_file_saved_mid_run_is_left_for_the_next_run_671(
+            |root| {
+                std::fs::write(
+                    root.join("src/fmt2.ts"),
+                    "export function render(n: number): string { return `${n}`; }\n",
+                )
+                .unwrap();
+            },
+            "src/fmt/render",
+        );
+        assert!(
+            rebinds > 0,
+            "render gained a candidate: util.ts is a rebind file"
+        );
+    }
+
+    /// The same save in pass 0: renaming `render` changes a callee util.ts calls, so util.ts is
+    /// a forced value-flow caller (#220), re-extracted without being in the changed set.
+    #[test]
+    fn a_forced_caller_saved_mid_run_keeps_what_others_bind_to_671() {
+        let rebinds = a_re_extracted_file_saved_mid_run_is_left_for_the_next_run_671(
+            |root| {
+                std::fs::write(
+                    root.join("src/fmt.ts"),
+                    "export function rendered(n: number): string { return assist(String(n)); }\n",
+                )
+                .unwrap();
+            },
+            "src/fmt/rendered",
+        );
+        assert_eq!(
+            rebinds, 0,
+            "util.ts was re-extracted as a forced caller, in pass 0"
+        );
+    }
+
     #[test]
     fn a_fall_through_call_named_like_a_codegraph_definition_stays_ambiguous_594() {
         // estate#594 (N1, W12): the same fall-back, with the call's only evidence the tsconfig

@@ -3105,6 +3105,9 @@ fn index_path_inner(
     let mut read_digests = Vec::new();
     // Files whose bytes changed between classification and extraction (estate#657).
     let changed_during_run = std::sync::Mutex::new(Vec::new());
+    // Files re-extracted outside the changed seed (forced value-flow callers, homonym rebind
+    // files) whose bytes changed by their read: left exactly as indexed this run (estate#671).
+    let mut deferred: HashSet<String> = HashSet::new();
     let mut chunk_start = 0;
     for pass in 0..2 {
         while chunk_start < changed.len() {
@@ -3121,6 +3124,7 @@ fn index_path_inner(
             #[cfg(test)]
             test_index_write_hook();
             let read_failures = std::sync::Mutex::new(Vec::new());
+            let deferred_now = std::sync::Mutex::new(Vec::new());
             let chunk_digests = std::sync::Mutex::new(Vec::new());
             let extractions: Vec<(String, wicked_estate_core::Extraction, String)> = chunk
                 .par_iter()
@@ -3146,6 +3150,18 @@ fn index_path_inner(
                         }
                     };
                     if source.as_ref().is_some_and(|s| s.digest != fw.digest) {
+                        // A file the run re-extracts only for other files' sake, saved since
+                        // the run classified it unchanged: re-extracting it would drop the nodes
+                        // other files bind to (codegraph's minted ones too) with no candidate
+                        // tracking. It stays as indexed, digest included, so the next run sees
+                        // it changed and re-extracts it as a changed file (estate#671).
+                        if !changed_seed.contains(&fw.rel) {
+                            deferred_now
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(fw.rel.clone());
+                            return None;
+                        }
                         changed_during_run
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -3333,9 +3349,13 @@ fn index_path_inner(
             for file in &read_failures {
                 unreadable_files.push((file.clone(), "read failed".to_string()));
             }
+            for path in deferred_now.into_inner().unwrap_or_else(|e| e.into_inner()) {
+                eprintln!("DEFERRED: {path} changed during the run; indexed next run");
+                deferred.insert(path);
+            }
             let rels: Vec<&str> = chunk
                 .iter()
-                .filter(|fw| !read_failures.contains(&fw.rel))
+                .filter(|fw| !read_failures.contains(&fw.rel) && !deferred.contains(&fw.rel))
                 .map(|fw| fw.rel.as_str())
                 .collect();
             store.begin_batch()?;
@@ -3427,7 +3447,7 @@ fn index_path_inner(
             let files: HashSet<String> = changed
                 .iter()
                 .map(|fw| fw.rel.clone())
-                .filter(|rel| !late.contains(rel))
+                .filter(|rel| !late.contains(rel) && !deferred.contains(rel))
                 .collect();
             let mut nodes = Vec::new();
             for symbol in &extracted_symbols {
@@ -3571,6 +3591,10 @@ fn index_path_inner(
         }
         // Identical source cannot introduce another name; pass two never schedules a third.
     }
+    // A deferred file was not re-extracted: it counts as unchanged from here on (#671).
+    changed.retain(|fw| !deferred.contains(&fw.rel));
+    unchanged_count += deferred.len();
+    drop(deferred);
     // Release the pre-run population before materializing the resolution index.
     drop(pre_run_symbols);
     drop(old_candidates);
