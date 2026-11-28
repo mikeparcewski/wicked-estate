@@ -5800,14 +5800,21 @@ mod tests {
             .collect();
         assert_eq!(conditions.len(), 2, "{conditions:?}");
         assert_ne!(conditions[0].symbol, conditions[1].symbol);
+        // The rule evaluates each condition: two Evaluates edges, one into each.
+        let rule = nodes
+            .iter()
+            .find(|n| n.location.file == rel && n.name == "Matches")
+            .expect("rule node");
         let edges = GraphRead::all_edges(&store).unwrap();
-        for c in &conditions {
-            assert!(
-                edges.iter().any(|e| e.target == c.symbol),
-                "no edge into {:?}",
-                c.symbol
-            );
-        }
+        let mut evaluated: Vec<&SymbolId> = edges
+            .iter()
+            .filter(|e| e.source == rule.symbol && e.kind == EdgeKind::Evaluates)
+            .map(|e| &e.target)
+            .collect();
+        evaluated.sort();
+        let mut expected = vec![&conditions[0].symbol, &conditions[1].symbol];
+        expected.sort();
+        assert_eq!(evaluated, expected);
         let text = store.file_content(rel).unwrap().expect("stored");
         assert!(!text.contains(&a) && !text.contains(&b), "{text}");
     }
