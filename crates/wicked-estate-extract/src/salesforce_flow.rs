@@ -280,4 +280,16 @@ mod tests {
             "{before:?} -> {after:?}"
         );
     }
+
+    /// #692: two conditions with identical content (estate#690 masks equal-length literals on a
+    /// secret field alike) stay two nodes, and the first keeps the id it has beside a distinct
+    /// sibling, so #684's ids do not move.
+    #[test]
+    fn identical_conditions_stay_two_nodes_692() {
+        let twice = flow_ids(&[("Amount", "EqualTo"), ("Amount", "EqualTo")]);
+        assert_eq!(twice.len(), 2, "{twice:?}");
+        assert_ne!(twice[0], twice[1]);
+        let distinct = flow_ids(&[("Amount", "EqualTo"), ("Amount", "LessThan")]);
+        assert_eq!(twice[0], distinct[0], "{twice:?} vs {distinct:?}");
+    }
 }
