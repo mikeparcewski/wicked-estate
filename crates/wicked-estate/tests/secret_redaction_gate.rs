@@ -30,6 +30,8 @@ const PLANTED: &[&str] = &[
     "PLANTEDcredFile44", // committed credentials.json (excluded file)
     "PLANTEDtfvarsPw61", // terraform variables file
     "PLANTEDpropsLike71", // INI file
+    "PLANTEDflowPw35", // Salesforce Flow condition on a secret-named field (#686)
+    "PLANTEDdmnProp36", // Camunda DMN property named like a secret (#686)
 ];
 /// Token-shaped values planted through the ingress that never pass the extractor (G7.9).
 const INGRESS: &[&str] = &[
@@ -127,6 +129,17 @@ fn fixture(root: &Path) {
         "db_password = \"PLANTEDtfvarsPw61\"\nregion = \"us-east-1\"\n",
     );
     write(root, "conf/app.ini", "[db]\nhost = PLANTEDpropsLike71\n");
+    // #686: XML rules files the default build indexes (their stored text is the masked text).
+    write(
+        root,
+        "flows/Reset.flow-meta.xml",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Flow xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n    <decisions>\n        <name>Check_Reset</name>\n        <rules>\n            <name>Matches</name>\n            <conditionLogic>and</conditionLogic>\n            <conditions>\n                <leftValueReference>User.@PW_KEY@__c</leftValueReference>\n                <operator>EqualTo</operator>\n                <rightValue>\n                    <stringValue>PLANTEDflowPw35</stringValue>\n                </rightValue>\n            </conditions>\n        </rules>\n    </decisions>\n</Flow>\n",
+    );
+    write(
+        root,
+        "rules/loan.dmn",
+        "<definitions xmlns=\"https://www.omg.org/spec/DMN/20191111/MODEL/\" xmlns:camunda=\"http://camunda.org/schema/1.0/dmn\" id=\"loans\" name=\"Loans\">\n  <decision id=\"a\" name=\"A\">\n    <extensionElements>\n      <camunda:properties>\n        <camunda:property name=\"db_@PW_KEY@\" value=\"PLANTEDdmnProp36\"/>\n      </camunda:properties>\n    </extensionElements>\n  </decision>\n</definitions>\n",
+    );
     // A drop-in rule (a user-declared identity extractor) over a catalog holding a token shape.
     write(
         root,
@@ -451,6 +464,29 @@ fn fresh_index_stores_and_serves_no_planted_value() {
         content.contains("image: acme/api:1.2"),
         "trusted compose field kept"
     );
+    // #686: the XML rules files were indexed and stored masked, so their absence checks above
+    // are not vacuous.
+    {
+        let store = SqliteStore::open(&db).unwrap();
+        let nodes = store.all_nodes().unwrap();
+        for (rel, kept) in [
+            ("flows/Reset.flow-meta.xml", "<leftValueReference>User."),
+            ("rules/loan.dmn", "<camunda:property name=\"db_"),
+        ] {
+            let text = store
+                .file_content(rel)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{rel} was not stored"));
+            assert!(
+                text.contains(kept) && text.contains("REDACTED"),
+                "{rel}: {text}"
+            );
+            assert!(
+                nodes.iter().any(|n| n.location.file == rel),
+                "{rel} has no node"
+            );
+        }
+    }
     assert_no_value("CLI answers", &cli_answers(dbs), &needles());
     let mcp = mcp_answers(&db);
     assert!(
@@ -726,6 +762,55 @@ fn index_migrates_an_old_store_on_its_first_write_open() {
     );
     assert_no_value("index output", &out, &old_needles());
     assert_clean("index-migrated store", &scan_db(&db, &old_needles()));
+}
+
+/// #686: a store an epoch-1 build wrote holds XML element values unmasked. Epoch 2 re-redacts it
+/// on the first write open, although no file changed (so the index alone would not rewrite it).
+#[test]
+fn an_epoch_1_store_with_an_xml_secret_is_masked_on_open_686() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fixture(&root);
+    let db = dir.path().join("e1.db");
+    let dbs = db.to_str().unwrap();
+    let (ok, out) = run(&["index", root.to_str().unwrap(), "--db", dbs]);
+    assert!(ok, "index: {out}");
+    // What an epoch-1 build stored: the Flow file's raw text, its digest current, epoch 1.
+    let rel = "flows/Reset.flow-meta.xml";
+    let raw = std::fs::read_to_string(root.join(rel)).unwrap();
+    {
+        let mut s = SqliteStore::open(&db).unwrap();
+        s.begin_batch().unwrap();
+        s.set_file_content(rel, &raw).unwrap();
+        s.commit_batch().unwrap();
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("UPDATE meta SET v='1' WHERE k='redaction_epoch'", [])
+        .unwrap();
+    drop(conn);
+    assert!(
+        all_content(&db).contains("PLANTEDflowPw35"),
+        "the epoch-1 store holds the value"
+    );
+    let (ok, out) = run(&["index", root.to_str().unwrap(), "--db", dbs]);
+    assert!(ok, "index: {out}");
+    assert!(
+        out.contains("REDACTION: cleaned a store written before secret redaction"),
+        "{out}"
+    );
+    let text = SqliteStore::open(&db)
+        .unwrap()
+        .file_content(rel)
+        .unwrap()
+        .expect("the Flow file is still stored");
+    assert!(
+        !text.contains("PLANTEDflowPw35") && text.contains("REDACTED"),
+        "{text}"
+    );
+    assert_clean(
+        "epoch-1 store after its first write open",
+        &scan_db(&db, &["PLANTEDflowPw35"]),
+    );
 }
 
 /// Review x0-r1 L1: a code graph written before `indexed_root` existed (file rows, no root) is

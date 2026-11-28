@@ -22,7 +22,11 @@ use regex::Regex;
 /// Version of the redaction policy a store was cleaned with. A code-graph store whose
 /// [`REDACTION_EPOCH_KEY`] meta value is lower (or absent) holds text written before this policy
 /// and must be migrated before its text is served.
-pub const REDACTION_EPOCH: u32 = 1;
+///
+/// 2 (estate#686): XML values under secret names are masked. A store cleaned at 1 is re-redacted
+/// once on its first write open (text rewritten, every file re-extracted, the file vacuumed); the
+/// bump also covers the JSON rules redaction change of #670, which shipped without one.
+pub const REDACTION_EPOCH: u32 = 2;
 /// The meta key recording [`REDACTION_EPOCH`] on a migrated or freshly indexed store.
 pub const REDACTION_EPOCH_KEY: &str = "redaction_epoch";
 
