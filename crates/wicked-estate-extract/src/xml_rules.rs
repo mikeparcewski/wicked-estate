@@ -38,7 +38,9 @@
 //! An element without one is keyed under its nearest keyed ancestor:
 //! `"<anchor key>/<unmapped tags>/<tag>:<name>"`. Two such elements with one key (two Flow
 //! conditions on one field under one rule) each get `~<digest of the element's text>`, never a
-//! position, so an inserted sibling moves no id; byte-identical elements are one node.
+//! position, so an inserted sibling moves no id. Byte-identical siblings (redaction masks two
+//! equal-length secrets to the same bytes) stay separate: the second and later take `.<n>`, in
+//! document order among those identical siblings only (#692).
 //!
 //! With no keyed ancestor at all (a format without ids, such as GDST), the id is the 0.37 form,
 //! `"<file>::<ancestor tags>/<tag>::<name>"`, where same-named elements are one node (#675).
@@ -290,8 +292,11 @@ fn element_ids(
             }
         }
         // Two anchored elements with one key (two conditions on one field under one rule) are
-        // told apart by their content, never by position. Identical content is one node.
+        // told apart by their content, never by position. Siblings with identical content (two
+        // equal-length secrets masked to the same bytes) stay separate nodes: the second and
+        // later take an ordinal among those identical siblings only (#692).
         let mut uses: HashMap<String, usize> = HashMap::new();
+        let mut seen: HashMap<(String, u64), usize> = HashMap::new();
         for k in keyed.iter().filter(|k| k.anchored && !k.own) {
             *uses.entry(k.key.clone()).or_default() += 1;
         }
@@ -304,7 +309,14 @@ fn element_ids(
         } in keyed
         {
             let key = if anchored && !own && uses[&key] > 1 {
-                format!("{key}~{:016x}", content_digest(n))
+                let digest = content_digest(n);
+                let nth = seen.entry((key.clone(), digest)).or_default();
+                let key = match *nth {
+                    0 => format!("{key}~{digest:016x}"),
+                    n => format!("{key}~{digest:016x}.{n}"),
+                };
+                *nth += 1;
+                key
             } else {
                 key
             };
@@ -459,7 +471,8 @@ impl Extractor for XmlRulesExtractor {
         let ids = element_ids(&doc, &file.path, &node_map, &self.source_ids);
 
         // Walk all elements in document order, emitting nodes for mapped, named elements. Elements
-        // that share an id (identical content) are one node, emitted once.
+        // that share an id (same-named elements with no keyed ancestor, #675) are one node,
+        // emitted once.
         let mut emitted = std::collections::HashSet::new();
         for node in doc.descendants() {
             let Some((name, symbol)) = ids.get(&node.id()) else {
