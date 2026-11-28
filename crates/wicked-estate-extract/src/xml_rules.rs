@@ -205,7 +205,7 @@ fn element_ids(
     node_map: &std::collections::HashMap<&str, &NodeMapping>,
     source_ids: &std::collections::HashMap<String, SourceId>,
 ) -> std::collections::HashMap<roxmltree::NodeId, (String, SymbolId)> {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     let mapped: Vec<roxmltree::Node<'_, '_>> = doc
         .descendants()
         .filter(|n| n.is_element() && node_map.contains_key(n.tag_name().name()))
@@ -232,6 +232,8 @@ fn element_ids(
     // Final keys of anchored elements (those with a source id, or under one).
     let mut anchors: HashMap<roxmltree::NodeId, String> = HashMap::new();
     let mut ids = HashMap::new();
+    // Every key handed out so far, so a suffixed key never lands on a key a name spells out.
+    let mut taken: HashSet<String> = HashSet::new();
     for level in by_depth.into_values() {
         let mut keyed: Vec<Keyed<'_, '_>> = Vec::new();
         for n in level {
@@ -294,11 +296,16 @@ fn element_ids(
         // Two anchored elements with one key (two conditions on one field under one rule) are
         // told apart by their content, never by position. Siblings with identical content (two
         // equal-length secrets masked to the same bytes) stay separate nodes: the second and
-        // later take an ordinal among those identical siblings only (#692).
+        // later take an ordinal among those identical siblings only (#692). A name that spells
+        // out a suffixed key (a label `Age~<digest>.1`) keeps it, and the suffix moves on.
         let mut uses: HashMap<String, usize> = HashMap::new();
         let mut seen: HashMap<(String, u64), usize> = HashMap::new();
         for k in keyed.iter().filter(|k| k.anchored && !k.own) {
             *uses.entry(k.key.clone()).or_default() += 1;
+        }
+        let suffixed = |k: &Keyed<'_, '_>| k.anchored && !k.own && uses[&k.key] > 1;
+        for k in keyed.iter().filter(|k| !suffixed(k)) {
+            taken.insert(k.key.clone());
         }
         for Keyed {
             node: n,
@@ -311,12 +318,16 @@ fn element_ids(
             let key = if anchored && !own && uses[&key] > 1 {
                 let digest = content_digest(n);
                 let nth = seen.entry((key.clone(), digest)).or_default();
-                let key = match *nth {
-                    0 => format!("{key}~{digest:016x}"),
-                    n => format!("{key}~{digest:016x}.{n}"),
-                };
-                *nth += 1;
-                key
+                loop {
+                    let candidate = match *nth {
+                        0 => format!("{key}~{digest:016x}"),
+                        n => format!("{key}~{digest:016x}.{n}"),
+                    };
+                    *nth += 1;
+                    if taken.insert(candidate.clone()) {
+                        break candidate;
+                    }
+                }
             } else {
                 key
             };
