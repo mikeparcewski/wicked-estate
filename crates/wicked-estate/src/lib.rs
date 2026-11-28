@@ -5770,6 +5770,55 @@ mod tests {
         }
     }
 
+    /// #692: a Flow rule with two conditions on one secret field, whose literals have one length,
+    /// keeps both conditions and both edges after redaction masks the literals alike, and stores
+    /// neither literal.
+    #[cfg(feature = "xml-rules")]
+    #[test]
+    fn masked_flow_conditions_stay_two_nodes_and_two_edges_692() {
+        let tmp = tempfile::tempdir().unwrap();
+        let field = format!("User.{}__c", ["Pass", "word"].concat());
+        let (a, b) = (["summ", "er01"].concat(), ["wint", "er02"].concat());
+        let condition = |literal: &str| {
+            format!(
+                "            <conditions>\n                <leftValueReference>{field}</leftValueReference>\n                <operator>EqualTo</operator>\n                <rightValue>\n                    <stringValue>{literal}</stringValue>\n                </rightValue>\n            </conditions>\n"
+            )
+        };
+        let flow = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Flow xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n    <decisions>\n        <name>Check_Reset</name>\n        <label>Check Reset</label>\n        <rules>\n            <name>Matches</name>\n            <label>Matches</label>\n            <conditionLogic>or</conditionLogic>\n{}{}        </rules>\n    </decisions>\n</Flow>\n",
+            condition(&a),
+            condition(&b)
+        );
+        let rel = "Reset.flow-meta.xml";
+        std::fs::write(tmp.path().join(rel), flow).unwrap();
+        let mut store = MemStore::new();
+        index_path_as(&mut store, tmp.path(), None).unwrap();
+        let nodes = GraphRead::all_nodes(&store).unwrap();
+        let conditions: Vec<&Node> = nodes
+            .iter()
+            .filter(|n| n.location.file == rel && n.name == field)
+            .collect();
+        assert_eq!(conditions.len(), 2, "{conditions:?}");
+        assert_ne!(conditions[0].symbol, conditions[1].symbol);
+        // The rule evaluates each condition: two Evaluates edges, one into each.
+        let rule = nodes
+            .iter()
+            .find(|n| n.location.file == rel && n.name == "Matches")
+            .expect("rule node");
+        let edges = GraphRead::all_edges(&store).unwrap();
+        let mut evaluated: Vec<&SymbolId> = edges
+            .iter()
+            .filter(|e| e.source == rule.symbol && e.kind == EdgeKind::Evaluates)
+            .map(|e| &e.target)
+            .collect();
+        evaluated.sort();
+        let mut expected = vec![&conditions[0].symbol, &conditions[1].symbol];
+        expected.sort();
+        assert_eq!(evaluated, expected);
+        let text = store.file_content(rel).unwrap().expect("stored");
+        assert!(!text.contains(&a) && !text.contains(&b), "{text}");
+    }
+
     /// S3 PARTIAL FAILURE: one rules file the extractor rejects (malformed DMN XML) does not stop
     /// the others, and it keeps its File node (a RULES-PARSE line says so) instead of vanishing.
     #[cfg(feature = "xml-rules")]

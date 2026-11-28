@@ -169,6 +169,15 @@ mod tests {
     }
 
     fn flow_ids(conditions: &[(&str, &str)]) -> Vec<String> {
+        flow_nodes(conditions)
+            .into_iter()
+            .filter(|(name, _)| name == "Amount")
+            .map(|(_, symbol)| symbol)
+            .collect()
+    }
+
+    /// (name, symbol) of every node of a one-rule Flow with these (field, operator) conditions.
+    fn flow_nodes(conditions: &[(&str, &str)]) -> Vec<(String, String)> {
         let conditions: String = conditions
             .iter()
             .map(|(field, op)| {
@@ -189,11 +198,7 @@ mod tests {
             text,
         };
         let ex = SalesforceFlowExtractor::new().extract(&file).unwrap();
-        ex.nodes
-            .into_iter()
-            .filter(|n| n.name == "Amount")
-            .map(|n| n.symbol.0)
-            .collect()
+        ex.nodes.into_iter().map(|n| (n.name, n.symbol.0)).collect()
     }
 
     /// #679: two conditions on one field that differ only in whitespace inside a literal are
@@ -279,5 +284,47 @@ mod tests {
             before.iter().all(|id| after.contains(id)),
             "{before:?} -> {after:?}"
         );
+    }
+
+    /// #692: two conditions with identical content (estate#690 masks equal-length literals on a
+    /// secret field alike) stay two nodes, and the first keeps the id it has beside a distinct
+    /// sibling, so #684's ids do not move.
+    #[test]
+    fn identical_conditions_stay_two_nodes_692() {
+        let twice = flow_ids(&[("Amount", "EqualTo"), ("Amount", "EqualTo")]);
+        assert_eq!(twice.len(), 2, "{twice:?}");
+        assert_ne!(twice[0], twice[1]);
+        let distinct = flow_ids(&[("Amount", "EqualTo"), ("Amount", "LessThan")]);
+        assert_eq!(twice[0], distinct[0], "{twice:?} vs {distinct:?}");
+    }
+
+    /// #692 review: a field name that spells out the second sibling's suffixed key
+    /// (`Amount~<digest>.1`) neither takes that sibling's id nor hides it; all three stay nodes.
+    #[test]
+    fn a_name_spelling_a_suffixed_key_does_not_hide_a_sibling_692() {
+        let twice = flow_ids(&[("Amount", "EqualTo"), ("Amount", "EqualTo")]);
+        let digest = twice[0].split('~').nth(1).unwrap()[..16].to_string();
+        let crafted = format!("Amount~{digest}.1");
+        let nodes = flow_nodes(&[
+            ("Amount", "EqualTo"),
+            (crafted.as_str(), "EqualTo"),
+            ("Amount", "EqualTo"),
+        ]);
+        let amounts: Vec<&String> = nodes
+            .iter()
+            .filter(|(n, _)| n == "Amount")
+            .map(|(_, s)| s)
+            .collect();
+        assert_eq!(amounts.len(), 2, "{nodes:?}");
+        let spelled: Vec<&String> = nodes
+            .iter()
+            .filter(|(n, _)| *n == crafted)
+            .map(|(_, s)| s)
+            .collect();
+        assert_eq!(spelled.len(), 1, "{nodes:?}");
+        let mut all = vec![amounts[0], amounts[1], spelled[0]];
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 3, "{nodes:?}");
     }
 }
