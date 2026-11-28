@@ -8,7 +8,7 @@ Release on the train-19 cut 8addcc73, carrying 9 PRs since 0.37.1: #677, #681, #
 
 ### Upgrade note (one time per store)
 
-- A store written by an earlier build is re-redacted, fully re-extracted and vacuumed once, on its first write open by 0.38.0 (redaction epoch 2, #686, #690). The first `index` after the upgrade takes about as long as a full index of the repository and rewrites the store file; later runs are incremental again.
+- A store written by an earlier build is migrated once, on its first write open by 0.38.0 (redaction epoch 2, #686, #690): its stored text is re-redacted, derived records are cleared and every file is marked for re-extraction, and the file is vacuumed. The next `index` then re-extracts every file, so it takes about as long as a full index; later runs are incremental again.
 
 ### Added
 
