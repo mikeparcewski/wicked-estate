@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [0.38.0] — 2026-11-28
+
+Release on the train-19 cut 8addcc73, carrying 9 PRs since 0.37.1: #677, #681, #683, #684, #688, #687, #691, #689, #690. Minor, not patch: the XML rules formats are in the default build (#681), and stores move to redaction epoch 2 (#690). The entries were written from each PR's changelog entry (from the PR description where it had none).
+
+### Upgrade note (one time per store)
+
+- A store written by an earlier build is re-redacted, fully re-extracted and vacuumed once, on its first write open by 0.38.0 (redaction epoch 2, #686, #690). The first `index` after the upgrade takes about as long as a full index of the repository and rewrites the store file; later runs are incremental again.
+
+### Added
+
+- `index` reads CLIPS/Jess (`.clp`), IBM ODM IRL (`.irl`), Drools GDST (`.gdst`), Camunda DMN, Progress Corticon, Salesforce Flow (`*.flow-meta.xml`), and AWS Config rule and Azure Policy definitions (`.json`, by their shape) into the rules graph. The XML formats are in the default build (#667, #681).
+
+### Fixed
+
+- Redaction: XML values under secret names are masked in stored text and nodes: element text, name/value pairs (Hadoop, Maven, Salesforce Flow) and key/value attribute pairs (.NET, Camunda) (#686, #690).
+- DMN and Salesforce Flow elements that share a name are separate nodes, with ids from the format's own ids, so adding, moving or reordering elements does not move a requirement annotation (#673, #675, #677).
+- A Drools GDST decision table links to its condition columns (`Evaluates`) and action columns (`Produces`) (#682, #683).
+- Two XML rules conditions on one field whose literals differ only in spacing are two nodes, not one; re-indenting, attribute order and CRLF line ends keep their ids (#679, #684).
+- NOT-INDEXED reasons for Db2 DDL, CICS CSD, HLASM macro members, mainframe control cards and scheduler definitions say what the graph lacks and that the extractor is deferred; getting-started no longer calls unread files "silently skipped" (#662, #687).
+- A file saved mid-run that was re-extracted only because of another file keeps the nodes other files bind to, so a caller's edge is not left dangling and pruned (#671, #689).
+- A read-only open that refuses a store names the writer's and the reader's versions; a writer open records `meta.writer_version` (#601, #691).
+
+### Internal
+
+- test(dmn): drop a useless `format!` that clippy 1.100.1 rejects (#688).
+
 ## [0.37.1] — 2026-11-27
 
 Release on the train-18 cut 62960bea, carrying 5 PRs since 0.37.0: #663, #668, #669, #670, #680. The entries were written from each PR's changelog entry.
